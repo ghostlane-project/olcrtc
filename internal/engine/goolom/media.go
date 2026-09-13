@@ -58,7 +58,9 @@ func newWebRTCAPI(resolver protect.Lookup) (*webrtc.API, error) {
 		return nil, fmt.Errorf("register default codecs: %w", err)
 	}
 	interceptorRegistry := &interceptor.Registry{}
-	if err := webrtc.RegisterDefaultInterceptors(mediaEngine, interceptorRegistry); err != nil {
+	if err := webrtc.RegisterDefaultInterceptorsWithOptions(
+		mediaEngine, interceptorRegistry, engine.DefaultInterceptorOptions()...,
+	); err != nil {
 		return nil, fmt.Errorf("register default interceptors: %w", err)
 	}
 	return webrtc.NewAPI(
