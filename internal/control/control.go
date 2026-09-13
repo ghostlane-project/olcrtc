@@ -286,14 +286,7 @@ func (s *state) sendProbe(ctx context.Context) error {
 	}
 
 	s.mu.Lock()
-	timedOut := 0
-	for seq, sent := range s.pending {
-		if now.Sub(sent) < s.cfg.Timeout {
-			continue
-		}
-		delete(s.pending, seq)
-		timedOut++
-	}
+	timedOut := s.expireProbes(now)
 	stalledNow := 0
 	// `moved` alone is not enough to excuse a timeout: a peer can keep
 	// sending down a link we can no longer answer on, which is the exact
@@ -333,6 +326,20 @@ func (s *state) sendProbe(ctx context.Context) error {
 		Seq:          seq,
 		SentUnixNano: now.UnixNano(),
 	})
+}
+
+// expireProbes drops every ping that has waited longer than the timeout and
+// reports how many. The caller holds s.mu.
+func (s *state) expireProbes(now time.Time) int {
+	timedOut := 0
+	for seq, sent := range s.pending {
+		if now.Sub(sent) < s.cfg.Timeout {
+			continue
+		}
+		delete(s.pending, seq)
+		timedOut++
+	}
+	return timedOut
 }
 
 func (s *state) handlePong(msg Message) {

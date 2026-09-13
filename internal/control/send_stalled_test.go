@@ -35,7 +35,7 @@ func TestSendStalledEndsAnOtherwiseHealthySession(t *testing.T) {
 			Interval:      10 * time.Millisecond,
 			Timeout:       time.Second,
 			Failures:      100,
-			SendStalled:   func() bool { return stalled.Load() },
+			SendStalled:   stalled.Load,
 			OnSendStalled: func() { reported.Add(1) },
 		})
 	}()

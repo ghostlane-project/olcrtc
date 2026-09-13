@@ -16,7 +16,7 @@ import (
 func TestSendStalledIsSetByATimeoutAndClearedByASend(t *testing.T) {
 	clientKeys, _ := newTestKeyPair(t)
 	var ready atomic.Bool
-	link := &stubLink{canSendFn: func() bool { return ready.Load() }}
+	link := &stubLink{canSendFn: ready.Load}
 	conn := New(link, clientKeys)
 	conn.writeTimeout = 20 * time.Millisecond
 
