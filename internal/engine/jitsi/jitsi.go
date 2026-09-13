@@ -82,6 +82,9 @@ type Session struct {
 	trickleCancel context.CancelFunc
 
 	sendQueue chan []byte
+	// backlogGauge stands in for bridgeBacklog in tests; nil means the real
+	// gauge. See waitBridgeRoom.
+	backlogGauge func() int
 	// peerQueues holds one bounded queue per addressed peer, so a client that
 	// cannot drain its share does not hold the room's other clients behind
 	// it. peerWake is buffered(1): "some peer queue has data".

@@ -23,6 +23,25 @@ const (
 	// colibriClassEndpointMessage is the JVB bridge-channel message class
 	// used for opaque raw payloads (see endpointMessage and decodeRaw).
 	colibriClassEndpointMessage = "EndpointMessage"
+
+	// bridgeBacklogHighWater bounds what may pile up below sendLoop on its
+	// way out: pion's SCTP association when the bridge is the JVB's data
+	// channel, the j library's 1024-message queue when it is the colibri
+	// websocket. Neither pushes back on its own - DataChannel.SendText never
+	// blocks, and the websocket queue is 16 MB deep - so the bounded queues
+	// above this point were bounding nothing: the sender's memory was the
+	// only limit. Measured on a ~5 Mbit/s SCTP bridge, six parallel
+	// downloads put 85 MB into the server process in eight seconds, two
+	// minutes of queue that every later frame - connect acks, pongs - sat
+	// behind; each connect failed at its deadline and liveness tore the
+	// session down (olcbox#23). The gauge counts bytes in flight as well as
+	// bytes pending, and in flight is a congestion window's worth, so the
+	// mark has to sit above what a fast path keeps in the air or it would
+	// cap throughput: 512 KB, the same figure the goolom engine uses. That
+	// is thirty-two full messages, under a second at 5 Mbit/s, and many poll
+	// intervals at any rate a relay carries.
+	bridgeBacklogHighWater = 512 * 1024
+	bridgeBacklogPoll      = 5 * time.Millisecond
 )
 
 var bridgeMagic = [4]byte{'O', 'L', 'R', '1'} //nolint:gochecknoglobals // wire protocol constant
@@ -224,7 +243,7 @@ func (s *Session) sendBridgeFrame(to string, data []byte) {
 	if jSess == nil {
 		return
 	}
-	if !s.outboundFrameCurrent(data) {
+	if !s.waitBridgeRoom() || !s.outboundFrameCurrent(data) {
 		return
 	}
 	if err := sendEndpointRaw(jSess, to, data); err != nil {
@@ -232,6 +251,59 @@ func (s *Session) sendBridgeFrame(to string, data []byte) {
 			return
 		}
 		logger.Debugf("jitsi bridge send: %v", err)
+	}
+}
+
+// bridgeBacklog reports the bytes queued below sendLoop: the SCTP
+// association's unsent data plus whatever the websocket bridge still holds.
+// Both gauges read zero before the bridge exists, which is the right answer -
+// there is nothing to wait behind yet.
+func (s *Session) bridgeBacklog() int {
+	backlog := 0
+	s.pcMu.Lock()
+	pc := s.pc
+	s.pcMu.Unlock()
+	if pc != nil {
+		if sctp := pc.SCTP(); sctp != nil {
+			backlog += sctp.BufferedAmount()
+		}
+	}
+	if jSess := s.jSess.Load(); jSess != nil {
+		backlog += jSess.BridgeSendQueueDepth() * bridgeMaxMessageSize
+	}
+	return backlog
+}
+
+// waitBridgeRoom holds the sender until the backlog below it is under the
+// high-water mark, so that back-pressure reaches smux instead of memory.
+// Returns false when the session closes meanwhile. A link that never drains
+// is not this function's concern: the queues above fill, smux writes stall,
+// and liveness tears the session down, which is what unblocks this loop.
+func (s *Session) waitBridgeRoom() bool {
+	gauge := s.backlogGauge
+	if gauge == nil {
+		gauge = s.bridgeBacklog
+	}
+	var held time.Time
+	peak := 0
+	for {
+		backlog := gauge()
+		if backlog <= bridgeBacklogHighWater {
+			if !held.IsZero() && time.Since(held) >= time.Second {
+				logger.Debugf("jitsi bridge: sender held %v behind a %d-byte backlog",
+					time.Since(held).Round(time.Millisecond), peak)
+			}
+			return true
+		}
+		if held.IsZero() {
+			held = time.Now()
+		}
+		peak = max(peak, backlog)
+		select {
+		case <-s.done:
+			return false
+		case <-time.After(bridgeBacklogPoll):
+		}
 	}
 }
 
