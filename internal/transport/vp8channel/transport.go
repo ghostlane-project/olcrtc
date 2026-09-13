@@ -53,7 +53,12 @@ import (
 const (
 	defaultMaxPayloadSize = 60 * 1024
 	defaultConnectTimeout = 60 * time.Second
-	rtpBufSize            = 65536
+	// rtpBufSize is the read buffer each track reader holds. pion cannot hand
+	// over a packet larger than its own receive MTU of 8192 bytes - ICE reads
+	// every candidate with that, and so does the SRTP session above it - so
+	// the 64 KB this used to be was 56 KB of dead space per track, on every
+	// reader the server keeps per peer and on the two the phone keeps.
+	rtpBufSize = 8192
 	// outboundQueueSize bounds KCP packets waiting for the paced writer. Sized
 	// to a couple of send windows so KCP's flush never blocks (a blocked
 	// WriteTo would stall KCP's update loop and delay ACKs); the paced writer
