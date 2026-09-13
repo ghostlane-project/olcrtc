@@ -15,7 +15,6 @@ import (
 	runtimecfg "github.com/openlibrecommunity/olcrtc/internal/runtime"
 	"github.com/openlibrecommunity/olcrtc/internal/transport"
 	"github.com/openlibrecommunity/olcrtc/internal/transport/seichannel"
-	"github.com/openlibrecommunity/olcrtc/internal/transport/videochannel"
 	"github.com/openlibrecommunity/olcrtc/internal/transport/vp8channel"
 )
 
@@ -163,7 +162,7 @@ func toClientConfig(cfg Config) internalclient.Config {
 func toTransportOptions(options TransportOptions) transport.Options {
 	switch value := options.(type) {
 	case VideoOptions:
-		return videochannel.Options(value)
+		return videoTransportOptions(value)
 	case VP8Options:
 		return vp8channel.Options(value)
 	case SEIOptions:

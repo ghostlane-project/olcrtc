@@ -9,7 +9,6 @@ import (
 	"github.com/openlibrecommunity/olcrtc/internal/transport"
 	"github.com/openlibrecommunity/olcrtc/internal/transport/datachannel"
 	"github.com/openlibrecommunity/olcrtc/internal/transport/seichannel"
-	"github.com/openlibrecommunity/olcrtc/internal/transport/videochannel"
 	"github.com/openlibrecommunity/olcrtc/internal/transport/vp8channel"
 )
 
@@ -172,7 +171,7 @@ type Config struct {
 func RegisterDefaults() {
 	enginebuiltin.RegisterDefaults()
 	transport.Register("datachannel", datachannel.New)
-	transport.Register("videochannel", videochannel.New)
+	registerVideoTransport()
 	transport.Register("seichannel", seichannel.New)
 	transport.Register("vp8channel", vp8channel.New)
 }

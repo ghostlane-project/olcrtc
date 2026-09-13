@@ -19,7 +19,6 @@ import (
 	"github.com/openlibrecommunity/olcrtc/internal/engine"
 	"github.com/openlibrecommunity/olcrtc/internal/engine/goolom"
 	engineJitsi "github.com/openlibrecommunity/olcrtc/internal/engine/jitsi"
-	"github.com/openlibrecommunity/olcrtc/internal/engine/livekit"
 	"github.com/openlibrecommunity/olcrtc/internal/protect"
 )
 
@@ -107,7 +106,7 @@ func Available() []string {
 // RegisterDefaults wires the built-in providers: jitsi, telemost, wbstream
 // and "none" (direct engine access).
 func RegisterDefaults() {
-	engine.Register("livekit", livekit.New)
+	registerLivekitEngine()
 	engine.Register("goolom", goolom.New)
 	engine.Register("jitsi", engineJitsi.New)
 	register("wbstream", authWBStream.Provider{})

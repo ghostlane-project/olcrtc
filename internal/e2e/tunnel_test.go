@@ -683,6 +683,9 @@ func builtInProviderNames() []string {
 }
 
 func builtInTransportNames() []string {
+	if leanBuild {
+		return []string{transportData, transportSEI, transportVP8}
+	}
 	return []string{transportData, transportVideo, transportSEI, transportVP8}
 }
 
