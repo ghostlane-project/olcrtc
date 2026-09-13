@@ -162,16 +162,42 @@ func LivenessTimeout(tr transport.Transport) time.Duration {
 	return control.DefaultTimeout
 }
 
-// ConnectAckTimeout returns the tunnel CONNECT ack read deadline for a
-// transport. ControlPlane transports (SFU renegotiation) may take ~30s to
-// start forwarding data frames, so they get a generous window; conventional
-// providers use the conservative default.
-func ConnectAckTimeout(tr transport.Transport) time.Duration {
-	if IsControlPlane(tr) {
-		return 90 * time.Second
-	}
-	return 15 * time.Second
-}
+// The tunnel CONNECT exchange has one deadline on each side: the client waits
+// for the one-byte ack, the server waits for the request that follows the
+// stream's SYN. Both live here so they cannot drift apart again.
+//
+// The server's must be the longer of the two. The client is the side that
+// gives up: when it does, it closes the stream, and the server's read ends in
+// FIN rather than on a timer. A server timer that fires first produces the
+// other failure - the stream closed under the client with no ack at all,
+// "remote not ready (read_err=EOF)" - which reads like a broken server when
+// it is only an impatient one (olcbox#23).
+//
+// Neither depends on the transport. What the ack waits for is the dial on the
+// exit (bounded by the dialer's own timeout, answered with a negative ack on
+// failure) plus the queueing of two small frames behind bulk data, once in
+// each direction. The old split - 90 s for transports with a control plane,
+// 15 s for the rest - keyed the wait on a property that has nothing to do
+// with queueing: a datachannel got 15 s because it has no control channel,
+// not because it is fast. Measured through a Jitsi SCTP bridge at ~5 Mbit/s
+// with the sender's backlog unbounded, every connect opened during a
+// download waited out the 15 s and failed, and the backlog took minutes to
+// drain. Bounding that backlog is the jitsi engine's job (see
+// bridgeBacklogHighWater); the number here only has to be generous, because a
+// live link always answers eventually, and a dead one is torn down by
+// liveness, which fails the waiting read at once.
+const (
+	connectAckWait     = 90 * time.Second
+	connectRequestWait = 120 * time.Second
+)
+
+// ConnectAckTimeout is how long the client waits for the CONNECT ack.
+func ConnectAckTimeout() time.Duration { return connectAckWait }
+
+// ConnectRequestTimeout is how long the server waits, after accepting a
+// stream, for the CONNECT request to arrive whole. Always longer than
+// ConnectAckTimeout; see the note above.
+func ConnectRequestTimeout() time.Duration { return connectRequestWait }
 
 // ControlSmuxConfig returns a lean smux config for the isolated control-plane
 // session. The control session carries only tiny ping/pong frames so we use

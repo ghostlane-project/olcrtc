@@ -13,6 +13,7 @@ import (
 	"github.com/openlibrecommunity/olcrtc/internal/framing"
 	"github.com/openlibrecommunity/olcrtc/internal/handshake"
 	"github.com/openlibrecommunity/olcrtc/internal/logger"
+	"github.com/openlibrecommunity/olcrtc/internal/runtime"
 	"github.com/openlibrecommunity/olcrtc/internal/transport"
 	"github.com/openlibrecommunity/olcrtc/internal/tunnelcore"
 )
@@ -209,7 +210,11 @@ func (s *Server) handleStream(ctx context.Context, stream *smux.Stream, sessionI
 	const maxConnectRequest = 4096
 	header := make([]byte, 0, 256)
 	buffer := make([]byte, 256)
-	_ = stream.SetReadDeadline(time.Now().Add(15 * time.Second))
+	// The SYN that opened this stream is a smux control frame and jumps the
+	// send queue; the request behind it is data and waits its turn behind
+	// whatever bulk the client is sending. The deadline is therefore paired
+	// with the client's ack deadline in runtime, and is the longer of the two.
+	_ = stream.SetReadDeadline(time.Now().Add(runtime.ConnectRequestTimeout()))
 	for {
 		n, err := stream.Read(buffer)
 		if n > 0 {

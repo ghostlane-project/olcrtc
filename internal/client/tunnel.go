@@ -55,7 +55,7 @@ func (c *Client) sendConnectRequest(stream *smux.Stream, targetAddr string, targ
 	}
 	_ = stream.SetWriteDeadline(time.Time{})
 	ack := make([]byte, 1)
-	_ = stream.SetReadDeadline(time.Now().Add(runtime.ConnectAckTimeout(c.ln)))
+	_ = stream.SetReadDeadline(time.Now().Add(runtime.ConnectAckTimeout()))
 	if _, err := io.ReadFull(stream, ack); err != nil {
 		return fmt.Errorf("sid=%d: %w (read_err=%w)", stream.ID(), ErrRemoteNotReady, err)
 	}
