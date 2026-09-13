@@ -114,6 +114,23 @@ type replayState struct {
 	highest uint64
 	seen    uint64
 	element *list.Element
+	// skipped counts records jumped over when a higher counter arrived, and
+	// late those that arrived below the highest and were still inside the
+	// window. A skipped record that later arrives late was reordered in
+	// transit; one that never does was lost. The difference is what a relay
+	// that reorders or drops messages looks like from here, and nothing
+	// above this layer can tell the two apart: smux only sees a byte stream
+	// that stopped making sense.
+	skipped uint64
+	late    uint64
+}
+
+// ReorderStats is the record reordering seen on one lane, summed over every
+// sender in it. Lost is not known exactly - a gap may still be filled - but
+// Skipped minus Late is the number of records the window is still missing.
+type ReorderStats struct {
+	Skipped uint64
+	Late    uint64
 }
 
 // replayCache holds one window per (lane, sender prefix), bounded by an LRU
@@ -309,6 +326,7 @@ func (r *replayCache) accept(aad []byte, prefix [noncePrefixSize]byte, counter u
 	}
 	if counter > state.highest {
 		shift := counter - state.highest
+		state.skipped += shift - 1
 		if shift >= replayWindowSize {
 			state.seen = 1
 		} else {
@@ -327,8 +345,21 @@ func (r *replayCache) accept(aad []byte, prefix [noncePrefixSize]byte, counter u
 		return ErrReplayDuplicate
 	}
 	state.seen |= mask
+	state.late++
 	r.lru.MoveToFront(state.element)
 	return nil
+}
+
+// ReorderStats reports the reordering seen on the lane aad names.
+func (k *KeySet) ReorderStats(aad []byte) ReorderStats {
+	k.replay.mu.Lock()
+	defer k.replay.mu.Unlock()
+	var stats ReorderStats
+	for _, state := range k.replay.lanes[string(aad)] {
+		stats.Skipped += state.skipped
+		stats.Late += state.late
+	}
+	return stats
 }
 
 func (r *replayCache) insert(aad []byte, prefix [noncePrefixSize]byte, counter uint64) {

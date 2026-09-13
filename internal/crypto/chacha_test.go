@@ -416,3 +416,37 @@ func TestReceiverIsolatesLanesOfASharedPrefixSender(t *testing.T) {
 		t.Fatalf("replayed Open(data %d) error = %v, want %v", newest, err, ErrReplayDuplicate)
 	}
 }
+
+// TestReorderStatsTellLossFromReordering pins what the counters mean: a record
+// that jumps past its predecessor counts the predecessor as skipped, and the
+// predecessor arriving afterwards counts as late. A relay that reorders fills
+// its gaps; one that drops leaves them, which is the difference a session that
+// died of "frame too large" needs explained (olcbox#23).
+func TestReorderStatsTellLossFromReordering(t *testing.T) {
+	client, server := newKeyPair(t)
+	records := make([][]byte, 0, 5)
+	for i := range 5 {
+		rec, err := client.Seal([]byte{byte(i)}, []byte(testDataAAD))
+		if err != nil {
+			t.Fatalf("Seal(%d) error = %v", i, err)
+		}
+		records = append(records, rec)
+	}
+	for _, i := range []int{0, 1, 3, 4} {
+		if _, err := server.Open(records[i], []byte(testDataAAD)); err != nil {
+			t.Fatalf("Open(%d) error = %v", i, err)
+		}
+	}
+	if got := server.ReorderStats([]byte(testDataAAD)); got != (ReorderStats{Skipped: 1}) {
+		t.Fatalf("after a gap: ReorderStats = %+v, want Skipped:1 Late:0", got)
+	}
+	if _, err := server.Open(records[2], []byte(testDataAAD)); err != nil {
+		t.Fatalf("Open(2) late error = %v", err)
+	}
+	if got := server.ReorderStats([]byte(testDataAAD)); got != (ReorderStats{Skipped: 1, Late: 1}) {
+		t.Fatalf("after the gap was filled: ReorderStats = %+v, want Skipped:1 Late:1", got)
+	}
+	if got := server.ReorderStats([]byte(testControlAAD)); got != (ReorderStats{}) {
+		t.Fatalf("control lane ReorderStats = %+v, want zero", got)
+	}
+}

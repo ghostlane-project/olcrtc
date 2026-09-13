@@ -181,6 +181,10 @@ type Conn struct {
 	badMagic      atomic.Uint64
 	authFailed    atomic.Uint64
 
+	// reordering accounting for the rate-limited log in noteReordering.
+	reorderLogged atomic.Uint64
+	reorderLogAt  atomic.Int64
+
 	// writeTimeout overrides writeReadyTimeout. Zero means the default;
 	// only tests set it.
 	writeTimeout time.Duration
@@ -324,6 +328,7 @@ func (c *Conn) Push(ciphertext []byte) {
 	}
 	*bufPtr = pt
 	c.inBytes.Add(uint64(len(pt)))
+	c.noteReordering()
 	if c.closed.Load() {
 		releaseFrameBuf(bufPtr)
 		return
@@ -333,6 +338,47 @@ func (c *Conn) Push(ciphertext []byte) {
 	case <-c.closeCh:
 		releaseFrameBuf(bufPtr)
 	}
+}
+
+// ReorderStats reports the record reordering the pinned key has seen on this
+// conn's lane: records skipped over and records that arrived late. The
+// difference is what the window is still missing. Zero until the peer's key
+// is pinned.
+func (c *Conn) ReorderStats() crypto.ReorderStats {
+	if c == nil {
+		return crypto.ReorderStats{}
+	}
+	entry := c.group.Pinned()
+	if entry == nil {
+		return crypto.ReorderStats{}
+	}
+	return entry.Keys.ReorderStats(c.aad)
+}
+
+// noteReordering logs, at most once per decryptLogInterval, when records on
+// this lane have arrived out of order since the last report. Every record is
+// a whole smux frame, so a relay that drops or reorders messages does not
+// corrupt a frame, it removes or swaps one - which the control stream reports
+// as a frame that is too large, because the length it read was the body of
+// the frame it should have got first. This line is how that report gets its
+// cause: reordering fills its gaps, loss never does.
+func (c *Conn) noteReordering() {
+	stats := c.ReorderStats()
+	total := stats.Skipped + stats.Late
+	if total == 0 || total == c.reorderLogged.Load() {
+		return
+	}
+	now := time.Now().UnixNano()
+	last := c.reorderLogAt.Load()
+	if last != 0 && now-last < int64(decryptLogInterval) {
+		return
+	}
+	if !c.reorderLogAt.CompareAndSwap(last, now) {
+		return
+	}
+	c.reorderLogged.Store(total)
+	logger.Debugf("muxconn: records out of order on this lane so far: %d skipped, %d arrived late, %d still missing",
+		stats.Skipped, stats.Late, stats.Skipped-min(stats.Late, stats.Skipped))
 }
 
 // noteDecryptFailure records an undecryptable frame and logs the first one
