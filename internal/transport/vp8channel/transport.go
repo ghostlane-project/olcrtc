@@ -65,8 +65,19 @@ const (
 	// progress even when the data outbound queue is saturated.
 	controlOutboundQueueSize = 2048 // sized for ~20s publisher reconnect window at 20ms tick
 	inboundQueueSize         = 4096
-	canSendHighWatermark     = 90 // percent
-	keepaliveIdlePeriod      = 100 * time.Millisecond
+	// The same queues on a host that is killed for using memory. Each slot is
+	// a pooled ~1.4 KB packet, so 4096 inbound and 1536 outbound are 8 MB of
+	// headroom the server profile can afford and a packet tunnel extension
+	// cannot: measured with the phone's own runtime profile against a
+	// Telemost room, an Ookla-shaped load (six downloads, then three uploads)
+	// took the client from 45 MB to 61 MB of RSS, and the extension that
+	// carries it dies at about 48. 1024 slots each way is one KCP window
+	// (kcpConstrainedRcvWnd) of packets, which is all the inbound side can
+	// hold before KCP's own window stops the sender anyway.
+	constrainedInboundQueueSize  = 1024
+	constrainedOutboundQueueSize = 1024
+	canSendHighWatermark         = 90 // percent
+	keepaliveIdlePeriod          = 100 * time.Millisecond
 	// forceKeepalivePeriod is how often a bare, fully decodable VP8 keyframe
 	// is injected even while bulk data flows, so the SFU decoder never times
 	// out and stops forwarding the track.
@@ -243,7 +254,7 @@ func newStreamTransport(
 		peerRestartGrace: defaultPeerRestartGrace,
 	}
 
-	tr.data = newKCPPlane(outboundQueueSize, func(data []byte) {
+	tr.data = newKCPPlane(outboundQueueSizeFor(), func(data []byte) {
 		if tr.onData != nil {
 			tr.onData(data)
 		}

@@ -21,6 +21,24 @@ func kcpWindow() (int, int) {
 	return kcpSndWnd, kcpRcvWnd
 }
 
+// inboundQueueSizeFor is the packet queue between the track reader and KCP
+// for this host's memory profile; see constrainedInboundQueueSize.
+func inboundQueueSizeFor() int {
+	if runtimecfg.BuffersAreConstrained() {
+		return constrainedInboundQueueSize
+	}
+	return inboundQueueSize
+}
+
+// outboundQueueSizeFor is the data plane's queue between KCP and the paced
+// writer for this host's memory profile; see constrainedOutboundQueueSize.
+func outboundQueueSizeFor() int {
+	if runtimecfg.BuffersAreConstrained() {
+		return constrainedOutboundQueueSize
+	}
+	return outboundQueueSize
+}
+
 // Both peers establish a KCP session with the same convid. KCP does not
 // require a handshake - packets are matched by conv field, so a static
 // constant gives us a symmetrical P2P setup.
@@ -82,7 +100,7 @@ type kcpRuntime struct {
 }
 
 func startKCP(out chan<- *packetBuffer, onData func([]byte), epochHdr [epochHdrLen]byte) (*kcpRuntime, error) {
-	c := newKCPConn(out, inboundQueueSize, epochHdr)
+	c := newKCPConn(out, inboundQueueSizeFor(), epochHdr)
 
 	sess, err := kcp.NewConn3(kcpConvID, fakeUDPAddr(), nil, 0, 0, c)
 	if err != nil {
