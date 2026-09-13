@@ -39,7 +39,9 @@ func (c *Client) tunnel(
 	if _, err := conn.Write(replySuccess(targetAddr)); err != nil {
 		return
 	}
-	_, _ = tunnelcore.CopyBidirectional(ctx, conn, stream)
+	if _, err := tunnelcore.CopyBidirectional(ctx, conn, stream); errors.Is(err, tunnelcore.ErrHalfOpenIdle) {
+		logger.Debugf("sid=%d closed: half-open and silent for %s", stream.ID(), tunnelcore.HalfOpenGrace)
+	}
 }
 
 func (c *Client) sendConnectRequest(stream *smux.Stream, targetAddr string, targetPort int) error {

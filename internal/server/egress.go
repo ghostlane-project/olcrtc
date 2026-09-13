@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -57,7 +58,10 @@ func (s *Server) dispatch(ctx context.Context, stream *smux.Stream, request Conn
 	if _, err := stream.Write([]byte{tunnelcore.ConnectAckOK}); err != nil {
 		return
 	}
-	counts, _ := tunnelcore.CopyBidirectional(ctx, stream, conn)
+	counts, copyErr := tunnelcore.CopyBidirectional(ctx, stream, conn)
+	if errors.Is(copyErr, tunnelcore.ErrHalfOpenIdle) {
+		logger.Debugf("sid=%d %s closed: half-open and silent for %s", stream.ID(), addr, tunnelcore.HalfOpenGrace)
+	}
 	s.meter.add(sessionID, counts.LeftToRight, counts.RightToLeft)
 	if s.onTraffic != nil {
 		s.onTraffic(sessionID, addr, counts.LeftToRight, counts.RightToLeft)
