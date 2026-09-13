@@ -9,13 +9,13 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/xtaci/smux"
 
 	"github.com/openlibrecommunity/olcrtc/internal/control"
 	"github.com/openlibrecommunity/olcrtc/internal/crypto"
+	"github.com/openlibrecommunity/olcrtc/internal/hostprofile"
 	"github.com/openlibrecommunity/olcrtc/internal/transport"
 )
 
@@ -47,10 +47,6 @@ const (
 	smuxConstrainedStreamBuffer  = 512 * 1024
 )
 
-// constrainedBuffers is set once, before any session starts, by a host that
-// has a hard memory ceiling.
-var constrainedBuffers atomic.Bool //nolint:gochecknoglobals // process-wide memory profile
-
 // UseConstrainedBuffers shrinks every receive window this process advertises,
 // for hosts that are killed rather than swapped when they grow: the iOS
 // packet tunnel extension, and the Android VPN service beside it.
@@ -59,19 +55,23 @@ var constrainedBuffers atomic.Bool //nolint:gochecknoglobals // process-wide mem
 // with a window update, and KCP carries its receive window in every segment
 // header, so a client can shrink unilaterally and an unchanged server simply
 // sends less at a time.
-func UseConstrainedBuffers() { constrainedBuffers.Store(true) }
+//
+// The flag itself lives in [hostprofile], a leaf every package can import;
+// these are the names the transports and the client library have always
+// used for it.
+func UseConstrainedBuffers() { hostprofile.UseConstrainedBuffers() }
 
 // BuffersAreConstrained reports the profile chosen for this process.
-func BuffersAreConstrained() bool { return constrainedBuffers.Load() }
+func BuffersAreConstrained() bool { return hostprofile.BuffersAreConstrained() }
 
 // ResetBufferProfileForTest restores the server profile. Tests only: the
 // switch is one-way in a running process, which is what a host that never
 // changes shape mid-flight wants. Exported because the transports that read
 // the profile test it from their own packages.
-func ResetBufferProfileForTest() { constrainedBuffers.Store(false) }
+func ResetBufferProfileForTest() { hostprofile.ResetForTest() }
 
 func receiveBufferSizes() (int, int) {
-	if constrainedBuffers.Load() {
+	if hostprofile.BuffersAreConstrained() {
 		return smuxConstrainedReceiveBuffer, smuxConstrainedStreamBuffer
 	}
 	return smuxMaxReceiveBuffer, smuxMaxStreamBuffer
