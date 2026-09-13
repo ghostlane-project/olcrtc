@@ -411,7 +411,7 @@ func (s *Server) startPeerControlLoop(ctx context.Context, peer *peerSession, st
 		Transport: s.ln, Config: s.liveness, Health: s.health,
 		LogFields: func() string { return "role=server peer=" + peer.peerID },
 		OnDeath:   func(error) { s.removePeer(peer, "liveness") },
-		Progress:  func() uint64 { return peer.dataConn().InboundBytes() },
+		Progress:  func() uint64 { return peer.dataConn().PayloadBytes() },
 	}
 	s.goTracked(func() {
 		defer func() { _ = stream.Close() }()

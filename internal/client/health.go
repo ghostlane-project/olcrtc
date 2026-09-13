@@ -38,10 +38,13 @@ func (c *Client) startControlLoop(
 			c.notifyLinkHealth(false)
 		},
 		OnDeath: func(error) { c.handleReconnect(ctx, cfg, cancel, reconnectLiveness) },
+		// Payload on our streams, not every frame that opens: the server's
+		// next session seals under the same key and its frames would vouch
+		// for a session it has already closed (olcbox#25).
 		Progress: func() uint64 {
 			c.sessMu.RLock()
 			defer c.sessMu.RUnlock()
-			return c.conn.InboundBytes()
+			return c.conn.PayloadBytes()
 		},
 		// The data conn, not the control one: the control plane is a separate
 		// KCP session and stays healthy while the data plane is wedged. That

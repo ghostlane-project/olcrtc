@@ -17,6 +17,7 @@
 package muxconn
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -94,6 +95,13 @@ const (
 	// to decrypt. Any participant in the same SFU room can spray junk into
 	// our channel, so the steady state must not be one log line per frame.
 	decryptLogInterval = 30 * time.Second
+
+	// The smux frame header, as xtaci/smux lays it out: version, command,
+	// little-endian length, little-endian stream id. smux writes every frame
+	// with one Write and Write seals every call as one record, so a record
+	// opened here is one frame and starts with this header.
+	smuxHeaderSize = 8
+	smuxCmdPSH     = 2
 )
 
 // frameBufPool recycles plaintext buffers between Push (decrypts a wire
@@ -163,9 +171,12 @@ type Conn struct {
 	leftoverBuf *[]byte
 	leftover    []byte
 
-	// inBytes counts plaintext opened from the peer; the control-stream
-	// liveness check reads it through InboundBytes.
-	inBytes atomic.Uint64
+	// inBytes counts every byte of plaintext opened from the peer, and
+	// payloadBytes only the data of PSH frames addressed to a stream. The
+	// control-stream liveness check reads the second, through PayloadBytes,
+	// which says why the first is not enough.
+	inBytes      atomic.Uint64
+	payloadBytes atomic.Uint64
 
 	// writeStalls counts Writes that waited out the full send deadline
 	// without the transport ever accepting data, and is cleared by the
@@ -328,6 +339,7 @@ func (c *Conn) Push(ciphertext []byte) {
 	}
 	*bufPtr = pt
 	c.inBytes.Add(uint64(len(pt)))
+	c.payloadBytes.Add(streamPayloadLen(pt))
 	c.noteReordering()
 	if c.closed.Load() {
 		releaseFrameBuf(bufPtr)
@@ -413,13 +425,53 @@ func (c *Conn) noteDecryptFailure(size int, err error) {
 }
 
 // InboundBytes reports the plaintext this conn has opened from the peer since
-// it was created. It only ever grows, and the control-stream liveness check
-// reads it to tell a pong queued behind a bulk transfer from a dead link.
+// it was created: every frame that authenticated, whatever it carried. It
+// only ever grows. Liveness no longer reads it; see PayloadBytes.
 func (c *Conn) InboundBytes() uint64 {
 	if c == nil {
 		return 0
 	}
 	return c.inBytes.Load()
+}
+
+// PayloadBytes reports the smux payload this conn has opened from the peer
+// since it was created: the data of PSH frames addressed to a stream, and
+// nothing else. It only ever grows, and the control-stream liveness check
+// reads it to tell a pong queued behind a bulk transfer from a dead link.
+//
+// Not InboundBytes, and the difference is olcbox#25. A server that closes a
+// session for liveness builds the next one under the same key ring, so the
+// new session seals with the same sender prefix and a counter that simply
+// carries on: its frames authenticate, pass the replay window, and count as
+// inbound bytes on a conn whose session they have nothing to do with. The
+// SYN, NOP and UPD frames of such a session kept a client's "peer still
+// sending" excuse alive for three and a half minutes on a session the server
+// had already closed. A stream open, a keepalive or a window update is not
+// the peer delivering anything; payload on a stream is, and a session that
+// is not ours has no stream of ours to deliver payload on.
+func (c *Conn) PayloadBytes() uint64 {
+	if c == nil {
+		return 0
+	}
+	return c.payloadBytes.Load()
+}
+
+// streamPayloadLen returns the payload a plaintext record carries for a
+// stream: the data of a PSH frame with a non-zero stream id. SYN, FIN, NOP
+// and UPD frames, and anything that is not a smux frame at all, carry none.
+func streamPayloadLen(frame []byte) uint64 {
+	if len(frame) < smuxHeaderSize {
+		return 0
+	}
+	version, cmd := frame[0], frame[1]
+	if (version != 1 && version != 2) || cmd != smuxCmdPSH {
+		return 0
+	}
+	if binary.LittleEndian.Uint32(frame[4:8]) == 0 {
+		return 0
+	}
+	declared := int(binary.LittleEndian.Uint16(frame[2:4]))
+	return uint64(min(declared, len(frame)-smuxHeaderSize)) //nolint:gosec // both operands are non-negative
 }
 
 // SendStalled reports whether a Write has waited out the whole send deadline

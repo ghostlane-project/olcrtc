@@ -31,7 +31,7 @@ func (s *Server) startControlLoop(ctx context.Context, session *smux.Session, st
 		Progress: func() uint64 {
 			s.sessMu.RLock()
 			defer s.sessMu.RUnlock()
-			return s.conn.InboundBytes()
+			return s.conn.PayloadBytes()
 		},
 	}
 	s.wg.Add(1)

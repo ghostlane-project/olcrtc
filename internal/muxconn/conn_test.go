@@ -3,6 +3,7 @@ package muxconn
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"log"
@@ -449,5 +450,87 @@ func TestDecryptStatsTellBadMagicFromAuthFailures(t *testing.T) {
 	got := conn.DecryptStats()
 	if got.BadMagic != 1 || got.AuthFailed != 1 {
 		t.Fatalf("DecryptStats = %+v, want BadMagic 1 AuthFailed 1", got)
+	}
+}
+
+// smuxFrame lays out one xtaci/smux frame: version 2, the command, the
+// little-endian length and stream id, then the data.
+func smuxFrame(cmd byte, sid uint32, data []byte) []byte {
+	frame := make([]byte, 8+len(data))
+	frame[0] = 2
+	frame[1] = cmd
+	binary.LittleEndian.PutUint16(frame[2:], uint16(len(data))) //nolint:gosec // test frames are a few bytes
+	binary.LittleEndian.PutUint32(frame[4:], sid)
+	copy(frame[8:], data)
+	return frame
+}
+
+// The frames a rebuilt server session sends - a stream open, a keepalive, a
+// window update - authenticate, because the server seals every session under
+// the same key ring, and they must still not count as the peer delivering
+// anything (olcbox#25). Payload on a stream does; a record that fails to open
+// moves neither counter.
+func TestPayloadBytesCountsOnlyStreamPayload(t *testing.T) {
+	const (
+		cmdSYN byte = 0
+		cmdPSH byte = 2
+		cmdNOP byte = 3
+		cmdUPD byte = 4
+	)
+	clientKeys, serverKeys := newTestKeyPair(t)
+	conn := New(&stubLink{canSend: true}, serverKeys)
+	push := func(frame []byte) {
+		t.Helper()
+		sealed, err := clientKeys.Seal(frame, []byte(dataRecordAAD))
+		if err != nil {
+			t.Fatalf("Seal() error = %v", err)
+		}
+		conn.Push(sealed)
+	}
+
+	push(smuxFrame(cmdSYN, 3, nil))
+	push(smuxFrame(cmdNOP, 0, nil))
+	push(smuxFrame(cmdUPD, 3, make([]byte, 8)))
+	if got := conn.PayloadBytes(); got != 0 {
+		t.Fatalf("PayloadBytes() after SYN, NOP and UPD = %d, want 0", got)
+	}
+	if got := conn.InboundBytes(); got != 8+8+16 {
+		t.Fatalf("InboundBytes() = %d, want %d: the frames did authenticate", got, 8+8+16)
+	}
+
+	push(smuxFrame(cmdPSH, 3, []byte("hello")))
+	if got := conn.PayloadBytes(); got != 5 {
+		t.Fatalf("PayloadBytes() after a 5-byte PSH = %d, want 5", got)
+	}
+
+	// Sealed under another key: authentication fails, nothing moves.
+	other, err := cryptopkg.NewKeySet([]byte("10987654321098765432109876543210"), cryptopkg.Client)
+	if err != nil {
+		t.Fatalf("NewKeySet(other) error = %v", err)
+	}
+	foreign, err := other.Seal(smuxFrame(cmdPSH, 3, []byte("hello")), []byte(dataRecordAAD))
+	if err != nil {
+		t.Fatalf("Seal(foreign) error = %v", err)
+	}
+	conn.Push(foreign)
+	if got := conn.PayloadBytes(); got != 5 {
+		t.Fatalf("PayloadBytes() after a record that failed to open = %d, want 5", got)
+	}
+	if got := conn.InboundBytes(); got != 8+8+16+13 {
+		t.Fatalf("InboundBytes() after a record that failed to open = %d, want %d", got, 8+8+16+13)
+	}
+
+	// Not a smux frame at all: too short for a header, or no smux version.
+	push([]byte("hi"))
+	push(append([]byte{9, cmdPSH, 1, 0, 3, 0, 0, 0}, 'x'))
+	if got := conn.PayloadBytes(); got != 5 {
+		t.Fatalf("PayloadBytes() after non-smux plaintext = %d, want 5", got)
+	}
+}
+
+func TestPayloadBytesOnNilConn(t *testing.T) {
+	var conn *Conn
+	if got := conn.PayloadBytes(); got != 0 {
+		t.Fatalf("PayloadBytes() on nil = %d, want 0", got)
 	}
 }
