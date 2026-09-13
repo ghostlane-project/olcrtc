@@ -171,14 +171,18 @@ func TestPayloadProgressKeepsALateStreamAlive(t *testing.T) {
 	var sent atomic.Uint64
 	stalls := make(chan int, 8)
 	errCh := make(chan error, 1)
+	// Every probe times out, and every probe finds the counter moved. The
+	// first stall is reported on the second probe (the first has nothing
+	// pending to expire); the run then survives maxStalledProbes probes
+	// and dies on the one after, so the check below has to land between
+	// the two. With Failures at 1 an unfixed build gives up on the very
+	// probe that reports the first stall.
+	const interval = 100 * time.Millisecond
 	go func() {
 		errCh <- Run(ctx, a, Config{
-			// Slow enough that the run below stays well inside
-			// maxStalledProbes, fast enough that an unfixed build
-			// would have given up several probes ago.
-			Interval: 20 * time.Millisecond,
+			Interval: interval,
 			Timeout:  time.Millisecond,
-			Failures: 2,
+			Failures: 1,
 			Progress: func() uint64 { return sent.Add(4096) },
 			OnStalled: func(timedOut int) {
 				select {
@@ -201,12 +205,14 @@ func TestPayloadProgressKeepsALateStreamAlive(t *testing.T) {
 		t.Fatal("timed out waiting for a stalled probe")
 	}
 
-	// Well past Failures probes, and still short of maxStalledProbes:
-	// without the progress check this would have returned ErrUnhealthy.
+	// Past Failures probes, and still short of maxStalledProbes: without
+	// the progress check this would have returned ErrUnhealthy. Half an
+	// interval short of the last excused probe, so a late tick cannot turn
+	// the wait into the fatal one.
 	select {
 	case err := <-errCh:
 		t.Fatalf("Run() ended while the peer was still sending: %v", err)
-	case <-time.After(150 * time.Millisecond):
+	case <-time.After((maxStalledProbes-1)*interval - interval/2):
 	}
 	cancel()
 	if err := <-errCh; err != nil {
@@ -272,5 +278,14 @@ func TestStaleProgressCounterDoesNotExcuseMissedPongs(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for unhealthy result")
+	}
+}
+
+// The excuse has a ceiling in seconds, not only in probes: a client on a
+// session its server has already closed must notice within a minute, not
+// the three and a half minutes olcbox#25 measured with eighteen probes.
+func TestStalledExcuseIsBoundedToUnderAMinute(t *testing.T) {
+	if got := maxStalledProbes * DefaultInterval; got > time.Minute {
+		t.Fatalf("payload progress can excuse %v of missed pongs, want under a minute", got)
 	}
 }

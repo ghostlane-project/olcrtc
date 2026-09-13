@@ -43,11 +43,17 @@ const (
 	// the stream is marked unhealthy.
 	DefaultFailures = 4
 	// maxStalledProbes bounds how many probes in a row payload progress may
-	// excuse. At the default interval that is three minutes of the peer
-	// sending data without ever answering a ping: far longer than any
-	// transfer-induced stall, and still short enough to catch a control
-	// stream that has genuinely wedged while its transport keeps working.
-	maxStalledProbes = 18
+	// excuse. The queue a pong can sit behind is bounded now: below smux
+	// the bridge holds at most 32 frames plus 512 KB in flight
+	// (olcbox#23), about a megabyte, which at the 5 Mbit/s the relays
+	// carry is two seconds against a 15 s pong timeout. A pong is
+	// therefore never minutes late, and three excused probes - 30 s at
+	// the default 10 s interval - is already many times the delay the
+	// queue can add. Eighteen, plus the four failures that follow, was 220
+	// seconds: the three and a half minutes a client sat on a session the
+	// server had already closed while the server's next session kept the
+	// counter moving (olcbox#25). Now it is seven probes, 70 seconds.
+	maxStalledProbes = 3
 )
 
 // MsgType labels a control message.
