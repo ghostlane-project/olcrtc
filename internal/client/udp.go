@@ -241,6 +241,11 @@ func (c *Client) forwardLocalUDP(
 		logger.Debugf("drop malformed socks udp packet: %v", err)
 		return
 	}
+	// A resolver query takes the reliable stream, not the lossy lane; see
+	// dns.go. Everything the stream cannot take falls through to the lane.
+	if c.tryDNSOverStream(ctx, udpConn, src, target, payload) {
+		return
+	}
 	flowID, ok := c.udpFlowID(udpConn, src, target)
 	if !ok {
 		logger.Debugf("drop udp packet: %v", errTooManyUDPFlows)

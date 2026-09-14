@@ -101,6 +101,11 @@ type Client struct {
 	udpFlowIndex map[clientUDPFlowKey]uint64
 	udpDisabled  bool
 	maxUDPFlows  int
+
+	// DNS over the stream (dns.go): queries in flight, and the session the
+	// info line was last written for.
+	dnsInFlight         atomic.Int32
+	dnsAnnouncedSession string
 }
 
 // HealthFunc is called when the client control health snapshot changes.
