@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/openlibrecommunity/olcrtc/internal/logger"
+	"github.com/openlibrecommunity/olcrtc/internal/runtime"
 	"github.com/openlibrecommunity/olcrtc/internal/transport"
 	"github.com/openlibrecommunity/olcrtc/internal/tunnelcore"
 	"github.com/openlibrecommunity/olcrtc/internal/udpwire"
@@ -67,11 +68,31 @@ func randomUDPFlowID() uint64 {
 func udpAAD() []byte { return []byte(tunnelcore.UDPRecordAAD) }
 
 const (
-	udpReadBufferSize    = 64 * 1024
-	udpFlowIdleTimeout   = 2 * time.Minute
-	udpFlowSweepInterval = 30 * time.Second
-	defaultMaxUDPFlows   = 1024
+	// udpReadBufferSize is the read buffer of one SOCKS UDP association,
+	// held for the association's life. 64 KB is a datagram's ceiling on a
+	// loopback with a 64 KB MTU, which is what a desktop SOCKS client can
+	// hand this.
+	udpReadBufferSize = 64 * 1024
+	// udpConstrainedReadBufferSize is the same buffer on the phone profile.
+	// There a tun2socks with a 9000-byte MTU stands in front, so no
+	// datagram exceeds ~9 KB, and the count of associations is what the
+	// phone pays for: the system's resolver opens a new UDP session per
+	// query, so a speed test's lookups alone held 117 associations at once
+	// on iOS (olcbox 1.0.428), 7.5 MB of buffers at 64 KB each.
+	udpConstrainedReadBufferSize = 16 * 1024
+	udpFlowIdleTimeout           = 2 * time.Minute
+	udpFlowSweepInterval         = 30 * time.Second
+	defaultMaxUDPFlows           = 1024
 )
+
+// udpAssociationReadBufferSize picks the association's read buffer for the
+// profile this process runs under.
+func udpAssociationReadBufferSize() int {
+	if runtime.BuffersAreConstrained() {
+		return udpConstrainedReadBufferSize
+	}
+	return udpReadBufferSize
+}
 
 var (
 	errSocksUDPShortPacket       = errors.New("short packet")
@@ -111,9 +132,10 @@ func (c *Client) handleUDPAssociate(ctx context.Context, tcpConn net.Conn, req s
 		c.removeUDPFlowsForConn(udpConn)
 		_ = udpConn.Close()
 	}()
-	assocCtx, cancelAssoc := context.WithCancel(ctx)
-	defer cancelAssoc()
-	go c.sweepUDPFlows(assocCtx, udpConn)
+	// One sweeper for every association, not one goroutine each: with a
+	// tun2socks in front, associations come and go with every resolver
+	// query, and a hundred of them held a hundred tickers and stacks.
+	c.ensureUDPFlowSweeper(ctx)
 
 	addr, ok := udpConn.LocalAddr().(*net.UDPAddr)
 	if !ok {
@@ -132,7 +154,7 @@ func (c *Client) handleUDPAssociate(ctx context.Context, tcpConn net.Conn, req s
 		_ = udpConn.Close()
 	}()
 
-	buf := make([]byte, udpReadBufferSize)
+	buf := make([]byte, udpAssociationReadBufferSize())
 	for {
 		n, src, err := udpConn.ReadFromUDP(buf)
 		if err != nil {
@@ -369,7 +391,16 @@ func (c *Client) removeUDPFlowsForConn(conn *net.UDPConn) {
 	c.sendUDPFlowCloses(closed)
 }
 
-func (c *Client) sweepUDPFlows(ctx context.Context, conn *net.UDPConn) {
+// ensureUDPFlowSweeper starts the client's one idle-flow sweeper the first
+// time an association needs it. It lives as long as ctx, the client's run,
+// and looks at every association's flows on each tick.
+func (c *Client) ensureUDPFlowSweeper(ctx context.Context) {
+	c.udpSweepOnce.Do(func() {
+		c.goTracked(func() { c.sweepUDPFlows(ctx) })
+	})
+}
+
+func (c *Client) sweepUDPFlows(ctx context.Context) {
 	ticker := time.NewTicker(udpFlowSweepInterval)
 	defer ticker.Stop()
 	for {
@@ -377,17 +408,28 @@ func (c *Client) sweepUDPFlows(ctx context.Context, conn *net.UDPConn) {
 		case <-ctx.Done():
 			return
 		case now := <-ticker.C:
-			c.removeIdleUDPFlowsForConn(conn, now)
+			c.removeIdleUDPFlows(now)
 		}
 	}
 }
 
+// removeIdleUDPFlows drops every flow, on any association, that has been
+// silent for udpFlowIdleTimeout, and tells the server.
+func (c *Client) removeIdleUDPFlows(now time.Time) {
+	c.removeIdleUDPFlowsMatching(now, func(*net.UDPConn) bool { return true })
+}
+
+// removeIdleUDPFlowsForConn is removeIdleUDPFlows for one association.
 func (c *Client) removeIdleUDPFlowsForConn(conn *net.UDPConn, now time.Time) {
+	c.removeIdleUDPFlowsMatching(now, func(owner *net.UDPConn) bool { return owner == conn })
+}
+
+func (c *Client) removeIdleUDPFlowsMatching(now time.Time, owns func(*net.UDPConn) bool) {
 	var closed []uint64
 	c.udpMu.Lock()
 	c.ensureUDPFlowIndexLocked()
 	for id, flow := range c.udpFlows {
-		if flow.conn == conn && now.Sub(flow.lastSeen) >= udpFlowIdleTimeout {
+		if owns(flow.conn) && now.Sub(flow.lastSeen) >= udpFlowIdleTimeout {
 			delete(c.udpFlows, id)
 			delete(c.udpFlowIndex, clientUDPFlowIndexKey(flow.conn, flow.clientAddr, flow.target))
 			closed = append(closed, id)

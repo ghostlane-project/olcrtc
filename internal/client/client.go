@@ -99,6 +99,8 @@ type Client struct {
 	udpMu        sync.Mutex
 	udpFlows     map[uint64]clientUDPFlow
 	udpFlowIndex map[clientUDPFlowKey]uint64
+	// udpSweepOnce starts the one idle-flow sweeper shared by every association.
+	udpSweepOnce sync.Once
 	udpDisabled  bool
 	maxUDPFlows  int
 
