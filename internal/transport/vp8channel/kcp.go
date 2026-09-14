@@ -65,11 +65,18 @@ const (
 	// The same windows on a host that is killed for using memory rather than
 	// swapped: 4096 segments is about 5.7 MB per direction, and this
 	// transport runs two KCP sessions (data and control), which on its own
-	// is more than an iOS packet tunnel extension is allowed in total. 1024
-	// segments is ~1.4 MB, still several times the bandwidth-delay product of
-	// the relays this transport rides. See runtime.UseConstrainedBuffers.
-	kcpConstrainedSndWnd = 1024
-	kcpConstrainedRcvWnd = 1024
+	// is more than an iOS packet tunnel extension is allowed in total. 512
+	// segments is ~0.7 MB, still several times the bandwidth-delay product
+	// of the relays this transport rides: 5-10 Mbit/s at 100-200 ms is 90-180
+	// segments. Measured on the phone profile (mobile.Runtime, lean build,
+	// Telemost room, six downloads then three uploads through the DE origin):
+	// the upload peak's live heap 9.1 -> 8.3 MB and HeapInuse 11.5 -> 10.8,
+	// with kcp-go's segment pool the item that shrank; the download peak
+	// unchanged, and every stream's speed inside the run-to-run noise
+	// (downloads 170-200 KB/s, uploads 350-390 KB/s either way). 1024 had
+	// been the previous step down from 4096. See runtime.UseConstrainedBuffers.
+	kcpConstrainedSndWnd = 512
+	kcpConstrainedRcvWnd = 512
 
 	// Length prefix for our message framing on top of KCP stream mode.
 	// We use stream mode because UDPSession.Write fragments messages > MSS
