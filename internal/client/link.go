@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -15,6 +16,24 @@ import (
 )
 
 const peerWaitTimeout = handshake.DefaultTimeout
+
+// helloResendInterval is how long the client waits for SERVER_WELCOME before
+// it sends CLIENT_HELLO again on a fresh stream, keeping the earlier streams
+// open. A relay may lose the first hello for good: the Jitsi videobridge
+// drops a message addressed to an endpoint whose message channel is not open
+// yet, and the server's channel can open seconds after ours when it is the
+// slower side of the room - a phone on LTE against a server whose ICE takes
+// a few seconds. The old single hello spent the whole handshake timeout
+// waiting for an answer that could never come (olcbox#22). Every hello
+// carries its own challenge and its reply comes back on the stream that sent
+// it, so the first welcome wins and the other streams are closed; a server
+// that answered the first one sees the later streams close unused.
+var helloResendInterval = 4 * time.Second //nolint:gochecknoglobals // tests shorten it
+
+// maxHelloAttempts bounds the streams one handshake may open. At the default
+// interval and timeout that is four; the cap only matters to a caller that
+// passes a long timeout.
+const maxHelloAttempts = 8
 
 func (c *Client) bringUpLink(ctx context.Context, cfg Config, cancel context.CancelFunc) error {
 	// ai-generated: added this lock, held for the whole function. WatchConnection starts below,
@@ -147,30 +166,119 @@ func openControlStreamTimeout(
 	claims map[string]any,
 	timeout time.Duration,
 ) (*smux.Stream, string, string, error) {
-	stream, err := session.OpenStream()
-	if err != nil {
-		return nil, "", "", fmt.Errorf("open control stream: %w", err)
+	race := &helloRace{
+		session: session, deviceID: deviceID, claims: claims,
+		deadline: time.Now().Add(timeout),
+		replies:  make(chan helloResult, maxHelloAttempts),
 	}
-	done := make(chan struct{})
-	go func() {
+	if err := race.send(); err != nil {
+		return nil, "", "", err
+	}
+	resend := time.NewTicker(helloResendInterval)
+	defer resend.Stop()
+	for {
 		select {
 		case <-ctx.Done():
-			_ = stream.Close()
-		case <-done:
-		}
-	}()
-	defer close(done)
-	_ = stream.SetDeadline(time.Now().Add(timeout))
-	sessionID, peerID, err := handshake.Client(stream, deviceID, claims)
-	_ = stream.SetDeadline(time.Time{})
-	if err != nil {
-		_ = stream.Close()
-		if ctx.Err() != nil {
+			race.closeAllBut(nil)
 			return nil, "", "", fmt.Errorf("handshake client: %w", ctx.Err())
+		case <-resend.C:
+			race.resend()
+		case r := <-race.replies:
+			if result, done := race.settle(ctx, r); done {
+				return result.stream, result.sessionID, result.peerID, result.err
+			}
 		}
-		return nil, "", "", fmt.Errorf("handshake client: %w", err)
 	}
-	return stream, sessionID, peerID, nil
+}
+
+// helloResult is what one hello stream came back with.
+type helloResult struct {
+	stream    *smux.Stream
+	sessionID string
+	peerID    string
+	err       error
+}
+
+// helloRace is one handshake's hellos in flight: each on its own stream with
+// its own challenge, all sharing one deadline. See helloResendInterval.
+type helloRace struct {
+	session  *smux.Session
+	deviceID string
+	claims   map[string]any
+	deadline time.Time
+	replies  chan helloResult
+	streams  []*smux.Stream
+	pending  int
+}
+
+func (h *helloRace) send() error {
+	stream, err := h.session.OpenStream()
+	if err != nil {
+		return fmt.Errorf("open control stream: %w", err)
+	}
+	h.streams = append(h.streams, stream)
+	h.pending++
+	_ = stream.SetDeadline(h.deadline)
+	go func() {
+		sessionID, peerID, err := handshake.Client(stream, h.deviceID, h.claims)
+		h.replies <- helloResult{stream: stream, sessionID: sessionID, peerID: peerID, err: err}
+	}()
+	return nil
+}
+
+// resend sends another hello when the cap and the deadline allow it; a hello
+// that would time out half an interval later is not worth sending.
+func (h *helloRace) resend() bool {
+	if len(h.streams) >= maxHelloAttempts || time.Until(h.deadline) <= helloResendInterval/2 {
+		return false
+	}
+	if err := h.send(); err != nil {
+		logger.Debugf("handshake: resend hello: %v", err)
+		return false
+	}
+	return true
+}
+
+func (h *helloRace) closeAllBut(keep *smux.Stream) {
+	for _, stream := range h.streams {
+		if stream != keep {
+			_ = stream.Close()
+		}
+	}
+}
+
+// settle takes one stream's result and reports whether the race is decided:
+// by a welcome, by an answer that makes another hello pointless, or by the
+// last unanswered hello with no time left for another.
+func (h *helloRace) settle(ctx context.Context, r helloResult) (helloResult, bool) {
+	h.pending--
+	if r.err == nil {
+		_ = r.stream.SetDeadline(time.Time{})
+		h.closeAllBut(r.stream)
+		return r, true
+	}
+	_ = r.stream.Close()
+	if ctx.Err() != nil {
+		h.closeAllBut(nil)
+		return helloResult{err: fmt.Errorf("handshake client: %w", ctx.Err())}, true
+	}
+	if !helloAnswered(r.err) && (h.pending > 0 || h.resend()) {
+		return helloResult{}, false
+	}
+	h.closeAllBut(nil)
+	return helloResult{err: fmt.Errorf("handshake client: %w", r.err)}, true
+}
+
+// helloAnswered reports whether the peer replied to a hello, however badly:
+// a rejection, a version mismatch or a malformed reply is an answer, and
+// sending the hello again would only get the same one. A timeout or a closed
+// stream is silence.
+func helloAnswered(err error) bool {
+	return errors.Is(err, handshake.ErrRejected) ||
+		errors.Is(err, handshake.ErrProtocolVersion) ||
+		errors.Is(err, handshake.ErrUnexpectedMessage) ||
+		errors.Is(err, handshake.ErrChallengeMismatch) ||
+		errors.Is(err, handshake.ErrFrameTooLarge)
 }
 
 func (c *Client) handleReconnect(ctx context.Context, cfg Config, cancel context.CancelFunc, reason string) {
