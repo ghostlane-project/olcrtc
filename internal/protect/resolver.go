@@ -32,6 +32,19 @@ type FamilyLookup interface {
 	LookupFamilies(ctx context.Context, host string) (v6, v4 []net.IP, err error)
 }
 
+// Exchanger sends one DNS message as it is and returns the response to it,
+// for a caller that relays another resolver's queries rather than asking its
+// own questions. *Resolver implements it over its server ring.
+//
+// ai-generated: added for the client's direct DNS path (olcbox#28).
+type Exchanger interface {
+	Exchange(ctx context.Context, query []byte) ([]byte, error)
+}
+
+// exchangeBufferSize holds any answer a resolver sends over UDP: EDNS
+// advertises up to 4096 bytes and anything larger comes back truncated.
+const exchangeBufferSize = 4096
+
 const (
 	defaultDNSPort    = "53"
 	defaultDNSTimeout = 3 * time.Second
@@ -150,6 +163,42 @@ func (r *Resolver) Servers() []string {
 		return nil
 	}
 	return append([]string(nil), r.ring.servers...)
+}
+
+// HasServers reports whether any server is configured. Exchange has nowhere
+// to go without one; a lookup still has the host's resolver.
+func (r *Resolver) HasServers() bool {
+	ring, _ := r.current()
+	return ring != nil
+}
+
+// Exchange sends query to the ring's preferred server over a protected UDP
+// socket and returns the response as the server sent it. Silence moves the
+// ring on as it does for a lookup, so the next exchange asks the next server;
+// the query itself is not retried here, since the resolver that sent it will.
+func (r *Resolver) Exchange(ctx context.Context, query []byte) ([]byte, error) {
+	ring, _ := r.current()
+	if ring == nil {
+		return nil, ErrDNSUnreachable
+	}
+	conn, err := ring.dial(ctx, "udp", "")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = conn.Close() }()
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
+	if _, writeErr := conn.Write(query); writeErr != nil {
+		return nil, fmt.Errorf("send query: %w", writeErr)
+	}
+	buf := make([]byte, exchangeBufferSize)
+	// The wrapped conn bounds the read by dnsQueryTimeout and reports the
+	// silence to the ring.
+	n, err := conn.Read(buf)
+	if err != nil {
+		return nil, fmt.Errorf("read answer: %w", err)
+	}
+	return buf[:n], nil
 }
 
 func (r *Resolver) current() (*serverRing, *net.Resolver) {

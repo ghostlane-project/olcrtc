@@ -2,12 +2,15 @@ package protect
 
 import (
 	"context"
+	"errors"
 	"net"
 	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"golang.org/x/net/dns/dnsmessage"
 
 	"github.com/openlibrecommunity/olcrtc/internal/fakedns"
 )
@@ -432,5 +435,115 @@ func TestLookupAsksTheConfiguredServersAgainAfterTheDarkWindow(t *testing.T) {
 	}
 	if n := silent.Queries(); n == asked {
 		t.Fatal("the configured servers were not asked again after the window")
+	}
+}
+
+// aQuery is one A question for name, with a fixed id, as a client sends it.
+func aQuery(t *testing.T, name string) []byte {
+	t.Helper()
+	b := dnsmessage.NewBuilder(nil, dnsmessage.Header{ID: 0x1234, RecursionDesired: true})
+	if err := b.StartQuestions(); err != nil {
+		t.Fatal(err)
+	}
+	q := dnsmessage.Question{Name: dnsmessage.MustNewName(name), Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET}
+	if err := b.Question(q); err != nil {
+		t.Fatal(err)
+	}
+	msg, err := b.Finish()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return msg
+}
+
+// firstA is the first A record of a response, or nil.
+func firstA(t *testing.T, msg []byte) (uint16, net.IP) {
+	t.Helper()
+	var p dnsmessage.Parser
+	h, err := p.Start(msg)
+	if err != nil {
+		t.Fatalf("parse response: %v", err)
+	}
+	if err := p.SkipAllQuestions(); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		rr, err := p.Answer()
+		if err != nil {
+			return h.ID, nil
+		}
+		if a, ok := rr.Body.(*dnsmessage.AResource); ok {
+			return h.ID, net.IP(a.A[:])
+		}
+	}
+}
+
+func TestExchangeAsksThePreferredServer(t *testing.T) {
+	srv := startDNS(t, map[string]string{"a.ru": "10.0.0.1"})
+	r := newTestResolver(t, srv.Addr, nil)
+	if !r.HasServers() {
+		t.Fatal("HasServers() = false with one configured")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	resp, err := r.Exchange(ctx, aQuery(t, "a.ru."))
+	if err != nil {
+		t.Fatalf("Exchange() error = %v", err)
+	}
+	id, ip := firstA(t, resp)
+	if id != 0x1234 || !ip.Equal(net.IPv4(10, 0, 0, 1)) {
+		t.Fatalf("Exchange() answered id=%#x ip=%v", id, ip)
+	}
+	if srv.Queries() != 1 {
+		t.Fatalf("server saw %d queries, want 1", srv.Queries())
+	}
+}
+
+func TestExchangeMovesPastASilentServer(t *testing.T) {
+	silent := startSilentDNS(t)
+	answering := startDNS(t, map[string]string{"a.ru": "10.0.0.1"})
+	r := newTestResolver(t, silent.Addr+","+answering.Addr, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := r.Exchange(ctx, aQuery(t, "a.ru.")); err == nil {
+		t.Fatal("Exchange() against a silent server returned an answer")
+	}
+	if silent.Queries() != 1 || answering.Queries() != 0 {
+		t.Fatalf("first exchange: silent=%d answering=%d", silent.Queries(), answering.Queries())
+	}
+	// The silence demoted the first server; the next query goes to the second.
+	resp, err := r.Exchange(ctx, aQuery(t, "a.ru."))
+	if err != nil {
+		t.Fatalf("second Exchange() error = %v", err)
+	}
+	if _, ip := firstA(t, resp); !ip.Equal(net.IPv4(10, 0, 0, 1)) {
+		t.Fatalf("second Exchange() ip = %v", ip)
+	}
+	if silent.Queries() != 1 || answering.Queries() != 1 {
+		t.Fatalf("second exchange: silent=%d answering=%d", silent.Queries(), answering.Queries())
+	}
+}
+
+func TestExchangeWithoutServers(t *testing.T) {
+	r := newTestResolver(t, "", nil)
+	if r.HasServers() {
+		t.Fatal("HasServers() = true with none configured")
+	}
+	if _, err := r.Exchange(context.Background(), aQuery(t, "a.ru.")); !errors.Is(err, ErrDNSUnreachable) {
+		t.Fatalf("Exchange() error = %v, want ErrDNSUnreachable", err)
+	}
+}
+
+func TestExchangeStopsWithTheContext(t *testing.T) {
+	silent := startSilentDNS(t)
+	r := newTestResolver(t, silent.Addr, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := r.Exchange(ctx, aQuery(t, "a.ru.")); err == nil {
+		t.Fatal("Exchange() returned an answer nobody sent")
+	}
+	if time.Since(start) > time.Second {
+		t.Fatalf("Exchange() outlived its context by %s", time.Since(start))
 	}
 }
