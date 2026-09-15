@@ -16,27 +16,56 @@ import (
 	"github.com/openlibrecommunity/olcrtc/internal/tunnelcore"
 )
 
-func (c *Client) tunnel(
-	ctx context.Context,
-	conn net.Conn,
-	session *smux.Session,
-	targetAddr string,
-	targetPort int,
-) {
+// connectJob is one CONNECT on its way to an outbound: the target, what the
+// SOCKS client already sent while its first bytes were being sniffed, and
+// whether the SOCKS reply is already on the wire.
+type connectJob struct {
+	host    string
+	port    int
+	head    []byte
+	replied bool
+}
+
+// fail answers a CONNECT that will not be served: the SOCKS reply when it is
+// still owed, nothing when it was sent before the outcome was known.
+func (j connectJob) fail(conn net.Conn, reply []byte) {
+	if !j.replied {
+		_, _ = conn.Write(reply)
+	}
+}
+
+// open answers success when it is still owed and replays the bytes read
+// while sniffing into the outbound, which must see them before anything
+// else. It reports false when either write failed.
+func (j connectJob) open(conn net.Conn, outbound io.Writer) bool {
+	if !j.replied {
+		if _, err := conn.Write(replySuccess(j.host)); err != nil {
+			return false
+		}
+	}
+	if len(j.head) > 0 {
+		if _, err := outbound.Write(j.head); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *Client) tunnel(ctx context.Context, conn net.Conn, session *smux.Session, job connectJob) {
 	stream, err := session.OpenStream()
 	if err != nil {
 		logger.Warnf("OpenStream failed: %v", err)
-		_, _ = conn.Write(replyHostUnreachable(targetAddr))
+		job.fail(conn, replyHostUnreachable(job.host))
 		return
 	}
 	defer func() { _ = stream.Close() }()
-	logger.Infof("sid=%d tunnel to %s:%d", stream.ID(), targetAddr, targetPort)
-	if err := c.sendConnectRequest(stream, targetAddr, targetPort); err != nil {
+	logger.Infof("sid=%d tunnel to %s:%d", stream.ID(), job.host, job.port)
+	if err := c.sendConnectRequest(stream, job.host, job.port); err != nil {
 		logger.Warnf("sid=%d connect failed: %v", stream.ID(), err)
-		_, _ = conn.Write(replyForConnectError(err, targetAddr))
+		job.fail(conn, replyForConnectError(err, job.host))
 		return
 	}
-	if _, err := conn.Write(replySuccess(targetAddr)); err != nil {
+	if !job.open(conn, stream) {
 		return
 	}
 	if _, err := tunnelcore.CopyBidirectional(ctx, conn, stream); errors.Is(err, tunnelcore.ErrHalfOpenIdle) {

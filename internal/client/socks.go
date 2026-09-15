@@ -93,7 +93,12 @@ func (c *Client) handleSocks5(ctx context.Context, conn net.Conn) {
 		c.handleUDPAssociate(ctx, conn, req)
 		return
 	}
-	targetAddr, targetPort := req.addr, req.port
+	c.serveConnect(ctx, conn, req)
+}
+
+// tunnelWhenReady carries a CONNECT through the tunnel once the session is
+// up, waiting for it when it is not.
+func (c *Client) tunnelWhenReady(ctx context.Context, conn net.Conn, job connectJob) {
 	const sessionReadyTimeout = 60 * time.Second
 	readyCtx, cancel := context.WithTimeout(ctx, sessionReadyTimeout)
 	defer cancel()
@@ -104,12 +109,12 @@ func (c *Client) handleSocks5(ctx context.Context, conn net.Conn) {
 		// request for the full timeout while the tunnel is up.
 		session, sessionID, ready := c.sessionSnapshot()
 		if session != nil && !session.IsClosed() && sessionID != "" {
-			c.tunnel(ctx, conn, session, targetAddr, targetPort)
+			c.tunnel(ctx, conn, session, job)
 			return
 		}
 		select {
 		case <-readyCtx.Done():
-			_, _ = conn.Write(replyHostUnreachable(targetAddr))
+			job.fail(conn, replyHostUnreachable(job.host))
 			return
 		case <-ready:
 		}

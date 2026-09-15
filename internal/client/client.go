@@ -21,6 +21,7 @@ import (
 	"github.com/openlibrecommunity/olcrtc/internal/logger"
 	"github.com/openlibrecommunity/olcrtc/internal/muxconn"
 	"github.com/openlibrecommunity/olcrtc/internal/protect"
+	"github.com/openlibrecommunity/olcrtc/internal/route"
 	"github.com/openlibrecommunity/olcrtc/internal/runtime"
 	"github.com/openlibrecommunity/olcrtc/internal/transport"
 	"github.com/openlibrecommunity/olcrtc/internal/tunnelcore"
@@ -108,6 +109,12 @@ type Client struct {
 	// info line was last written for.
 	dnsInFlight         atomic.Int32
 	dnsAnnouncedSession string
+
+	// rules names the destinations dialed directly (direct.go); nil sends
+	// everything through the tunnel. dialer opens those sockets, protected
+	// and resolving through the session's lookup.
+	rules  *route.Rules
+	dialer *protect.Dialer
 }
 
 // HealthFunc is called when the client control health snapshot changes.
@@ -140,6 +147,9 @@ type Config struct {
 	// concurrent flows (0 means the default).
 	UDPDisabled bool
 	UDPMaxFlows int
+	// Direct names the destinations dialed from this process instead of
+	// through the tunnel; nil, the default, tunnels everything.
+	Direct *route.Rules
 }
 
 // Run starts the client with the given configuration.
@@ -173,6 +183,7 @@ func RunWithAddress(ctx context.Context, cfg Config, onReady func(actualAddr str
 		health: runtime.NewHealthTracker(cfg.OnHealth), sessionReady: make(chan struct{}),
 		udpFlows: make(map[uint64]clientUDPFlow), udpFlowIndex: make(map[clientUDPFlowKey]uint64),
 		udpDisabled: cfg.UDPDisabled, maxUDPFlows: normalizeMaxUDPFlows(cfg.UDPMaxFlows),
+		rules: cfg.Direct, dialer: protect.NewDialer(cfg.Resolver),
 	}
 	defer func() {
 		cancel()
@@ -188,6 +199,9 @@ func RunWithAddress(ctx context.Context, cfg Config, onReady func(actualAddr str
 	defer func() { _ = listener.Close() }()
 	actualAddr := listener.Addr().String()
 	logger.Infof("SOCKS5 server listening on %s", actualAddr)
+	if client.rules != nil {
+		logger.Infof("direct rules: %s", client.rules.Summary())
+	}
 	if onReady != nil {
 		onReady(actualAddr)
 	}
