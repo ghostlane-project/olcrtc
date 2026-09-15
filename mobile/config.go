@@ -10,6 +10,7 @@ import (
 
 	"github.com/openlibrecommunity/olcrtc/internal/logger"
 	"github.com/openlibrecommunity/olcrtc/internal/protect"
+	"github.com/openlibrecommunity/olcrtc/internal/route"
 	"github.com/openlibrecommunity/olcrtc/pkg/olcrtc/client"
 )
 
@@ -75,6 +76,8 @@ type runtimeConfig struct {
 	video         client.VideoOptions
 	// udpDisabled turns the SOCKS5 UDP relay off; SetUDP steers it.
 	udpDisabled bool
+	// directRules is the text SetDirectRules validated; empty tunnels everything.
+	directRules string
 }
 
 func defaultRuntimeConfig() runtimeConfig {
@@ -346,6 +349,24 @@ func (r *Runtime) SetUDP(enabled bool) {
 	r.mu.Unlock()
 }
 
+// SetDirectRules names the destinations the next Start dials from this
+// process instead of through the tunnel: one rule per line, `domain:<name>`
+// for a name and everything under it, `full:<name>` for that name only, an
+// address or a CIDR prefix for addresses; blank lines and # comments are
+// skipped. The text is parsed now, so a bad line is refused here rather than
+// at Start. An empty text, the default, sends everything through the tunnel.
+//
+// ai-generated: added for olcbox#28.
+func (r *Runtime) SetDirectRules(text string) error {
+	if _, err := route.Parse(text); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidConfig, err)
+	}
+	r.mu.Lock()
+	r.defaults.directRules = text
+	r.mu.Unlock()
+	return nil
+}
+
 func (cfg runtimeConfig) clientConfig() client.Config {
 	return client.Config{
 		Transport: cfg.transport, Provider: cfg.provider, RoomURL: cfg.roomURL,
@@ -356,7 +377,7 @@ func (cfg runtimeConfig) clientConfig() client.Config {
 		DNSServer: cfg.dnsServer, Resolver: cfg.lookup(),
 		TransportOptions: cfg.transportOptions(), Liveness: cfg.liveness, Traffic: cfg.traffic,
 		DeviceID: cfg.deviceID, DeviceIDPath: cfg.deviceIDPath,
-		UDPDisabled: cfg.udpDisabled,
+		UDPDisabled: cfg.udpDisabled, DirectRules: cfg.directRules,
 	}
 }
 

@@ -77,6 +77,8 @@ Ready-made examples:
 | `udp.enabled` | opt in to the lossy SOCKS5 UDP ASSOCIATE relay (calls, games); off unless `true` |
 | `udp.disabled` | `true` wins over `enabled` |
 | `udp.max_flows` | concurrent UDP flows per side, default 1024 |
+| `route.direct` | client only: rules for destinations dialed directly instead of through the tunnel - `domain:<name>`, `full:<name>`, an address or a CIDR prefix, one per entry; empty = everything through the tunnel |
+| `route.direct_file` | the same rules from a file, one per line, `#` comments allowed; read relative to the YAML file and appended to `route.direct` |
 | `gen.amount` | `gen` mode: how many rooms to create |
 | `profiles[]` | list of failover profiles for `srv`/`cnc` |
 | `failover.retry_delay` | pause before the next profile, e.g. `2s` |
@@ -99,6 +101,18 @@ crypto:
 `mode: cnc` forbids listening on a non-loopback address (`0.0.0.0`, LAN IP etc.) unless both `socks.user` and `socks.pass` are set.
 
 The `data` directory must contain files named `names` and `surnames`, one display-name component per line. The embedded dictionaries remain active when `data` is omitted.
+
+## Direct routes
+
+`route.direct` and `route.direct_file` (client only) name the destinations that bypass the tunnel. A CONNECT to a listed name or address is dialed by the client itself, over the same protected socket the provider uses, so on a phone it leaves through the physical interface. A CONNECT for an address the rules do not list is answered first and the client's first bytes are read for a TLS server name or an HTTP `Host`: a listed name found there is dialed directly, by that name; anything else takes the tunnel with those bytes replayed. With `udp.enabled`, datagrams to a listed target are relayed by the client too, and a DNS query (port 53) for a listed name is answered by the client's own resolver (`net.dns` and the network's servers) instead of through the exit. `domain:` matches the name and everything under it, `full:` the name only; a line that is not a rule fails the start.
+
+```yaml
+route:
+  direct:
+    - domain:ru
+    - full:api.example.com
+    - 10.0.0.0/8
+```
 
 ## Config schema migration
 

@@ -165,6 +165,10 @@ type Config struct {
 	// (0 means the default).
 	UDPDisabled bool
 	UDPMaxFlows int
+	// DirectRules names the destinations a client dials directly instead of
+	// through the tunnel, one rule per line (see internal/route); empty
+	// tunnels everything.
+	DirectRules string
 }
 
 // RegisterDefaults registers built-in providers and transports.

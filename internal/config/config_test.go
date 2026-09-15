@@ -519,3 +519,53 @@ func TestLoadInvalidUTF8(t *testing.T) {
 		t.Fatalf("Load() error = %v, want invalid UTF-8 error", err)
 	}
 }
+
+func TestLoadRouteInlineAndFile(t *testing.T) {
+	dir := t.TempDir()
+	const listing = "# ru\ndomain:ru\n1.2.3.0/24\n"
+	if err := os.WriteFile(filepath.Join(dir, "rules.txt"), []byte(listing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "olcrtc.yaml")
+	body := "mode: cnc\nroute:\n  direct:\n    - full:a.test\n  direct_file: rules.txt\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if file.Route.DirectFile != "" {
+		t.Fatalf("Load() left direct_file = %q, want it read into direct", file.Route.DirectFile)
+	}
+	if got, want := Apply(file).DirectRules, "full:a.test\n"+listing; got != want {
+		t.Fatalf("DirectRules = %q, want %q", got, want)
+	}
+}
+
+func TestLoadRouteDirectFileMissing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "olcrtc.yaml")
+	if err := os.WriteFile(path, []byte("mode: cnc\nroute:\n  direct_file: nope.txt\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("Load() accepted a missing direct_file")
+	}
+}
+
+func TestApplyProfileOverridesRouteOnlyWhenNamed(t *testing.T) {
+	base := Apply(File{Mode: "cnc", Settings: Settings{Route: Route{Direct: []string{"domain:ru"}}}})
+	if base.DirectRules != "domain:ru\n" {
+		t.Fatalf("base DirectRules = %q", base.DirectRules)
+	}
+	kept := ApplyProfile(base, Profile{Name: "same"})
+	if kept.DirectRules != "domain:ru\n" {
+		t.Fatalf("profile without route changed DirectRules to %q", kept.DirectRules)
+	}
+	replaced := ApplyProfile(base, Profile{
+		Name: "by", Settings: Settings{Route: Route{Direct: []string{"domain:by", "10.0.0.0/8"}}},
+	})
+	if replaced.DirectRules != "domain:by\n10.0.0.0/8\n" {
+		t.Fatalf("profile route = %q", replaced.DirectRules)
+	}
+}

@@ -52,6 +52,7 @@ type Settings struct {
 	Lifecycle Lifecycle `yaml:"lifecycle"`
 	Traffic   Traffic   `yaml:"traffic"`
 	UDP       UDP       `yaml:"udp"`
+	Route     Route     `yaml:"route"`
 }
 
 // File is the on-disk YAML schema.
@@ -204,6 +205,16 @@ type UDP struct {
 	MaxFlows *int  `yaml:"max_flows"`
 }
 
+// Route names the destinations a client dials directly instead of through
+// the tunnel. Direct holds rules inline, one per entry - `domain:<name>`,
+// `full:<name>`, an address or a CIDR prefix - and DirectFile a file of
+// them, one per line with # comments, read relative to the config file and
+// appended to Direct by Load. Empty means everything through the tunnel.
+type Route struct {
+	Direct     []string `yaml:"direct"`
+	DirectFile string   `yaml:"direct_file"`
+}
+
 // Gen controls room-generation mode.
 type Gen struct {
 	Amount int `yaml:"amount"`
@@ -250,6 +261,10 @@ func loadExternalSecrets(configPath string, file *File) error {
 
 	file.Crypto = resolved
 
+	if file.Route, err = resolveRoute(configPath, file.Route); err != nil {
+		return err
+	}
+
 	for i := range file.Profiles {
 		resolved, err := resolveCrypto(configPath, file.Profiles[i].Crypto)
 		if err != nil {
@@ -257,9 +272,37 @@ func loadExternalSecrets(configPath string, file *File) error {
 		}
 
 		file.Profiles[i].Crypto = resolved
+
+		if file.Profiles[i].Route, err = resolveRoute(configPath, file.Profiles[i].Route); err != nil {
+			return fmt.Errorf("profiles[%d]: %w", i, err)
+		}
 	}
 
 	return nil
+}
+
+// resolveRoute reads route.direct_file, relative to the config file, and
+// appends its lines to route.direct, so that after Load only Direct carries
+// rules.
+func resolveRoute(configPath string, r Route) (Route, error) {
+	if r.DirectFile == "" {
+		return r, nil
+	}
+
+	rulesPath := r.DirectFile
+	if !filepath.IsAbs(rulesPath) {
+		rulesPath = filepath.Join(filepath.Dir(configPath), rulesPath)
+	}
+
+	// #nosec G304 -- direct_file is an explicit path in the user's config file.
+	data, err := os.ReadFile(rulesPath)
+	if err != nil {
+		return Route{}, fmt.Errorf("read route direct file %s: %w", rulesPath, err)
+	}
+
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+
+	return Route{Direct: append(append([]string(nil), r.Direct...), lines...)}, nil
 }
 
 // resolveCrypto reads the file-backed secrets so that after Load only Key
@@ -440,6 +483,9 @@ func ApplySettings(dst session.Config, s Settings) session.Config {
 	}
 	if s.UDP.MaxFlows != nil {
 		dst.UDPMaxFlows = *s.UDP.MaxFlows
+	}
+	if len(s.Route.Direct) > 0 {
+		dst.DirectRules = strings.Join(s.Route.Direct, "\n") + "\n"
 	}
 	dst.TrafficMaxDelay = overlay(dst.TrafficMaxDelay, s.Traffic.MaxDelay)
 

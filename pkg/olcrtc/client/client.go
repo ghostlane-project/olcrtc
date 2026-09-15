@@ -12,6 +12,7 @@ import (
 	internalclient "github.com/openlibrecommunity/olcrtc/internal/client"
 	"github.com/openlibrecommunity/olcrtc/internal/control"
 	"github.com/openlibrecommunity/olcrtc/internal/protect"
+	"github.com/openlibrecommunity/olcrtc/internal/route"
 	runtimecfg "github.com/openlibrecommunity/olcrtc/internal/runtime"
 	"github.com/openlibrecommunity/olcrtc/internal/transport"
 	"github.com/openlibrecommunity/olcrtc/internal/transport/seichannel"
@@ -102,6 +103,11 @@ type Config struct {
 	// default for library users); UDPMaxFlows caps its flows, 0 = default.
 	UDPDisabled bool
 	UDPMaxFlows int
+	// DirectRules names the destinations dialed from this process instead of
+	// through the tunnel: one rule per line, `domain:<name>`, `full:<name>`,
+	// an address or a CIDR prefix; # comments allowed. Empty, the default,
+	// tunnels everything. A line that is not a rule fails Run.
+	DirectRules string
 }
 
 type runner func(context.Context, internalclient.Config, func(string)) error
@@ -133,7 +139,13 @@ func (c *Client) RunWithReady(ctx context.Context, onReady func()) error {
 
 // RunWithAddress starts the client and reports the actual SOCKS listener address.
 func (c *Client) RunWithAddress(ctx context.Context, onReady func(actualAddr string)) error {
-	if err := c.run(ctx, toClientConfig(c.cfg), onReady); err != nil {
+	direct, err := route.Parse(c.cfg.DirectRules)
+	if err != nil {
+		return fmt.Errorf("client: direct rules: %w", err)
+	}
+	cfg := toClientConfig(c.cfg)
+	cfg.Direct = direct
+	if err := c.run(ctx, cfg, onReady); err != nil {
 		return fmt.Errorf("client: %w", err)
 	}
 	return nil

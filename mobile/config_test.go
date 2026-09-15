@@ -210,3 +210,43 @@ func TestSetUDPReachesTheClientConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestSetDirectRulesParsesNow(t *testing.T) {
+	configs := make(chan client.Config, 1)
+	runtime := configuredRuntime(t, func(ctx context.Context, cfg client.Config, onReady func(string)) error {
+		configs <- cfg
+		onReady(cfg.LocalAddr)
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	if err := runtime.SetDirectRules("domain:ru\nkeyword:x\n"); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("SetDirectRules(bad) error = %v, want ErrInvalidConfig", err)
+	}
+	const rules = "domain:ru\n10.0.0.0/8\n"
+	if err := runtime.SetDirectRules(rules); err != nil {
+		t.Fatalf("SetDirectRules() error = %v", err)
+	}
+	if err := runtime.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if err := runtime.WaitReady(100); err != nil {
+		t.Fatalf("WaitReady() error = %v", err)
+	}
+	if cfg := <-configs; cfg.DirectRules != rules {
+		t.Fatalf("DirectRules = %q, want %q", cfg.DirectRules, rules)
+	}
+	if err := runtime.Stop(1000); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	// An empty text clears the rules for the next start.
+	if err := runtime.SetDirectRules(""); err != nil {
+		t.Fatalf("SetDirectRules(empty) error = %v", err)
+	}
+	if err := runtime.Start(); err != nil {
+		t.Fatalf("second Start() error = %v", err)
+	}
+	if cfg := <-configs; cfg.DirectRules != "" {
+		t.Fatalf("DirectRules after clearing = %q", cfg.DirectRules)
+	}
+	_ = runtime.Stop(1000)
+}

@@ -9,6 +9,7 @@ import (
 	"github.com/openlibrecommunity/olcrtc/internal/client"
 	"github.com/openlibrecommunity/olcrtc/internal/control"
 	"github.com/openlibrecommunity/olcrtc/internal/logger"
+	"github.com/openlibrecommunity/olcrtc/internal/route"
 	"github.com/openlibrecommunity/olcrtc/internal/server"
 	"github.com/openlibrecommunity/olcrtc/internal/transport"
 	"github.com/openlibrecommunity/olcrtc/internal/tunnelcore"
@@ -113,14 +114,18 @@ func runClient(
 	traffic transport.TrafficConfig,
 	opts transport.Options,
 ) error {
-	err := client.Run(ctx, client.Config{
+	direct, err := route.Parse(cfg.DirectRules)
+	if err != nil {
+		return fmt.Errorf("route: %w", err)
+	}
+	err = client.Run(ctx, client.Config{
 		Transport: cfg.Transport, Provider: cfg.Provider, RoomURL: roomURL, ChannelID: cfg.ChannelID,
 		KeyHex: cfg.KeyHex, LocalAddr: fmt.Sprintf("%s:%d", cfg.SOCKSHost, cfg.SOCKSPort),
 		DNSServer: cfg.DNSServer, Resolver: cfg.Resolver, SOCKSUser: cfg.SOCKSUser,
 		SOCKSPass: cfg.SOCKSPass, TransportOptions: opts, Engine: cfg.Engine,
 		URL: cfg.URL, Token: cfg.Token, ProviderToken: cfg.ProviderToken,
 		Liveness: liveness, Traffic: traffic,
-		UDPDisabled: cfg.UDPDisabled, UDPMaxFlows: cfg.UDPMaxFlows,
+		UDPDisabled: cfg.UDPDisabled, UDPMaxFlows: cfg.UDPMaxFlows, Direct: direct,
 	})
 	if err != nil {
 		return fmt.Errorf("client: %w", err)
