@@ -11,7 +11,9 @@ import "github.com/openlibrecommunity/olcrtc/internal/transport"
 // packet tunnel extension for a transport nobody selected. Under the tag the
 // transport is not registered, and asking for it fails at session start
 // with ErrTransportNotFound, the same answer any unknown name gets. The
-// livekit engine is left out the same way; see the builtin package.
+// engines are not trimmed: the livekit engine serves the wbstream provider,
+// and a lean build that dropped it broke WB Stream rooms on the phone
+// (olcbox#22); see the builtin package.
 func registerVideoTransport() {}
 
 // The transport is not linked, so there are no options to build for it.
