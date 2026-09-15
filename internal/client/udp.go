@@ -189,7 +189,12 @@ func (c *Client) prepareUDPAssociate(
 	if !ok {
 		return nil, udpAssociationSource{}, false
 	}
-	if !c.waitSessionReady(ctx) {
+	// With rules on, an association may carry direct flows and direct DNS
+	// that need no session at all, and a resolver behind a tun2socks opens
+	// one per query: waiting here would stall every Russian name for as long
+	// as the room takes to come back. The lane still waits for the transport
+	// before it sends.
+	if c.rules == nil && !c.waitSessionReady(ctx) {
 		return nil, udpAssociationSource{}, false
 	}
 	allowedSource, err := udpAssociationAllowedSource(tcpConn, req)
@@ -263,9 +268,14 @@ func (c *Client) forwardLocalUDP(
 		logger.Debugf("drop malformed socks udp packet: %v", err)
 		return
 	}
-	// A resolver query takes the reliable stream, not the lossy lane; see
-	// dns.go. Everything the stream cannot take falls through to the lane.
-	if c.tryDNSOverStream(ctx, udpConn, src, target, payload) {
+	// A resolver query for a name the rules cover is answered here on the
+	// network's own servers; any other takes the reliable stream, not the
+	// lossy lane (dns.go). A target the rules cover gets a socket of this
+	// process (direct_udp.go). Everything none of them takes rides the lane.
+	if c.tryDNSDirect(ctx, udpConn, src, target, payload) || c.tryDNSOverStream(ctx, udpConn, src, target, payload) {
+		return
+	}
+	if c.tryDirectUDP(ctx, udpConn, src, target, payload) {
 		return
 	}
 	flowID, ok := c.udpFlowID(udpConn, src, target)
@@ -387,7 +397,9 @@ func (c *Client) removeUDPFlowsForConn(conn *net.UDPConn) {
 			closed = append(closed, id)
 		}
 	}
+	direct := c.takeDirectFlowsLocked(func(flow *directUDPFlow) bool { return flow.assoc == conn })
 	c.udpMu.Unlock()
+	closeDirectFlows(direct)
 	c.sendUDPFlowCloses(closed)
 }
 
@@ -435,7 +447,11 @@ func (c *Client) removeIdleUDPFlowsMatching(now time.Time, owns func(*net.UDPCon
 			closed = append(closed, id)
 		}
 	}
+	direct := c.takeDirectFlowsLocked(func(flow *directUDPFlow) bool {
+		return owns(flow.assoc) && now.Sub(flow.lastSeen) >= udpFlowIdleTimeout
+	})
 	c.udpMu.Unlock()
+	closeDirectFlows(direct)
 	c.sendUDPFlowCloses(closed)
 }
 

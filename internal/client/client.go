@@ -112,9 +112,14 @@ type Client struct {
 
 	// rules names the destinations dialed directly (direct.go); nil sends
 	// everything through the tunnel. dialer opens those sockets, protected
-	// and resolving through the session's lookup.
-	rules  *route.Rules
-	dialer *protect.Dialer
+	// and resolving through the session's lookup; exchanger answers direct
+	// names' queries on the resolver ring (dns.go), when the lookup is one;
+	// directUDP is the flows this process relays itself (direct_udp.go).
+	rules              *route.Rules
+	dialer             *protect.Dialer
+	exchanger          protect.Exchanger
+	directUDP          map[clientUDPFlowKey]*directUDPFlow
+	dnsDirectAnnounced atomic.Bool
 }
 
 // HealthFunc is called when the client control health snapshot changes.
@@ -184,6 +189,9 @@ func RunWithAddress(ctx context.Context, cfg Config, onReady func(actualAddr str
 		udpFlows: make(map[uint64]clientUDPFlow), udpFlowIndex: make(map[clientUDPFlowKey]uint64),
 		udpDisabled: cfg.UDPDisabled, maxUDPFlows: normalizeMaxUDPFlows(cfg.UDPMaxFlows),
 		rules: cfg.Direct, dialer: protect.NewDialer(cfg.Resolver),
+	}
+	if exchanger, ok := cfg.Resolver.(protect.Exchanger); ok {
+		client.exchanger = exchanger
 	}
 	defer func() {
 		cancel()

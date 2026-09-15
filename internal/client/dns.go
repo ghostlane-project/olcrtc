@@ -6,9 +6,11 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/xtaci/smux"
+	"golang.org/x/net/dns/dnsmessage"
 
 	"github.com/openlibrecommunity/olcrtc/internal/logger"
 	"github.com/openlibrecommunity/olcrtc/internal/udpwire"
@@ -165,4 +167,98 @@ func exchangeTCPDNS(stream io.ReadWriter, query []byte) ([]byte, error) {
 		return nil, err //nolint:wrapcheck // same
 	}
 	return response, nil
+}
+
+// Direct DNS (olcbox#28).
+//
+// A query for a name the rules cover must not leave through the exit: the
+// answer a Russian resolver gives is the one a Russian site wants dialed, and
+// the query itself is the whole point of resolving there. So it is sent as it
+// is to the resolver ring - the network's own servers first - over a
+// protected socket, and the answer goes back through the association
+// untouched: real addresses, real TTLs, every record type. No session is
+// involved, so it works while the room is down. The queries share the stream
+// path's cap and deadline.
+//
+// ai-generated: this section.
+
+// serverLister is what an Exchanger says about having anywhere to send to.
+type serverLister interface {
+	HasServers() bool
+}
+
+// tryDNSDirect answers a port-53 datagram for a direct name on the resolver
+// ring. It reports false when the query should go on to the stream path:
+// rules off, no exchanger or no servers on it, a name the rules do not
+// cover, a query that does not parse, or the in-flight cap.
+func (c *Client) tryDNSDirect(
+	ctx context.Context,
+	udpConn *net.UDPConn,
+	src *net.UDPAddr,
+	target udpwire.Endpoint,
+	payload []byte,
+) bool {
+	if target.Port != dnsPort || c.rules == nil || c.exchanger == nil {
+		return false
+	}
+	if lister, ok := c.exchanger.(serverLister); ok && !lister.HasServers() {
+		return false
+	}
+	name, ok := dnsQuestionName(payload)
+	if !ok || !c.rules.MatchDomain(name) {
+		return false
+	}
+	if c.dnsInFlight.Add(1) > dnsMaxInFlight {
+		c.dnsInFlight.Add(-1)
+		return false
+	}
+	if c.dnsDirectAnnounced.CompareAndSwap(false, true) {
+		logger.Infof("dns direct: queries for direct names go to the resolver ring")
+	}
+	query := append([]byte(nil), payload...)
+	client := &net.UDPAddr{IP: append(net.IP(nil), src.IP...), Port: src.Port, Zone: src.Zone}
+	c.goTracked(func() {
+		defer c.dnsInFlight.Add(-1)
+		c.dnsQueryDirect(ctx, udpConn, client, target, query)
+	})
+	return true
+}
+
+// dnsQueryDirect carries one query to the ring and its answer back. A
+// failure is a silent drop, as on the stream path: the resolver retries.
+func (c *Client) dnsQueryDirect(
+	ctx context.Context,
+	udpConn *net.UDPConn,
+	client *net.UDPAddr,
+	target udpwire.Endpoint,
+	query []byte,
+) {
+	queryCtx, cancel := context.WithTimeout(ctx, dnsQueryDeadline)
+	defer cancel()
+	response, err := c.exchanger.Exchange(queryCtx, query)
+	if err != nil {
+		logger.Debugf("dns direct: %v", err)
+		return
+	}
+	packet, encodeErr := buildSocksUDP(target, response)
+	if encodeErr != nil {
+		logger.Debugf("dns direct: response encode failed: %v", encodeErr)
+		return
+	}
+	_, _ = udpConn.WriteToUDP(packet, client)
+}
+
+// dnsQuestionName is the name in a query's first question, without the
+// trailing dot, or false when the message does not parse as a query.
+func dnsQuestionName(msg []byte) (string, bool) {
+	var p dnsmessage.Parser
+	header, err := p.Start(msg)
+	if err != nil || header.Response {
+		return "", false
+	}
+	question, err := p.Question()
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSuffix(question.Name.String(), "."), true
 }
