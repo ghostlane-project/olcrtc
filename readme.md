@@ -30,6 +30,37 @@ app -> SOCKS5 -> olcrtc cnc -> WebRTC/SFU service -> olcrtc srv -> internet
 
 > **Important:** make sure the video call service you need is on the allow lists and works in your network. If not, use another one.
 
+## This fork
+
+This is ProofKit's fork of [openlibrecommunity/olcrtc](https://github.com/openlibrecommunity/olcrtc).
+The work is on the **`proofkit`** branch, rebased onto upstream as upstream
+moves; `master` here is an untouched copy of upstream and carries none of it.
+This branch is the engine the ProofKit client
+([romanpodpriatov/olcbox](https://github.com/romanpodpriatov/olcbox)) links on
+every platform, which is what most of the additions below are for: a paid
+relay has to tell its users apart, and a phone is not a server.
+
+| Added here | What it is |
+| --- | --- |
+| A ring of server keys | `crypto.keys` / `crypto.keys_file`. A server holds several keys and pins, per peer, the one that peer's first record authenticates under — so each client can carry its own key. A single `crypto.key` is a one-entry ring and behaves exactly as before; clients are unchanged. |
+| Per-key metering | `stats.listen` serves `GET /stats` on loopback with per-key byte totals. Enough to bill a key or cut one off, with no control plane to run. |
+| A lossy datagram lane | Datagrams travel beside the byte stream on `vp8channel`, `datachannel` and livekit, so a UDP flow no longer has to pretend to be a stream: vp8channel tags them `OLUD`/`OLUB` and sends them after control frames and before KCP data, livekit publishes them unreliably on its own topic. |
+| SOCKS5 UDP ASSOCIATE | `udp.enabled` puts calls, games and everything else that is datagrams through the relay over that lane, with `udp.max_flows` per side. Off unless asked for. |
+| DNS off the lossy lane | Behind a tun2socks every packet a phone sends arrives as a UDP association, the resolver's queries included, and a query lost under load is a stall the page feels. A datagram for port 53 now goes over a smux stream as TCP DNS (RFC 7766), 64 in flight, five seconds each, the lane as fallback. |
+| A resolver ring on mobile | Names resolve through the host's protected sockets and a per-session list of resolvers, demoting one that stays silent rather than waiting on it. Inside a tunnel the system resolver is the tunnel, and a carrier that blackholes a public one is not rare. |
+| A memory ceiling the host sets | `mobile.SetMemoryLimit`, `MemoryLimit`, `MemoryStats`, `FreeOSMemory`, `GoroutineSummary` and a log writer. An iOS packet-tunnel extension gets about 50 MB for everything it runs; a Go runtime that decides its own ceiling from the device's RAM will step over that in one collection. |
+| A lean mobile bind | `-tags olcrtc_lean` leaves the videochannel transport out of the gomobile build — QR charset tables built at init for a transport no phone selects. The livekit engine stays in every build: WB Stream's auth provider names it, and a lean bind without it failed the session right after the guest token. The default build and the CLI are unchanged. |
+| Phone-sized buffers | KCP windows, packet queues, NACK history, track reads and per-association read buffers sized for a phone instead of a server, selected by a host profile rather than hardcoded. |
+
+Beside those: a client that tells an old peer, a wrong key and an empty room
+apart instead of timing out on all three; per-lane record numbering and replay
+checks; back-pressure on the Jitsi bridge send queue instead of a failed send;
+dual-stack dialing with a retry for a dial that found no route, which is what
+an IPv6-only carrier and App Review's NAT64 both need.
+
+Changes that belong upstream are prepared as pull requests against it — the
+`pr/*` branches here are those, one change each.
+
 ## Features
 
 - **Providers:** `jitsi`, `telemost`, `wbstream`
@@ -46,10 +77,10 @@ Display-name dictionaries are embedded. Set optional YAML field `data` to a dire
 ## One-click install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/openlibrecommunity/olcrtc/master/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/romanpodpriatov/olcrtc/proofkit/install.sh | bash
 ```
 
-Installs Podman if missing, clones the current code, builds the binary in a container, asks a few questions (server or client, provider, transport, room, key) and starts it. Run it once on the server (mode `srv`) and once on the client (mode `cnc`) - they need the same room ID and encryption key.
+Installs Podman if missing, clones this fork's `proofkit` branch, builds the binary in a container, asks a few questions (server or client, provider, transport, room, key) and starts it. Run it once on the server (mode `srv`) and once on the client (mode `cnc`) - they need the same room ID and encryption key.
 
 If you already have the repo cloned, run `./install.sh` directly instead.
 
@@ -79,6 +110,8 @@ mage mobile  # gomobile bindings (Android)
 
 - Main client: 
   - [owenewans/owenclave](https://github.com/owenewans/owenclave) - Android proxy client (fork of exclave). Supports all common protocols (vless, hysteria2, mieru, trojan, vmess, tuic, shadowsocks, socks ...) plus `olcrtc`, the `olcrtc://` URI format and subscriptions
+- This fork's client:
+  - [romanpodpriatov/olcbox](https://github.com/romanpodpriatov/olcbox) - ProofKit, a fork of olcbox below. Kotlin Multiplatform/Compose for Android, iOS, macOS, Windows and Linux; olcRTC beside VLESS Reality, VLESS over TLS, Hysteria2 and XHTTP, and the client the additions above are built for
 - Community clients:
   - [venterum/veil](https://github.com/venterum/veil) - V2Ray/Xray client for Android (fork of v2rayNG), Material 3. Protocols: VMess, VLESS, Shadowsocks, Trojan, SOCKS, WireGuard, Hysteria2 + `olcrtc`
   - [alananisimov/olcbox](https://github.com/alananisimov/olcbox) - Multiplatform UI client (Android, iOS, macOS, Windows, Linux). Kotlin Multiplatform/Compose. All providers (Jitsi, Telemost, WB Stream, Jazz), all transports, split tunneling, TUN/proxy modes
