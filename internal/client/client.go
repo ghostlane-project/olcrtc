@@ -96,6 +96,17 @@ type Client struct {
 	shutdownGrace    time.Duration
 	fallbackPending  atomic.Bool
 
+	// parked counts the requests waiting for a session that is not there
+	// (tunnelWhenReady, waitSessionReady). With a tun2socks in front every
+	// one of them is also a session over there, with a stack of its own that
+	// no Go memory limit sees, and a phone whose apps retry through a network
+	// gap parks hundreds in seconds (olcbox#37). maxParkedRequests bounds
+	// it; parkedSaturated keeps the warning to one line per episode.
+	// sessionReadyTimeout is how long a request waits; zero means the default.
+	parked              atomic.Int32
+	parkedSaturated     atomic.Bool
+	sessionReadyTimeout time.Duration
+
 	// UDP relay state: one entry per (association, SOCKS source, target).
 	udpMu        sync.Mutex
 	udpFlows     map[uint64]clientUDPFlow

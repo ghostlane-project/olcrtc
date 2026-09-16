@@ -5,12 +5,23 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/openlibrecommunity/olcrtc/internal/logger"
+	"github.com/openlibrecommunity/olcrtc/internal/protect"
 )
 
 const (
 	reconnectFailureWindow = 5 * time.Minute
 	reconnectBackoffStep   = 2 * time.Second
 	reconnectBackoffMax    = 30 * time.Second
+
+	// noRouteProbeInitial and noRouteProbeMax pace the probe socket while
+	// the host refuses sockets (awaitRoute). noRouteMaxWait bounds the wait,
+	// so a protector that refuses for some other reason still lets the
+	// attempts run out and end the session.
+	noRouteProbeInitial = time.Second
+	noRouteProbeMax     = 8 * time.Second
+	noRouteMaxWait      = 5 * time.Minute
 )
 
 // ReconnectRequest reports how a reconnect request was handled.
@@ -34,6 +45,9 @@ type ReconnectorConfig struct {
 	OnError       func(error)
 	OnLimit       func(string)
 	LimitReason   string
+	// RouteProbe says whether a socket can be opened right now; nil means
+	// protect.ProbeRoute, which asks the host protector. Set in tests.
+	RouteProbe func() bool
 }
 
 // Reconnector serializes and coalesces reconnect requests for an engine.
@@ -45,6 +59,11 @@ type Reconnector struct {
 	onError       func(error)
 	onLimit       func(string)
 	limitReason   string
+
+	routeProbe          func() bool
+	noRouteProbeInitial time.Duration
+	noRouteProbeMax     time.Duration
+	noRouteMaxWait      time.Duration
 
 	queueOnce sync.Once
 	queue     chan struct{}
@@ -77,6 +96,13 @@ func (r *Reconnector) Configure(cfg ReconnectorConfig) {
 	r.onLimit = cfg.OnLimit
 	r.limitReason = cfg.LimitReason
 	r.now = time.Now
+	r.routeProbe = cfg.RouteProbe
+	if r.routeProbe == nil {
+		r.routeProbe = protect.ProbeRoute
+	}
+	r.noRouteProbeInitial = noRouteProbeInitial
+	r.noRouteProbeMax = noRouteProbeMax
+	r.noRouteMaxWait = noRouteMaxWait
 	r.queueOnce.Do(func() { r.queue = make(chan struct{}, 1) })
 }
 
@@ -155,6 +181,9 @@ func (r *Reconnector) handleRequestAttempt(ctx context.Context, done <-chan stru
 	// fixed backoff and the limit callback - the only way the upper layer
 	// learns the session is gone - never ran.
 	for {
+		if r.awaitRoute(ctx, done) {
+			return true
+		}
 		count := r.nextRequestCount()
 		if count > r.maxAttempts {
 			r.reconnectLimitReached()
@@ -174,6 +203,9 @@ func (r *Reconnector) handleRequestAttempt(ctx context.Context, done <-chan stru
 
 func (r *Reconnector) handleFailureAttempts(ctx context.Context, done <-chan struct{}) bool {
 	for {
+		if r.awaitRoute(ctx, done) {
+			return true
+		}
 		failures := r.failureCount()
 		if failures > r.maxAttempts {
 			r.reconnectLimitReached()
@@ -190,6 +222,41 @@ func (r *Reconnector) handleFailureAttempts(ctx context.Context, done <-chan str
 		r.recordFailure()
 		if waitReconnect(ctx, done, backoff) {
 			return true
+		}
+	}
+}
+
+// awaitRoute holds the next attempt while the host protector refuses
+// sockets. A phone that has lost its network has no interface to dial from:
+// an attempt there opens a hundred sockets to learn nothing, each one asking
+// the host for an interface again, and counts towards the limit that ends
+// the session for good (olcbox#37). One probe socket every few seconds says
+// when a route is back; the wait is bounded so a protector that refuses for
+// some other reason still lets the attempts run out. It reports true when
+// ctx or done ended the wait, like waitReconnect.
+func (r *Reconnector) awaitRoute(ctx context.Context, done <-chan struct{}) bool {
+	probe := r.routeProbe
+	if probe == nil || probe() {
+		return false
+	}
+	started := r.currentTime()
+	delay := r.noRouteProbeInitial
+	logger.Infof("reconnect: no route out, the host refuses sockets; probing again in %s, for up to %s",
+		delay, r.noRouteMaxWait)
+	for {
+		if waitReconnect(ctx, done, delay) {
+			return true
+		}
+		if probe() {
+			logger.Infof("reconnect: route is back after %s", r.currentTime().Sub(started).Round(time.Second))
+			return false
+		}
+		if r.currentTime().Sub(started) >= r.noRouteMaxWait {
+			logger.Warnf("reconnect: still no route after %s; attempting anyway", r.noRouteMaxWait)
+			return false
+		}
+		if delay < r.noRouteProbeMax {
+			delay = min(delay*2, r.noRouteProbeMax)
 		}
 	}
 }

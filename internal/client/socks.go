@@ -13,12 +13,13 @@ import (
 )
 
 const (
-	socksVersion            = 5
-	socksAddrIPv4           = 1
-	socksAddrDomain         = 3
-	socksAddrIPv6           = 4
-	socksRepSuccess         = 0
-	socksRepHostUnreachable = 4
+	socksVersion               = 5
+	socksAddrIPv4              = 1
+	socksAddrDomain            = 3
+	socksAddrIPv6              = 4
+	socksRepSuccess            = 0
+	socksRepNetworkUnreachable = 3
+	socksRepHostUnreachable    = 4
 )
 
 const (
@@ -31,6 +32,20 @@ const (
 	// maxSocksConns caps concurrent SOCKS clients. Each one costs a
 	// goroutine, an fd and a tunnel stream.
 	maxSocksConns = 512
+
+	// maxParkedRequests caps the requests waiting for a session that is not
+	// there. Waiting is right during a rebuild: the app's connections survive
+	// a handover that way. But with a tun2socks in front each parked request
+	// is a session over there too, with its own stack outside the Go heap,
+	// and a phone whose apps retry through a network gap parks twenty-five a
+	// second; the extension died at six hundred (olcbox#37). Past the cap the
+	// answer is an immediate "network unreachable", which apps take as a
+	// reason to back off rather than to try again at once.
+	maxParkedRequests = 64
+
+	// defaultSessionReadyTimeout is how long a request waits for the
+	// session: long enough for a full liveness rebuild.
+	defaultSessionReadyTimeout = 60 * time.Second
 
 	// acceptRetryDelay is the initial backoff after a failed Accept.
 	// Retrying immediately turns a temporary fd exhaustion into a hot loop
@@ -97,11 +112,16 @@ func (c *Client) handleSocks5(ctx context.Context, conn net.Conn) {
 }
 
 // tunnelWhenReady carries a CONNECT through the tunnel once the session is
-// up, waiting for it when it is not.
+// up, waiting for it when it is not — as one of at most maxParkedRequests.
 func (c *Client) tunnelWhenReady(ctx context.Context, conn net.Conn, job connectJob) {
-	const sessionReadyTimeout = 60 * time.Second
-	readyCtx, cancel := context.WithTimeout(ctx, sessionReadyTimeout)
+	readyCtx, cancel := context.WithTimeout(ctx, c.readyTimeout())
 	defer cancel()
+	parked := false
+	defer func() {
+		if parked {
+			c.unpark()
+		}
+	}()
 	for {
 		// The ready channel is taken in the same critical section as the
 		// state it describes. Sampling it afterwards subscribes to the next
@@ -109,8 +129,19 @@ func (c *Client) tunnelWhenReady(ctx context.Context, conn net.Conn, job connect
 		// request for the full timeout while the tunnel is up.
 		session, sessionID, ready := c.sessionSnapshot()
 		if session != nil && !session.IsClosed() && sessionID != "" {
+			if parked {
+				parked = false
+				c.unpark()
+			}
 			c.tunnel(ctx, conn, session, job)
 			return
+		}
+		if !parked {
+			if !c.park() {
+				job.fail(conn, replyNetworkUnreachable(job.host))
+				return
+			}
+			parked = true
 		}
 		select {
 		case <-readyCtx.Done():
@@ -118,6 +149,39 @@ func (c *Client) tunnelWhenReady(ctx context.Context, conn net.Conn, job connect
 			return
 		case <-ready:
 		}
+	}
+}
+
+// readyTimeout is how long a request waits for the session.
+func (c *Client) readyTimeout() time.Duration {
+	if c.sessionReadyTimeout > 0 {
+		return c.sessionReadyTimeout
+	}
+	return defaultSessionReadyTimeout
+}
+
+// park claims a slot among the requests waiting for the session, or reports
+// that they are all taken.
+func (c *Client) park() bool {
+	for {
+		n := c.parked.Load()
+		if n >= maxParkedRequests {
+			if c.parkedSaturated.CompareAndSwap(false, true) {
+				logger.Warnf("socks: %d requests parked on a missing session; refusing more until it is back", n)
+			}
+			return false
+		}
+		if c.parked.CompareAndSwap(n, n+1) {
+			return true
+		}
+	}
+}
+
+// unpark gives a slot back. The warning re-arms once the pool has drained
+// halfway, so a session that flaps does not write a line per request.
+func (c *Client) unpark() {
+	if c.parked.Add(-1) < maxParkedRequests/2 {
+		c.parkedSaturated.Store(false)
 	}
 }
 
@@ -261,4 +325,10 @@ func replySuccess(target string) []byte {
 
 func replyHostUnreachable(target string) []byte {
 	return socks5Reply(socksRepHostUnreachable, target)
+}
+
+// replyNetworkUnreachable is the answer for a request this process will not
+// even wait on: nothing is wrong with the host, there is no way out.
+func replyNetworkUnreachable(target string) []byte {
+	return socks5Reply(socksRepNetworkUnreachable, target)
 }

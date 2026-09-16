@@ -478,15 +478,27 @@ func (c *Client) sendUDPFlowCloses(flowIDs []uint64) {
 
 // waitSessionReady blocks until the tunnel session has finished its
 // handshake, like a CONNECT does, so a datagram never leaves before the
-// server can attribute it to a session.
+// server can attribute it to a session. It waits from the same pool of
+// maxParkedRequests, and reports failure at once when the pool is full.
 func (c *Client) waitSessionReady(ctx context.Context) bool {
-	const sessionReadyTimeout = 60 * time.Second
-	readyCtx, cancel := context.WithTimeout(ctx, sessionReadyTimeout)
+	readyCtx, cancel := context.WithTimeout(ctx, c.readyTimeout())
 	defer cancel()
+	parked := false
+	defer func() {
+		if parked {
+			c.unpark()
+		}
+	}()
 	for {
 		sess, sid, ready := c.sessionSnapshot()
 		if sess != nil && !sess.IsClosed() && sid != "" {
 			return true
+		}
+		if !parked {
+			if !c.park() {
+				return false
+			}
+			parked = true
 		}
 		select {
 		case <-readyCtx.Done():
