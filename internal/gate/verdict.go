@@ -33,6 +33,8 @@ const (
 	MetricAnswered2         = "answered_2"          // S5: queries of the second burst answered
 	MetricReady3sMs         = "ready_3s_ms"         // S6: ready with the bridge 3 s late, 0 if never
 	MetricReady8sMs         = "ready_8s_ms"         // S6: ready with the bridge 8 s late, 0 if never
+	MetricHeapBaselineBytes = "heap_baseline_bytes" // S7: live heap before the client started
+	MetricRSSBaselineBytes  = "rss_baseline_bytes"  // S7: RSS before the client started
 	MetricHeapPeakBytes     = "heap_peak_bytes"     // S7: peak live heap over S2-S4
 	MetricRSSPeakBytes      = "rss_peak_bytes"      // S7: peak RSS over S2-S4
 	MetricGoroutinesIdle    = "goroutines_idle"     // S7: goroutines before the load
@@ -83,8 +85,11 @@ func rulesFor(scenario string, t Thresholds) []rule {
 	case "S6":
 		return []rule{readyWithin(MetricReady3sMs, 3*time.Second), readyWithin(MetricReady8sMs, 8*time.Second)}
 	case "S7":
-		return []rule{atMost(MetricHeapPeakBytes, t.HeapPeakBytes), atMost(MetricRSSPeakBytes, t.RSSPeakBytes),
-			goroutineGrowth(t.GoroutineGrowth)}
+		return []rule{
+			growth("heap", MetricHeapBaselineBytes, MetricHeapPeakBytes, t.HeapGrowthBytes),
+			growth("rss", MetricRSSBaselineBytes, MetricRSSPeakBytes, t.RSSGrowthBytes),
+			growth("goroutines", MetricGoroutinesIdle, MetricGoroutinesAfter, float64(t.GoroutineGrowth)),
+		}
 	}
 	return nil
 }
@@ -156,25 +161,25 @@ func readyWithin(key string, delay time.Duration) rule {
 	}
 }
 
-// goroutineGrowth bounds the goroutines a client still runs 60 s after the
-// load over its idle baseline. Both counts must have been recorded: growth
-// from a missing one is a number nobody measured.
-func goroutineGrowth(limit int) rule {
+// growth bounds how far a metric rose over its baseline: the heap and the
+// RSS at their peak over what the process held before the client started,
+// the goroutines 60 s after the load over the idle ones. Both must have been
+// recorded: growth from a missing one is a number nobody measured.
+func growth(what, baseKey, key string, limit float64) rule {
+	// ai-generated: one rule for the goroutines' growth and the memory's.
 	return func(m Metrics) string {
-		idle, hasIdle := m[MetricGoroutinesIdle]
-		after, hasAfter := m[MetricGoroutinesAfter]
+		base, hasBase := m[baseKey]
+		v, has := m[key]
 		switch {
-		case !hasIdle:
-			return notMeasured(MetricGoroutinesIdle)
-		case !hasAfter:
-			return notMeasured(MetricGoroutinesAfter)
-		}
-		growth := after - idle
-		if growth <= float64(limit) {
+		case !hasBase:
+			return notMeasured(baseKey)
+		case !has:
+			return notMeasured(key)
+		case v-base <= limit:
 			return ""
 		}
-		return fmt.Sprintf("goroutines grew by %s > %d (%s %s, %s %s)", num(growth), limit,
-			MetricGoroutinesIdle, num(idle), MetricGoroutinesAfter, num(after))
+		return fmt.Sprintf("%s grew by %s > %s (%s %s, %s %s)", what, num(v-base), num(limit),
+			baseKey, num(base), key, num(v))
 	}
 }
 

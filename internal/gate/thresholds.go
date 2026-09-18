@@ -15,10 +15,14 @@ type Thresholds struct {
 	// variance does not fail a good build.
 	ThroughputDownBps float64
 	ThroughputUpBps   float64
-	// HeapPeakBytes and RSSPeakBytes bound the mobile flavour over S2-S4
-	// under the phone's memory limit and GC settings.
-	HeapPeakBytes float64
-	RSSPeakBytes  float64
+	// HeapGrowthBytes and RSSGrowthBytes bound how far the live heap and
+	// the RSS rise over S2-S4, with the mobile flavour under the phone's
+	// memory limit and GC settings, above the baseline read before the
+	// client started: what the client adds. The test process holds the
+	// harness too, and what earlier pairs left, so its size is no measure
+	// of the client's.
+	HeapGrowthBytes float64
+	RSSGrowthBytes  float64
 	// GoroutineGrowth bounds goroutines 60 s after load versus idle.
 	GoroutineGrowth int
 	// ResolverAnswered is how many of 64 burst queries must be answered.
@@ -31,14 +35,26 @@ type Thresholds struct {
 // to the engine cannot loosen the gate.
 const handshakeBudget = 15 * time.Second
 
+// The spec's memory bounds are for a process that runs the client alone: a
+// peak of 16 MiB of live heap and 45 MiB of RSS. Such a process holds
+// clientAloneHeap and clientAloneRSS before its client starts (a lean build
+// that links mobile, after a GC, measured on 2026-09-18), so what a client
+// may add is each bound less that.
+const (
+	clientAlonePeakHeap = 16 << 20
+	clientAlonePeakRSS  = 45 << 20
+	clientAloneHeap     = 7 << 19 // 3.5 MiB
+	clientAloneRSS      = 26 << 20
+)
+
 // Local is the target with the server in the runner: Jitsi's relay carries
 // ~5 Mbit/s, WB Stream and Telemost a few Mbit/s.
 var Local = Thresholds{ //nolint:gochecknoglobals // the one place these numbers live
 	ConnectP95:        5 * time.Second,
 	ThroughputDownBps: 2_000_000,
 	ThroughputUpBps:   2_000_000,
-	HeapPeakBytes:     16 << 20,
-	RSSPeakBytes:      45 << 20,
+	HeapGrowthBytes:   clientAlonePeakHeap - clientAloneHeap,
+	RSSGrowthBytes:    clientAlonePeakRSS - clientAloneRSS,
 	GoroutineGrowth:   20,
 	ResolverAnswered:  63,
 }
@@ -49,15 +65,19 @@ var Link = Thresholds{ //nolint:gochecknoglobals // the one place these numbers 
 	ConnectP95:        5 * time.Second,
 	ThroughputDownBps: 800_000,
 	ThroughputUpBps:   1_500_000,
-	HeapPeakBytes:     16 << 20,
-	RSSPeakBytes:      45 << 20,
+	HeapGrowthBytes:   clientAlonePeakHeap - clientAloneHeap,
+	RSSGrowthBytes:    clientAlonePeakRSS - clientAloneRSS,
 	GoroutineGrowth:   20,
 	ResolverAnswered:  63,
 }
 
-// Names in Map of the two knobs that bound no single metric. The others are
-// named after the metric they bound, so a cell shows a bound next to its value.
+// Names in Map of the knobs that bound no single metric: a growth bounds the
+// difference of two, and resolver_answered each burst's count. The others
+// are named after the metric they bound, so a cell shows a bound next to its
+// value.
 const (
+	thresholdHeapGrowth       = "heap_growth_bytes"
+	thresholdRSSGrowth        = "rss_growth_bytes"
 	thresholdGoroutineGrowth  = "goroutine_growth"
 	thresholdResolverAnswered = "resolver_answered"
 )
@@ -69,8 +89,8 @@ func (t Thresholds) Map() map[string]float64 {
 		MetricConnectP95Ms:        ms(t.ConnectP95),
 		MetricThroughputDownBps:   t.ThroughputDownBps,
 		MetricThroughputUpBps:     t.ThroughputUpBps,
-		MetricHeapPeakBytes:       t.HeapPeakBytes,
-		MetricRSSPeakBytes:        t.RSSPeakBytes,
+		thresholdHeapGrowth:       t.HeapGrowthBytes,
+		thresholdRSSGrowth:        t.RSSGrowthBytes,
 		thresholdGoroutineGrowth:  float64(t.GoroutineGrowth),
 		thresholdResolverAnswered: float64(t.ResolverAnswered),
 	}

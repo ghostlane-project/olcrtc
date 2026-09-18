@@ -13,8 +13,10 @@ import (
 
 // ai-generated: the whole file (the memory sampler).
 
-// Sample is one reading of the test process, which is the client's process:
-// the server runs as a child, so what is sampled here is the client alone.
+// Sample is one reading of the test process. The server runs as a child and
+// is not in it, but the harness is: the test binary, the origin, the load,
+// the log capture and what earlier pairs left behind. So S7 judges what the
+// client adds over a baseline read before it starts, not the process's size.
 type Sample struct {
 	At         time.Time
 	HeapInuse  uint64
