@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -193,5 +194,25 @@ func TestEndpointSecretsNameEverythingALogMustLose(t *testing.T) {
 	}
 	if got := (Endpoint{Provider: "jitsi"}).Secrets(); len(got) != 0 {
 		t.Fatalf("an endpoint without secrets lists %v", got)
+	}
+}
+
+// ai-generated: a pool room URL with a query or a fragment is withheld as its
+// bare id too. The telemost provider query-escapes the whole URL into its API
+// path, so a request error carries the id bare, the query escaped after it.
+func TestEndpointSecretsCutAQueryOffTheRoomID(t *testing.T) {
+	for _, room := range []string{
+		"https://telemost.yandex.ru/j/fake-telemost-7?utm_source=x",
+		"https://telemost.yandex.ru/j/fake-telemost-7#join",
+	} {
+		ep := Endpoint{Provider: "telemost", Transport: "vp8channel", Room: room, Key: strings.Repeat("ab", 32)}
+		if got := ep.Secrets(); !slices.Contains(got, "fake-telemost-7") {
+			t.Fatalf("Secrets of %q = %q, want the bare id among them", room, got)
+		}
+		line := `Get "https://cloud-api.example.invalid/conferences/` + url.QueryEscape(room) +
+			`/connection": context deadline exceeded`
+		if out := Scrub(line, ep.Secrets()...); strings.Contains(out, "fake-telemost-7") {
+			t.Fatalf("a request error keeps the room id: %s", out)
+		}
 	}
 }
