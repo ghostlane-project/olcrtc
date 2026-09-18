@@ -48,6 +48,9 @@ const (
 	// build does not link is a plan error.
 	allTransports  = "datachannel,videochannel,seichannel,vp8channel"
 	flagTransports = "olcrtc.gate-transports"
+	// instancesFile is the repository's Jitsi instance list, the default of
+	// -olcrtc.gate-jitsi-instances, from the module root.
+	instancesFile = "docs/jitsi.instances.yaml"
 	// reportName is the report's file in the artifacts directory.
 	reportName = "gate-report.json"
 	// reportMargin is how long before the go test deadline the run ends, so
@@ -79,8 +82,8 @@ var (
 		"WB Stream room pool, comma-separated ids or URLs; else "+envWBStreamRooms)
 	gateJitsiHosts = flag.String("olcrtc.gate-jitsi-hosts", "",
 		"comma-separated Jitsi hosts to use instead of the instance list; else "+envJitsiHosts)
-	gateInstances = flag.String("olcrtc.gate-jitsi-instances", "",
-		"path to jitsi.instances.yaml (default: the repository's)")
+	gateInstances = flag.String("olcrtc.gate-jitsi-instances", instancesFile,
+		"the Jitsi instance list; a relative path is taken from the module root")
 	gateRunNumber = flag.Int("olcrtc.gate-run-number", -1,
 		"run number that picks a pool room (default: "+envRunNumber+")")
 	gateBigMB     = flag.Int64("olcrtc.gate-big-mb", 10, "size of the big pull in MiB")
@@ -281,7 +284,7 @@ func localTarget(t *testing.T, root string, dry bool) (*LocalTarget, []string) {
 	}
 	opts := LocalOptions{
 		ModuleRoot: root, WorkDir: t.TempDir(),
-		Instances:     cmp.Or(*gateInstances, filepath.Join(root, "docs", "jitsi.instances.yaml")),
+		Instances:     instanceList(root, *gateInstances),
 		JitsiHosts:    listOf(*gateJitsiHosts, os.Getenv(envJitsiHosts)),
 		TelemostRooms: listOf(*gateTelemost, os.Getenv(envTelemostRooms)),
 		WBStreamRooms: listOf(*gateWBStream, os.Getenv(envWBStreamRooms)),
@@ -396,10 +399,26 @@ func resolveDir(root, dir string) (string, error) {
 	if strings.TrimSpace(dir) == "" {
 		return "", errors.New("-olcrtc.gate-dir is empty")
 	}
-	if filepath.IsAbs(dir) {
-		return filepath.Clean(dir), nil
+	return fromRoot(root, dir), nil
+}
+
+// instanceList is the Jitsi instance list -olcrtc.gate-jitsi-instances
+// names, the repository's when it is empty. A relative path is taken from
+// the module root, as -olcrtc.gate-dir's is: from internal/gate, where the
+// test binary runs, the flag's own default names no file.
+func instanceList(root, value string) string {
+	// ai-generated: read from the module root, not the test's directory.
+	return fromRoot(root, cmp.Or(strings.TrimSpace(value), instancesFile))
+}
+
+// fromRoot makes a path from the command line absolute: a relative one is
+// taken from the module root.
+func fromRoot(root, p string) string {
+	// ai-generated: shared by the artifacts directory and the instance list.
+	if filepath.IsAbs(p) {
+		return filepath.Clean(p)
 	}
-	return filepath.Join(root, dir), nil
+	return filepath.Join(root, p)
 }
 
 // moduleRoot is the engine repository: go test runs the package's tests in
@@ -567,6 +586,27 @@ func TestResolveDirTakesARelativePathFromTheModuleRoot(t *testing.T) {
 	}
 	if got, err := resolveDir(root, " "); err == nil {
 		t.Fatalf("an empty directory resolved to %q", got)
+	}
+}
+
+// ai-generated: the instance list is read from where -olcrtc.gate-dir is,
+// so the flag's own default, given on the command line, names the file.
+func TestInstanceListTakesARelativePathFromTheModuleRoot(t *testing.T) {
+	root, abs := t.TempDir(), filepath.Join(t.TempDir(), "fake-instances.yaml")
+	repository := filepath.Join(root, "docs", "jitsi.instances.yaml")
+	for in, want := range map[string]string{
+		instancesFile:            repository,
+		"":                       repository,
+		" ":                      repository,
+		"fake/../instances.yaml": filepath.Join(root, "instances.yaml"),
+		abs:                      abs,
+	} {
+		if got := instanceList(root, in); got != want {
+			t.Errorf("instanceList(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if _, err := os.Stat(instanceList(moduleRoot(t), instancesFile)); err != nil {
+		t.Fatalf("the default names no file: %v", err)
 	}
 }
 

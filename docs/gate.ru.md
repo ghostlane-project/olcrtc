@@ -51,7 +51,7 @@ go test -count=1 -tags olcrtc_lean -timeout 45m ./internal/gate -run '^TestGate$
 | `-olcrtc.gate-telemost-rooms` | пусто | пул Telemost; иначе `OLCRTC_GATE_TELEMOST_ROOMS` |
 | `-olcrtc.gate-wbstream-rooms` | пусто | пул WB Stream; иначе `OLCRTC_GATE_WBSTREAM_ROOMS` |
 | `-olcrtc.gate-jitsi-hosts` | пусто | хосты Jitsi вместо списка инстансов; иначе `OLCRTC_GATE_JITSI_HOSTS` |
-| `-olcrtc.gate-jitsi-instances` | `docs/jitsi.instances.yaml` | список инстансов Jitsi |
+| `-olcrtc.gate-jitsi-instances` | `docs/jitsi.instances.yaml` | список инстансов Jitsi; относительный путь считается от корня модуля |
 | `-olcrtc.gate-run-number` | `GITHUB_RUN_NUMBER`, иначе 0 | номер, по которому выбирается комната из пула |
 | `-olcrtc.gate-big-mb` | `10` | размер большой загрузки, MiB |
 | `-olcrtc.gate-link` | пусто | ссылка для цели link; иначе `OLCRTC_GATE_LINK` |
