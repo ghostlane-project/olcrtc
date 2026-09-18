@@ -7,6 +7,7 @@ package gate
 import (
 	"cmp"
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"slices"
@@ -35,6 +36,26 @@ type Endpoint struct {
 	DNS       string
 	VP8FPS    int
 	VP8Batch  int
+}
+
+// String describes the endpoint without its secrets: a room or a key that is
+// set prints as <room> or <key>, the scrubber's placeholders, so a log line or
+// a test failure that prints an endpoint leaks neither.
+func (e Endpoint) String() string {
+	return fmt.Sprintf("%s/%s room=%s key=%s dns=%s vp8=%d/%d", e.Provider, e.Transport,
+		withheld(e.Room, "<room>"), withheld(e.Key, "<key>"), e.DNS, e.VP8FPS, e.VP8Batch)
+}
+
+// GoString is String, so %#v withholds the same fields.
+func (e Endpoint) GoString() string { return e.String() }
+
+// withheld stands in for a secret: the placeholder when it is set, <unset>
+// when it is not, so a printed endpoint still tells the two apart.
+func withheld(secret, placeholder string) string {
+	if secret == "" {
+		return "<unset>"
+	}
+	return placeholder
 }
 
 // Tunnel is a running client: a SOCKS5 listener and a way to stop it.
@@ -113,10 +134,18 @@ var (
 	registry   []Scenario //nolint:gochecknoglobals // filled from init in scenarios.go; tests swap it
 )
 
-// Register adds a scenario. Called from init in scenarios.go.
+// Register adds a scenario. Called from init in scenarios.go. It panics on an
+// empty or repeated ID: two scenarios under one ID would share a cell, and
+// one's pass would stand in for the other's failure.
 func Register(s Scenario) {
 	registryMu.Lock()
 	defer registryMu.Unlock()
+	switch {
+	case s.ID == "":
+		panic("gate: a scenario without an ID")
+	case slices.ContainsFunc(registry, func(r Scenario) bool { return r.ID == s.ID }):
+		panic("gate: scenario " + s.ID + " registered twice")
+	}
 	registry = append(registry, s)
 }
 

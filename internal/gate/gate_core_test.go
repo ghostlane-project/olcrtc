@@ -2,6 +2,8 @@ package gate
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -62,5 +64,43 @@ func TestScenariosAreSortedByID(t *testing.T) {
 	Register(Scenario{ID: "S2"})
 	if got := Scenarios(); got[0].ID != "S2" || got[1].ID != "S7" {
 		t.Fatalf("Scenarios() order = %s, %s", got[0].ID, got[1].ID)
+	}
+}
+
+func TestRegisterRefusesAnEmptyOrRepeatedID(t *testing.T) {
+	resetRegistryForTest(t)
+	Register(Scenario{ID: "S0", Name: "connect"})
+	for _, s := range []Scenario{{Name: "no id"}, {ID: "S0", Name: "again"}} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("Register(%q) did not panic", s.ID)
+				}
+			}()
+			Register(s)
+		}()
+	}
+	if got := Scenarios(); len(got) != 1 || got[0].Name != "connect" {
+		t.Fatalf("registry = %+v", got)
+	}
+}
+
+func TestEndpointNeverPrintsRoomOrKey(t *testing.T) {
+	ep := Endpoint{Provider: "jitsi", Transport: "datachannel", Room: "https://meet.example.invalid/fake-gate-room",
+		Key: strings.Repeat("0f", 32), DNS: "192.0.2.53:53", VP8FPS: 60, VP8Batch: 64}
+	values := map[string]any{"endpoint": ep, "env": Env{Endpoint: ep}}
+	for _, verb := range []string{"%v", "%+v", "%s", "%#v"} {
+		for what, v := range values {
+			out := fmt.Sprintf(verb, v)
+			if strings.Contains(out, "fake-gate-room") || strings.Contains(out, "0f0f") {
+				t.Fatalf("%s of an %s leaks a secret: %s", verb, what, out)
+			}
+			if !strings.Contains(out, "jitsi/datachannel") || !strings.Contains(out, "<room>") {
+				t.Fatalf("%s of an %s lost what is not secret: %s", verb, what, out)
+			}
+		}
+	}
+	if out := (Endpoint{Provider: "jitsi", Transport: "datachannel"}).String(); strings.Contains(out, "<room>") {
+		t.Fatalf("an endpoint without a room claims one: %s", out)
 	}
 }
