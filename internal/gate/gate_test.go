@@ -331,7 +331,8 @@ func startOrigin(t *testing.T) *Origin {
 // localSecrets is what a local run is handed that its logs and report must
 // lose: the WB token, each pool entry as written and in the form its
 // provider joins by, and the hosts of a Jitsi override, which come from a
-// secret too. The instance list is public.
+// secret too, in every form a log writes them (see hostForms). The instance
+// list is public.
 func localSecrets(o LocalOptions) []string {
 	out := []string{o.WBStreamToken}
 	for _, e := range o.TelemostRooms {
@@ -340,7 +341,7 @@ func localSecrets(o LocalOptions) []string {
 	for _, e := range o.WBStreamRooms {
 		out = append(out, e, WBStreamRoomID(e))
 	}
-	return append(out, jitsiHostList(o.JitsiHosts)...)
+	return append(out, hostForms(jitsiHostList(o.JitsiHosts))...) // ai-generated: bare and lowercased too
 }
 
 // linkTarget is the server behind the link in -olcrtc.gate-link or, better,
@@ -660,11 +661,13 @@ func TestLocalSecretsNameEveryFormOfWhatTheRunWasHanded(t *testing.T) {
 	got := localSecrets(LocalOptions{
 		TelemostRooms: []string{"fake-telemost-1", "https://telemost.yandex.ru/j/fake-telemost-2"},
 		WBStreamRooms: []string{"https://stream.wb.ru/room/fake-wb-room-3"},
-		WBStreamToken: fakeToken, JitsiHosts: []string{"https://meet.example.invalid/"},
+		WBStreamToken: fakeToken, JitsiHosts: []string{"https://meet.example.invalid/", "Jitsi.Example.Invalid:8443"},
 	})
 	for _, want := range []string{
 		"fake-telemost-1", "https://telemost.yandex.ru/j/fake-telemost-1",
 		"https://telemost.yandex.ru/j/fake-telemost-2", "fake-wb-room-3", fakeToken, "meet.example.invalid",
+		// ai-generated: a host with a port, as given and bare, as logs carry it.
+		"Jitsi.Example.Invalid:8443", "Jitsi.Example.Invalid", "jitsi.example.invalid",
 	} {
 		if !slices.Contains(got, want) {
 			t.Errorf("secrets %q lack %q", got, want)
