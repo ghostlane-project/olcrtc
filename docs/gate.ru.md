@@ -138,7 +138,7 @@ go test -count=1 -tags olcrtc_lean -timeout 45m ./internal/gate -run '^TestGate$
 | S4 | quiet after load | 60 с простоя после S3 (olcbox#25) | ни одного missed pong, ни одного reconnect, конференция жива, затем загрузка 1 KB | нагрузочные пары, `mobile` |
 | S5 | resolver burst | 64 одновременных DNS-запроса к 8.8.8.8 через SOCKS UDP associate, дважды | `resolver_answered` из 64 за 5 с, оба раза | нагрузочные пары, `mobile` |
 | S6 | late server bridge | новый сервер, у которого bridge Jitsi открывается на 3 с позже, затем такой же с опозданием на 8 с (olcbox#22) | клиент готов в пределах задержки плюс бюджет handshake | локальная цель, `jitsi/datachannel`, оба варианта |
-| S7 | phone memory | пик heap и RSS от начала S2 до конца S4; горутины до S1 и в конце S4 | `heap_peak_bytes`, `rss_peak_bytes`, `goroutine_growth` | нагрузочные пары, `mobile` |
+| S7 | phone memory | пик heap и RSS от начала S2 до конца S4 над базой, снятой до старта клиента; горутины до S1 и в конце S4 | `heap_growth_bytes`, `rss_growth_bytes`, `goroutine_growth` | нагрузочные пары, `mobile` |
 
 Нагрузочные пары - `jitsi/datachannel`, `telemost/vp8channel` и `wbstream/vp8channel` у локальной цели, пара ссылки у цели link. Большая загрузка - `-olcrtc.gate-big-mb` MiB. Сценарии одного клиента идут по порядку в одном туннеле. S6 задерживает bridge через `OLCRTC_TEST_BRIDGE_DELAY`, который читает только сервер, собранный с `olcrtc_testhooks`; в релизной сборке такого хука нет.
 
@@ -153,12 +153,14 @@ go test -count=1 -tags olcrtc_lean -timeout 45m ./internal/gate -run '^TestGate$
 | `connect_p95_ms` | p95 одного connect: пачка S1, connect поверх нагрузки в S2 и S3 |
 | `throughput_down_bps` | суммарная скорость загрузки в S2, снизу |
 | `throughput_up_bps` | суммарная скорость выгрузки в S3, снизу |
-| `heap_peak_bytes` | пик живого heap в S7 |
-| `rss_peak_bytes` | пик RSS в S7 |
+| `heap_growth_bytes` | S7: насколько живой heap на пике вырос над базой |
+| `rss_growth_bytes` | S7: насколько RSS на пике вырос над базой |
 | `goroutine_growth` | S7: на сколько горутин в конце S4 больше, чем до S1 |
 | `resolver_answered` | S5: сколько из 64 запросов каждой пачки должны получить ответ |
 
 Бюджета handshake среди них нет, так что ячейка S0 или S6 не показывает границу, по которой её судили. Остальные правила без чисел: каждая передача и каждый connect должны пройти, в S4 не допускается ни missed pong, ни reconnect. Провал называет метрику и измеренное значение, например `connect_ok 23 of connect_total 24`.
+
+S7 взвешивает тестовый процесс, а в нём есть и сам стенд (тестовый бинарник, origin, нагрузка, то, что оставили предыдущие пары), поэтому судит он то, что добавил клиент. Перед стартом каждого клиента раннер собирает мусор, возвращает освобождённую память ОС и снимает базу; ячейка S7 записывает её как `heap_baseline_bytes` и `rss_baseline_bytes` рядом с `heap_peak_bytes` и `rss_peak_bytes`, а вердикт ограничивает разницу. Обе границы - это границы спеки для процесса, в котором работает только клиент (16 MiB живого heap, 45 MiB RSS), за вычетом того, что такой процесс держит до старта клиента.
 
 ## Артефакты
 

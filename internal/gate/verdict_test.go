@@ -14,7 +14,13 @@ import (
 
 func TestEvaluateEachRuleWithAPassAndAFail(t *testing.T) {
 	th := Thresholds{ConnectP95: 5 * time.Second, ThroughputDownBps: 2e6, ThroughputUpBps: 2e6,
-		HeapPeakBytes: 16 << 20, RSSPeakBytes: 45 << 20, GoroutineGrowth: 20, ResolverAnswered: 63}
+		HeapGrowthBytes: 12 << 20, RSSGrowthBytes: 19 << 20, GoroutineGrowth: 20, ResolverAnswered: 63}
+	// ai-generated: S7 judges what the client added over the baseline, so a
+	// process 47 MiB big that grew 17 MiB passes and one that grew more fails.
+	s7 := func(heapPeak, rssPeak, goroutinesAfter float64) Metrics {
+		return Metrics{"heap_baseline_bytes": 4 << 20, "heap_peak_bytes": heapPeak, "rss_baseline_bytes": 30 << 20,
+			"rss_peak_bytes": rssPeak, "goroutines_idle": 80, "goroutines_after": goroutinesAfter}
+	}
 	cases := []struct {
 		scenario string
 		pass     Metrics
@@ -39,8 +45,9 @@ func TestEvaluateEachRuleWithAPassAndAFail(t *testing.T) {
 			Metrics{"answered_1": 64, "answered_2": 60}, "answered_2"},
 		{"S6", Metrics{"ready_3s_ms": 4100, "ready_8s_ms": 9200},
 			Metrics{"ready_3s_ms": 4100, "ready_8s_ms": 0}, "ready_8s_ms"},
-		{"S7", Metrics{"heap_peak_bytes": 9 << 20, "rss_peak_bytes": 30 << 20, "goroutines_idle": 80, "goroutines_after": 90},
-			Metrics{"heap_peak_bytes": 9 << 20, "rss_peak_bytes": 30 << 20, "goroutines_idle": 80, "goroutines_after": 140}, "goroutines"},
+		{"S7", s7(9<<20, 47<<20, 90), s7(9<<20, 47<<20, 140), "goroutines"},
+		{"S7", s7(9<<20, 47<<20, 90), s7(9<<20, 50<<20, 90), "rss grew"},
+		{"S7", s7(9<<20, 47<<20, 90), s7(17<<20, 47<<20, 90), "heap grew"},
 	}
 	for _, c := range cases {
 		if got := Evaluate(c.scenario, c.pass, th); len(got) != 0 {
@@ -62,7 +69,7 @@ func TestEvaluateUnknownScenarioFails(t *testing.T) {
 func TestThresholdMapHasEveryKnob(t *testing.T) {
 	m := Link.Map()
 	for _, k := range []string{"connect_p95_ms", "throughput_down_bps", "throughput_up_bps",
-		"heap_peak_bytes", "rss_peak_bytes", "goroutine_growth", "resolver_answered"} {
+		"heap_growth_bytes", "rss_growth_bytes", "goroutine_growth", "resolver_answered"} {
 		if _, ok := m[k]; !ok {
 			t.Fatalf("Map() lacks %s", k)
 		}
@@ -74,7 +81,7 @@ func TestThresholdMapHasEveryKnob(t *testing.T) {
 // that judges S2 by the up floor or S3 by the down one fails a test.
 func testThresholds() Thresholds {
 	return Thresholds{ConnectP95: 5 * time.Second, ThroughputDownBps: 2e6, ThroughputUpBps: 1.5e6,
-		HeapPeakBytes: 16 << 20, RSSPeakBytes: 45 << 20, GoroutineGrowth: 20, ResolverAnswered: 63}
+		HeapGrowthBytes: 12 << 20, RSSGrowthBytes: 19 << 20, GoroutineGrowth: 20, ResolverAnswered: 63}
 }
 
 // passing holds one sample per scenario that meets every rule under
@@ -90,7 +97,8 @@ func passing() map[string]Metrics {
 		"S4": {"alive": 1, "missed_pong": 0, "reconnects": 0, "final_pull_ok": 1},
 		"S5": {"answered_1": 64, "answered_2": 63},
 		"S6": {"ready_3s_ms": 4100, "ready_8s_ms": 9200},
-		"S7": {"heap_peak_bytes": 9 << 20, "rss_peak_bytes": 30 << 20, "goroutines_idle": 80, "goroutines_after": 90},
+		"S7": {"heap_baseline_bytes": 4 << 20, "heap_peak_bytes": 9 << 20, "rss_baseline_bytes": 30 << 20,
+			"rss_peak_bytes": 47 << 20, "goroutines_idle": 80, "goroutines_after": 90},
 	}
 }
 
@@ -137,14 +145,20 @@ func TestEvaluateWordsEveryFailure(t *testing.T) {
 		}},
 		{"S5", Metrics{"answered_1": 62}, []string{"answered_1 62 < 63", "answered_2 0 < 63"}},
 		{"S6", Metrics{"ready_8s_ms": -1}, []string{"ready_3s_ms 0: never ready", "ready_8s_ms -1: never ready"}},
-		{"S7", Metrics{"heap_peak_bytes": 17 << 20, "rss_peak_bytes": 46 << 20, "goroutines_idle": 80, "goroutines_after": 101},
+		{"S7", Metrics{"heap_baseline_bytes": 1 << 20, "heap_peak_bytes": 14 << 20, "rss_baseline_bytes": 26 << 20,
+			"rss_peak_bytes": 46 << 20, "goroutines_idle": 80, "goroutines_after": 101},
 			[]string{
-				"heap_peak_bytes 17825792 > 16777216", "rss_peak_bytes 48234496 > 47185920",
+				"heap grew by 13631488 > 12582912 (heap_baseline_bytes 1048576, heap_peak_bytes 14680064)",
+				"rss grew by 20971520 > 19922944 (rss_baseline_bytes 27262976, rss_peak_bytes 48234496)",
 				"goroutines grew by 21 > 20 (goroutines_idle 80, goroutines_after 101)",
 			}},
 		// A missing idle count read as zero would pass this: growth 10 <= 20.
-		{"S7", Metrics{"heap_peak_bytes": 9 << 20, "rss_peak_bytes": 30 << 20, "goroutines_after": 10},
-			[]string{"goroutines_idle not measured"}},
+		{"S7", Metrics{"heap_baseline_bytes": 4 << 20, "heap_peak_bytes": 9 << 20, "rss_baseline_bytes": 30 << 20,
+			"rss_peak_bytes": 40 << 20, "goroutines_after": 10}, []string{"goroutines_idle not measured"}},
+		// ai-generated: nor is a memory baseline read as zero: the peak alone
+		// would weigh the harness as the client.
+		{"S7", Metrics{"heap_peak_bytes": 9 << 20, "rss_baseline_bytes": 30 << 20, "rss_peak_bytes": 40 << 20,
+			"goroutines_idle": 80, "goroutines_after": 90}, []string{"heap_baseline_bytes not measured"}},
 	}
 	for _, c := range cases {
 		if got := Evaluate(c.scenario, c.m, testThresholds()); !slices.Equal(got, c.want) {
@@ -162,6 +176,8 @@ func TestEvaluateBoundsAreInclusive(t *testing.T) {
 	s3 := Metrics{"push_ok": 4, "push_total": 4, "throughput_up_bps": 1.5e6,
 		"on_top_ok": 1, "on_top_total": 1, "on_top_p95_ms": 5000}
 	s6 := Metrics{"ready_3s_ms": 3000 + hs, "ready_8s_ms": 8000 + hs}
+	s7 := Metrics{"heap_baseline_bytes": 4 << 20, "heap_peak_bytes": 16 << 20, "rss_baseline_bytes": 26 << 20,
+		"rss_peak_bytes": 45 << 20, "goroutines_idle": 80, "goroutines_after": 100}
 	cases := []struct {
 		scenario string
 		at       Metrics
@@ -178,8 +194,10 @@ func TestEvaluateBoundsAreInclusive(t *testing.T) {
 		{"S5", Metrics{"answered_1": 63, "answered_2": 63}, "answered_2", -1},
 		{"S6", s6, "ready_3s_ms", 1},
 		{"S6", s6, "ready_8s_ms", 1},
-		{"S7", Metrics{"heap_peak_bytes": 16 << 20, "rss_peak_bytes": 45 << 20,
-			"goroutines_idle": 80, "goroutines_after": 100}, "goroutines_after", 1},
+		{"S7", s7, "goroutines_after", 1},
+		{"S7", s7, "heap_peak_bytes", 1},
+		{"S7", s7, "rss_peak_bytes", 1},
+		{"S7", s7, "rss_baseline_bytes", -1},
 	}
 	for _, c := range cases {
 		if got := Evaluate(c.scenario, c.at, testThresholds()); len(got) != 0 {
@@ -197,9 +215,9 @@ func TestEvaluateBoundsAreInclusive(t *testing.T) {
 // up) would put the wrong bound next to a cell's metrics.
 func TestThresholdMapCarriesEachKnobsValue(t *testing.T) {
 	th := Thresholds{ConnectP95: 1500 * time.Millisecond, ThroughputDownBps: 2, ThroughputUpBps: 3,
-		HeapPeakBytes: 4, RSSPeakBytes: 5, GoroutineGrowth: 6, ResolverAnswered: 7}
+		HeapGrowthBytes: 4, RSSGrowthBytes: 5, GoroutineGrowth: 6, ResolverAnswered: 7}
 	want := map[string]float64{"connect_p95_ms": 1500, "throughput_down_bps": 2, "throughput_up_bps": 3,
-		"heap_peak_bytes": 4, "rss_peak_bytes": 5, "goroutine_growth": 6, "resolver_answered": 7}
+		"heap_growth_bytes": 4, "rss_growth_bytes": 5, "goroutine_growth": 6, "resolver_answered": 7}
 	got := th.Map()
 	if !maps.Equal(got, want) {
 		t.Fatalf("Map() = %v, want %v", got, want)

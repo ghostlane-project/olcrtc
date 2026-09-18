@@ -138,7 +138,7 @@ The client flavours, one per process:
 | S4 | quiet after load | 60 s idle after S3 (olcbox#25) | no missed pong, no reconnect, the conference alive, then a 1 KB pull | load pairs, `mobile` |
 | S5 | resolver burst | 64 concurrent DNS queries to 8.8.8.8 through a SOCKS UDP associate, twice | `resolver_answered` of the 64 within 5 s, both times | load pairs, `mobile` |
 | S6 | late server bridge | a fresh server whose Jitsi bridge opens 3 s late, then one 8 s late (olcbox#22) | the client ready within the delay plus the handshake budget | local target, `jitsi/datachannel`, both flavours |
-| S7 | phone memory | peak heap and RSS from S2's start to S4's end; goroutines before S1 and at S4's end | `heap_peak_bytes`, `rss_peak_bytes`, `goroutine_growth` | load pairs, `mobile` |
+| S7 | phone memory | peak heap and RSS from S2's start to S4's end over the baseline read before the client started; goroutines before S1 and at S4's end | `heap_growth_bytes`, `rss_growth_bytes`, `goroutine_growth` | load pairs, `mobile` |
 
 Load pairs are `jitsi/datachannel`, `telemost/vp8channel` and `wbstream/vp8channel` on the local target, the link's pair on the link target. The big pull is `-olcrtc.gate-big-mb` MiB. The scenarios of a client run in order on one tunnel. S6 delays the bridge through `OLCRTC_TEST_BRIDGE_DELAY`, which only a server built with `olcrtc_testhooks` reads; a release build has no such hook.
 
@@ -153,12 +153,14 @@ The bounds a verdict judges by are in `internal/gate/thresholds.go`: `Local` for
 | `connect_p95_ms` | p95 of a connect: S1's burst, the connects on top in S2 and S3 |
 | `throughput_down_bps` | S2's aggregate download rate, a floor |
 | `throughput_up_bps` | S3's aggregate upload rate, a floor |
-| `heap_peak_bytes` | S7's peak live heap |
-| `rss_peak_bytes` | S7's peak RSS |
+| `heap_growth_bytes` | S7: how far the live heap rose at its peak over the baseline |
+| `rss_growth_bytes` | S7: how far the RSS rose at its peak over the baseline |
 | `goroutine_growth` | S7: how many more goroutines run at S4's end than before S1 |
 | `resolver_answered` | S5: how many of the 64 queries each burst must get answered |
 
 The handshake budget is not among them, so an S0 or S6 cell does not show the bound it was judged by. The other rules take no number: every transfer and connect must succeed, S4 allows no missed pong and no reconnect. A failure names the metric and what it measured, for example `connect_ok 23 of connect_total 24`.
+
+S7 weighs the test process, which holds the harness too (the test binary, the origin, the load, what earlier pairs left), so it judges what the client adds. Before each client starts, the runner collects the garbage, hands the freed memory back to the OS and reads a baseline; an S7 cell records it as `heap_baseline_bytes` and `rss_baseline_bytes` next to `heap_peak_bytes` and `rss_peak_bytes`, and the verdict bounds the difference. The two bounds are the spec's for a process that runs the client alone (16 MiB of live heap, 45 MiB RSS) less what such a process holds before its client starts.
 
 ## Artifacts
 

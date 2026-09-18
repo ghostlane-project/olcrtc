@@ -44,11 +44,22 @@ type fakeClient struct {
 	err     error
 	started atomic.Int32
 	stopped atomic.Int32
+	at      atomic.Pointer[time.Time] // when Start was last called
 }
 
 func (c *fakeClient) Name() string { return c.name }
 
+// startedAt is when Start was last called; the zero time before any call.
+func (c *fakeClient) startedAt() time.Time {
+	if at := c.at.Load(); at != nil {
+		return *at
+	}
+	return time.Time{}
+}
+
 func (c *fakeClient) Start(context.Context, Endpoint) (*Tunnel, error) {
+	now := time.Now()
+	c.at.Store(&now)
 	c.started.Add(1)
 	if c.line != "" {
 		log.Print(c.line)
@@ -149,8 +160,8 @@ func passS1() Metrics {
 	return Metrics{MetricConnectOK: 2, MetricConnectTotal: 2, MetricConnectP95Ms: 1}
 }
 func passS7() Metrics {
-	return Metrics{MetricHeapPeakBytes: 1 << 20, MetricRSSPeakBytes: 1 << 20,
-		MetricGoroutinesIdle: 10, MetricGoroutinesAfter: 10}
+	return Metrics{MetricHeapBaselineBytes: 1 << 20, MetricHeapPeakBytes: 2 << 20, MetricRSSBaselineBytes: 20 << 20,
+		MetricRSSPeakBytes: 21 << 20, MetricGoroutinesIdle: 10, MetricGoroutinesAfter: 10}
 }
 
 // cellsByID indexes a report's cells.
@@ -292,6 +303,27 @@ func readReport(t *testing.T, path string) Report {
 		t.Fatal(err)
 	}
 	return rep
+}
+
+// ai-generated: the baseline S7 judges memory growth over is read before the
+// client starts, whatever the client does on its way up.
+func TestRunPlanReadsTheBaselineBeforeTheClientStarts(t *testing.T) {
+	resetRegistryForTest(t)
+	var (
+		baseline Sample
+		marked   bool
+	)
+	Register(Scenario{ID: "S7", Applies: always, Run: func(_ context.Context, env *Env) (Metrics, error) {
+		baseline, marked = env.Sampler.sampleAt(markBaseline)
+		return passS7(), nil
+	}})
+	client := &fakeClient{name: "mobile", delay: 20 * time.Millisecond}
+	start := time.Now()
+	newHarness(t, &scriptTarget{pairs: []Pair{{"jitsi", "datachannel"}}}, client).run(context.Background(), t)
+	if !marked || baseline.At.Before(start) || !baseline.At.Before(client.startedAt()) {
+		t.Fatalf("baseline %+v (marked %t), client started at %v: want a reading taken before the start",
+			baseline, marked, client.startedAt())
+	}
 }
 
 func TestRunPlanTimesTheClientsStartForS0(t *testing.T) {

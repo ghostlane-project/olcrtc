@@ -350,15 +350,16 @@ func TestS6RecordsNeverReadyAndStillStopsTheServer(t *testing.T) {
 	}
 }
 
-// TestS7ReadsTheWindowAndTheMarks gives S7 a sampler that saw S0 to S6: the
-// peaks come from S2's start to S4's end alone, the goroutines from the
-// marks, and nothing from after S4, where S5's queries and S6's clients
-// still run.
+// TestS7ReadsTheWindowAndTheMarks gives S7 a sampler that saw the runner's
+// baseline and S0 to S6: the peaks come from S2's start to S4's end alone,
+// the baseline and the goroutines from the marks, and nothing from after S4,
+// where S5's queries and S6's clients still run.
 func TestS7ReadsTheWindowAndTheMarks(t *testing.T) {
 	s := NewSampler(time.Second)
 	t0 := time.Now()
 	at := func(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
 	s.samples = []Sample{
+		{At: at(-10), HeapInuse: 3 << 20, RSS: 28 << 20, Goroutines: 12}, // the baseline, before the client
 		{At: at(0), HeapInuse: 1 << 20, RSS: 20 << 20, Goroutines: 90},   // S0's transfers
 		{At: at(10), HeapInuse: 2 << 20, RSS: 21 << 20, Goroutines: 40},  // S1's mark
 		{At: at(15), HeapInuse: 3 << 20, RSS: 22 << 20, Goroutines: 200}, // S1's burst
@@ -367,13 +368,14 @@ func TestS7ReadsTheWindowAndTheMarks(t *testing.T) {
 		{At: at(40), HeapInuse: 4 << 20, RSS: 31 << 20, Goroutines: 45},  // S4's end
 		{At: at(50), HeapInuse: 30 << 20, RSS: 60 << 20, Goroutines: 300},
 	}
+	s.marks[markBaseline] = at(-10)
 	s.marks[markIdle], s.marks[markLoadStart], s.marks[markQuietEnd] = at(10), at(20), at(40)
 	m, err := scenario(t, "S7").Run(context.Background(), &Env{Sampler: s})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := Metrics{MetricHeapPeakBytes: 9 << 20, MetricRSSPeakBytes: 33 << 20,
-		MetricGoroutinesIdle: 40, MetricGoroutinesAfter: 45}
+	want := Metrics{MetricHeapBaselineBytes: 3 << 20, MetricRSSBaselineBytes: 28 << 20,
+		MetricHeapPeakBytes: 9 << 20, MetricRSSPeakBytes: 33 << 20, MetricGoroutinesIdle: 40, MetricGoroutinesAfter: 45}
 	if !maps.Equal(m, want) {
 		t.Fatalf("S7 = %v\nwant %v", m, want)
 	}
@@ -384,6 +386,7 @@ func TestS7ReadsTheWindowAndTheMarks(t *testing.T) {
 
 func TestS7ReadsALiveSampler(t *testing.T) {
 	env, _ := directEnv(t)
+	env.Sampler.Mark(markBaseline)
 	env.Sampler.Mark(markIdle)
 	env.Sampler.Mark(markLoadStart)
 	time.Sleep(60 * time.Millisecond)
@@ -392,10 +395,11 @@ func TestS7ReadsALiveSampler(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m[MetricHeapPeakBytes] <= 0 || m[MetricGoroutinesIdle] <= 0 || m[MetricGoroutinesAfter] <= 0 {
+	if m[MetricHeapPeakBytes] <= 0 || m[MetricHeapBaselineBytes] <= 0 || m[MetricGoroutinesIdle] <= 0 ||
+		m[MetricGoroutinesAfter] <= 0 {
 		t.Fatalf("S7 metrics = %v", m)
 	}
-	if runtime.GOOS == "linux" && m[MetricRSSPeakBytes] <= 0 {
+	if runtime.GOOS == "linux" && (m[MetricRSSPeakBytes] <= 0 || m[MetricRSSBaselineBytes] <= 0) {
 		t.Fatalf("S7 read no RSS on linux: %v", m)
 	}
 }
@@ -403,7 +407,7 @@ func TestS7ReadsALiveSampler(t *testing.T) {
 func TestS7NamesWhatItCannotRead(t *testing.T) {
 	s7 := scenario(t, "S7")
 	stopped := NewSampler(time.Second) // never started: a mark takes no sample
-	for _, mark := range []string{markIdle, markLoadStart, markQuietEnd} {
+	for _, mark := range []string{markBaseline, markIdle, markLoadStart, markQuietEnd} {
 		stopped.Mark(mark)
 	}
 	if _, err := s7.Run(context.Background(), &Env{Sampler: stopped}); !errors.Is(err, ErrNoSample) {
@@ -412,7 +416,13 @@ func TestS7NamesWhatItCannotRead(t *testing.T) {
 	env, _ := directEnv(t)
 	env.Sampler.Mark(markLoadStart)
 	env.Sampler.Mark(markQuietEnd)
+	// ai-generated: without the runner's baseline there is no growth to judge.
 	_, err := s7.Run(context.Background(), env)
+	if !errors.Is(err, ErrNoSample) || !strings.Contains(err.Error(), markBaseline) {
+		t.Fatalf("S7 without the runner's baseline = %v, want ErrNoSample naming %s", err, markBaseline)
+	}
+	env.Sampler.Mark(markBaseline)
+	_, err = s7.Run(context.Background(), env)
 	if !errors.Is(err, ErrNoSample) || !strings.Contains(err.Error(), markIdle) {
 		t.Fatalf("S7 without S1's mark = %v, want ErrNoSample naming %s", err, markIdle)
 	}

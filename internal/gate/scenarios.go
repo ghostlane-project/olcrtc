@@ -39,8 +39,10 @@ const (
 	dnsAnswerBytes  = 4096            // S5: one datagram read, room for any answer
 )
 
-// Sampler marks the scenarios leave for S7.
+// Sampler marks S7 reads: the runner's, before the client starts, and those
+// the scenarios leave.
 const (
+	markBaseline  = "baseline"        // the runner, before the client starts: the memory baseline
 	markIdle      = "goroutines_idle" // S1, before its burst: the goroutine baseline
 	markLoadStart = "S2-start"        // S2, before its pulls: the memory window opens
 	markQuietEnd  = "S4-end"          // S4, after its quiet: 60 s after the load
@@ -295,13 +297,19 @@ func readyAfterLateBridge(ctx context.Context, env *Env, delay time.Duration) fl
 }
 
 // runS7 is the phone's memory (olcbox#24, #26) over what S2-S4 ran: the peak
-// heap and RSS from S2's start to S4's end, and the goroutines at S1's mark
-// against those at S4's end, 60 s after the load. S5 and S6 run after S4 and
-// before S7, and what they still hold is not what S7 judges.
+// heap and RSS from S2's start to S4's end and the baseline read before the
+// client started, whose difference the verdict judges, and the goroutines
+// at S1's mark against those at S4's end, 60 s after the load. S5 and S6 run
+// after S4 and before S7, and what they still hold is not what S7 judges.
 func runS7(_ context.Context, env *Env) (Metrics, error) {
 	heap, rss, ok := env.Sampler.PeakBetween(markLoadStart, markQuietEnd)
 	if !ok {
 		return nil, fmt.Errorf("%w between %s and %s", ErrNoSample, markLoadStart, markQuietEnd)
+	}
+	// ai-generated: the baseline the memory growth is judged over.
+	base, ok := env.Sampler.sampleAt(markBaseline)
+	if !ok {
+		return nil, fmt.Errorf("%w at %s", ErrNoSample, markBaseline)
 	}
 	idle, ok := env.Sampler.sampleAt(markIdle)
 	if !ok {
@@ -312,6 +320,7 @@ func runS7(_ context.Context, env *Env) (Metrics, error) {
 		return nil, fmt.Errorf("%w at %s", ErrNoSample, markQuietEnd)
 	}
 	return Metrics{
+		MetricHeapBaselineBytes: float64(base.HeapInuse), MetricRSSBaselineBytes: float64(base.RSS),
 		MetricHeapPeakBytes: float64(heap), MetricRSSPeakBytes: float64(rss),
 		MetricGoroutinesIdle: float64(idle.Goroutines), MetricGoroutinesAfter: float64(after.Goroutines),
 	}, nil

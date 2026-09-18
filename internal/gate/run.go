@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"time"
@@ -180,13 +182,13 @@ func pause(ctx context.Context, d time.Duration) bool {
 }
 
 // runClient starts one flavour against the pair's server and runs its
-// scenarios on the one tunnel, under a sampler of their own; a client that
-// never came up fails every cell it had.
+// scenarios on the one tunnel, under a sampler of their own whose baseline
+// is read before the client starts; a client that never came up fails every
+// cell it had.
 func runClient(ctx context.Context, o Options, pair Pair, client Client, ep Endpoint, dir string,
 	run func(string, func() error),
 ) {
-	sampler := NewSampler(time.Second)
-	sampler.Start()
+	sampler := baselineSampler()
 	defer sampler.Stop()
 	env := newEnv(o, pair, client, ep, dir, sampler)
 	tun, err := startClient(ctx, o, env)
@@ -202,6 +204,21 @@ func runClient(ctx context.Context, o Options, pair Pair, client Client, ep Endp
 		}
 		run(cellName(pair, client.Name(), s.ID), func() error { return runCell(ctx, o, env, s) })
 	}
+}
+
+// baselineSampler starts a client's sampler on a clean baseline: a GC, then
+// FreeOSMemory's own GC, hand back what earlier pairs left (a sync.Pool's
+// objects outlive one cycle as its victim cache) and return the freed pages,
+// and the baseline mark reads the process before the client starts. S7
+// judges the client's memory by how far it rose over that reading.
+func baselineSampler() *Sampler {
+	// ai-generated: the clean baseline S7's memory growth is judged over.
+	runtime.GC() //nolint:revive // a clean baseline for a memory verdict, not a tuning knob
+	debug.FreeOSMemory()
+	s := NewSampler(time.Second)
+	s.Start()
+	s.Mark(markBaseline)
+	return s
 }
 
 // newEnv is the world a client's cells share. On a local target a cell may
