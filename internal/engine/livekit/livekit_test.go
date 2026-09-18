@@ -29,10 +29,13 @@ type fakeRoom struct {
 	tracks       int
 	unpublished  int
 	disconnected int
+	// ai-generated: gone and publisherDown.
+	gone          chan struct{}
+	publisherDown bool
 }
 
 func newFakeRoom() *fakeRoom {
-	return &fakeRoom{state: lksdk.ConnectionStateConnected}
+	return &fakeRoom{state: lksdk.ConnectionStateConnected, gone: make(chan struct{})}
 }
 
 func (r *fakeRoom) publishData(data []byte) error {
@@ -66,8 +69,28 @@ func (r *fakeRoom) unpublishLocalTracks() {
 func (r *fakeRoom) disconnect() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.disconnected == 0 {
+		close(r.gone) // ai-generated: this branch.
+	}
 	r.disconnected++
 	r.state = lksdk.ConnectionStateDisconnected
+}
+
+// ai-generated: left, publisherReady and setPublisherDown.
+func (r *fakeRoom) left() <-chan struct{} {
+	return r.gone
+}
+
+func (r *fakeRoom) publisherReady() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return !r.publisherDown
+}
+
+func (r *fakeRoom) setPublisherDown(down bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.publisherDown = down
 }
 
 func (r *fakeRoom) connectionState() lksdk.ConnectionState {

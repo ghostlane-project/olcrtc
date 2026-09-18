@@ -78,10 +78,21 @@ type roomHandle interface {
 	unpublishLocalTracks()
 	disconnect()
 	connectionState() lksdk.ConnectionState
+	// ai-generated: left and publisherReady.
+	// left is closed once disconnect has begun, so a wait on the room can
+	// give up on it.
+	left() <-chan struct{}
+	// publisherReady reports whether a data publish would go out now
+	// instead of waiting in the SDK for the publisher peer connection.
+	publisherReady() bool
 }
 
 type sdkRoom struct {
 	room *lksdk.Room
+	// leftCh is closed by the first disconnect. ai-generated: leftCh and
+	// leftOnce.
+	leftCh   chan struct{}
+	leftOnce sync.Once
 }
 
 func (r *sdkRoom) publishData(data []byte) error {
@@ -142,6 +153,7 @@ func (r *sdkRoom) unpublishLocalTracks() {
 // is already disconnected (the usual case on the reconnect path, where we
 // got here from OnDisconnected) sent no LEAVE and needs no grace at all.
 func (r *sdkRoom) disconnect() {
+	r.leftOnce.Do(func() { close(r.leftCh) }) // ai-generated: this line.
 	if r.room == nil {
 		return
 	}
@@ -155,6 +167,29 @@ func (r *sdkRoom) disconnect() {
 
 func (r *sdkRoom) connectionState() lksdk.ConnectionState {
 	return r.room.ConnectionState()
+}
+
+// left is closed by the first disconnect. ai-generated: left.
+func (r *sdkRoom) left() <-chan struct{} {
+	return r.leftCh
+}
+
+// publisherReady mirrors what the SDK waits for before a data publish: ICE
+// up on the publisher peer connection and its data channels open, which
+// they are as soon as its SCTP association is. A subscriber-primary room
+// negotiates that connection only on its first publish.
+//
+// ai-generated: publisherReady.
+func (r *sdkRoom) publisherReady() bool {
+	if r.room == nil || r.room.LocalParticipant == nil {
+		return false
+	}
+	pc := r.room.LocalParticipant.GetPublisherPeerConnection()
+	if pc == nil || pc.ICEConnectionState() != webrtc.ICEConnectionStateConnected {
+		return false
+	}
+	sctp := pc.SCTP()
+	return sctp != nil && sctp.State() == webrtc.SCTPTransportStateConnected
 }
 
 type connectRoomFunc func(
@@ -177,7 +212,12 @@ func connectSDKRoom(
 	if err != nil {
 		return nil, fmt.Errorf("connect to livekit room: %w", err)
 	}
-	return &sdkRoom{room: room}, nil
+	return newSDKRoom(room), nil
+}
+
+// newSDKRoom wraps room. ai-generated: newSDKRoom.
+func newSDKRoom(room *lksdk.Room) *sdkRoom {
+	return &sdkRoom{room: room, leftCh: make(chan struct{})}
 }
 
 // Session is the LiveKit engine handle.
@@ -425,10 +465,38 @@ func (s *Session) processSendQueue() {
 				logger.Warnf("livekit dropping %d bytes: %v", len(data), err)
 				continue
 			}
-			if err := room.publishData(data); err != nil {
+			// ai-generated: publish in place of room.publishData.
+			if err := s.publish(room, data); err != nil {
+				if errors.Is(err, ErrSessionClosed) {
+					return
+				}
 				logger.Warnf("livekit publish data error: %v", err)
 			}
 		}
+	}
+}
+
+// publish hands data to room and waits for the SDK to take it, for the
+// session to close or for the room to be left, whichever comes first.
+//
+// A data publish can sit in the SDK for the whole connectTimeout: it waits
+// for the publisher peer connection on a bare timer that Disconnect does
+// not end. Made inline, that wait held the send worker, so Close sat it out
+// in wg.Wait and a room joined by reconnect got nothing until it ran out. A
+// publish left behind here ends on that timer, its payload dropped as it
+// would have been then.
+//
+// ai-generated: publish.
+func (s *Session) publish(room roomHandle, data []byte) error {
+	published := make(chan error, 1)
+	go func() { published <- room.publishData(data) }()
+	select {
+	case err := <-published:
+		return err
+	case <-s.done:
+		return ErrSessionClosed
+	case <-room.left():
+		return fmt.Errorf("%w: left with a publish still waiting on it", ErrRoomNotConnected)
 	}
 }
 
@@ -481,21 +549,28 @@ func (s *Session) SendDatagram(data []byte) error {
 
 // SendDatagramTo publishes one unordered, lossy data packet to a participant.
 // Datagrams skip the send queue: a packet that cannot go now is worth nothing
-// later, so an unconnected room refuses it instead of parking it.
+// later, so an unconnected room refuses it instead of parking it. So does a
+// connected one whose publisher is not up yet, where the SDK would park the
+// caller for up to connectTimeout. ai-generated: the publisher check.
 func (s *Session) SendDatagramTo(peerID string, data []byte) error {
 	if s.closed.Load() {
 		return ErrSessionClosed
 	}
 	room := s.currentRoom()
-	if room == nil || room.connectionState() != lksdk.ConnectionStateConnected {
+	if room == nil || room.connectionState() != lksdk.ConnectionStateConnected || !room.publisherReady() {
 		return ErrRoomNotConnected
 	}
 	return room.publishDatagram(data, peerID)
 }
 
 // DatagramCanSend reports whether a datagram would be published now.
+// ai-generated: the publisher check.
 func (s *Session) DatagramCanSend() bool {
-	return s.CanSend()
+	if !s.CanSend() {
+		return false
+	}
+	room := s.currentRoom()
+	return room != nil && room.publisherReady()
 }
 
 // Close terminates the session.
