@@ -325,8 +325,10 @@ func TestS6TimesTheClientAgainstEachLateBridge(t *testing.T) {
 	if servers.stopped != 2 || client.stopped.Load() != 2 {
 		t.Fatalf("stopped %d servers and %d tunnels, want both of each", servers.stopped, client.stopped.Load())
 	}
-	if f := Evaluate("S6", m, Local); len(f) != 0 {
-		t.Fatalf("S6 judged %v", f)
+	// ai-generated: these fake servers hold no bridge back, and a client
+	// ready in 20 ms against them is what a dead hook looks like.
+	if f := Evaluate("S6", m, Local); len(f) != 2 || !strings.Contains(strings.Join(f, ";"), "was not late") {
+		t.Fatalf("S6 against servers that were not late judged %v, want both delays failed", f)
 	}
 }
 

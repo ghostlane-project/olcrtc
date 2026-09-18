@@ -145,6 +145,12 @@ func TestEvaluateWordsEveryFailure(t *testing.T) {
 		}},
 		{"S5", Metrics{"answered_1": 62}, []string{"answered_1 62 < 63", "answered_2 0 < 63"}},
 		{"S6", Metrics{"ready_8s_ms": -1}, []string{"ready_3s_ms 0: never ready", "ready_8s_ms -1: never ready"}},
+		// ai-generated: a hook that no longer holds the bridge back: ready in
+		// the 4.3 s an undelayed handshake takes, which passes the 3 s case
+		// alone. Without the floor the cell would pass having tested nothing.
+		{"S6", Metrics{"ready_3s_ms": 4300, "ready_8s_ms": 4300}, []string{
+			"ready_8s_ms 4300 < 8000: the bridge was not late",
+		}},
 		{"S7", Metrics{"heap_baseline_bytes": 1 << 20, "heap_peak_bytes": 14 << 20, "rss_baseline_bytes": 26 << 20,
 			"rss_peak_bytes": 46 << 20, "goroutines_idle": 80, "goroutines_after": 101},
 			[]string{
@@ -194,6 +200,8 @@ func TestEvaluateBoundsAreInclusive(t *testing.T) {
 		{"S5", Metrics{"answered_1": 63, "answered_2": 63}, "answered_2", -1},
 		{"S6", s6, "ready_3s_ms", 1},
 		{"S6", s6, "ready_8s_ms", 1},
+		{"S6", Metrics{"ready_3s_ms": 3000, "ready_8s_ms": 8000}, "ready_3s_ms", -1},
+		{"S6", Metrics{"ready_3s_ms": 3000, "ready_8s_ms": 8000}, "ready_8s_ms", -1},
 		{"S7", s7, "goroutines_after", 1},
 		{"S7", s7, "heap_peak_bytes", 1},
 		{"S7", s7, "rss_peak_bytes", 1},

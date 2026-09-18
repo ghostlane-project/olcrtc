@@ -137,7 +137,7 @@ go test -count=1 -tags olcrtc_lean -timeout 45m ./internal/gate -run '^TestGate$
 | S3 | upload saturation | 4 параллельные выгрузки по 5 MiB, connect поверх как в S2 (olcbox#15) | как S2, с `throughput_up_bps` | нагрузочные пары, `mobile` |
 | S4 | quiet after load | 60 с простоя после S3 (olcbox#25) | ни одного missed pong, ни одного reconnect, конференция жива, затем загрузка 1 KB | нагрузочные пары, `mobile` |
 | S5 | resolver burst | 64 одновременных DNS-запроса к 8.8.8.8 через SOCKS UDP associate, дважды | `resolver_answered` из 64 за 5 с, оба раза | нагрузочные пары, `mobile` |
-| S6 | late server bridge | новый сервер, у которого bridge Jitsi открывается на 3 с позже, затем такой же с опозданием на 8 с (olcbox#22) | клиент готов в пределах задержки плюс бюджет handshake | локальная цель, `jitsi/datachannel`, оба варианта |
+| S6 | late server bridge | новый сервер, у которого bridge Jitsi открывается на 3 с позже, затем такой же с опозданием на 8 с (olcbox#22) | клиент готов не раньше задержки (это доказывает, что bridge опоздал) и в пределах задержки плюс бюджет handshake | локальная цель, `jitsi/datachannel`, оба варианта |
 | S7 | phone memory | пик heap и RSS от начала S2 до конца S4 над базой, снятой до старта клиента; горутины до S1 и в конце S4 | `heap_growth_bytes`, `rss_growth_bytes`, `goroutine_growth` | нагрузочные пары, `mobile` |
 
 Нагрузочные пары - `jitsi/datachannel`, `telemost/vp8channel` и `wbstream/vp8channel` у локальной цели, пара ссылки у цели link. Большая загрузка - `-olcrtc.gate-big-mb` MiB. Сценарии одного клиента идут по порядку в одном туннеле. S6 задерживает bridge через `OLCRTC_TEST_BRIDGE_DELAY`, который читает только сервер, собранный с `olcrtc_testhooks`; в релизной сборке такого хука нет.
@@ -146,7 +146,7 @@ go test -count=1 -tags olcrtc_lean -timeout 45m ./internal/gate -run '^TestGate$
 
 ## Пороги
 
-Границы, по которым судит вердикт, лежат в `internal/gate/thresholds.go`: `Local` для локальной цели, `Link` для ноды флота и бюджет handshake для S0 и S6. S6 прибавляет бюджет к опозданию bridge своего сервера, 3 с, затем 8 с; это опоздание задаёт сценарий. Ячейка отчёта несёт пороги своей цели, все, какой бы ни был её сценарий:
+Границы, по которым судит вердикт, лежат в `internal/gate/thresholds.go`: `Local` для локальной цели, `Link` для ноды флота и бюджет handshake для S0 и S6. S6 прибавляет бюджет к опозданию bridge своего сервера, 3 с, затем 8 с; это опоздание задаёт сценарий. Клиент, готовый раньше этой задержки, проваливает S6: handshake не завершается, пока bridge не открыт, значит bridge не опоздал и ячейка ничего не проверила. Ячейка отчёта несёт пороги своей цели, все, какой бы ни был её сценарий:
 
 | Порог | Ограничивает |
 |---|---|
@@ -191,7 +191,7 @@ go run ./cmd/gate-report compare -severity fail previous.json current.json
 
 ## CI
 
-Две джобы в `.github/workflows/ci.yml`:
+Джоба `Test` гоняет unit-тесты трёх сборок: обычной, `olcrtc_lean` и `olcrtc_testhooks`, с которой собирается сервер локальной цели, так что хук, на который опирается S6, проверяется на каждом событии, включая pull request из форка. Гейт гоняют ещё две джобы в `.github/workflows/ci.yml`:
 
 - `gate-plan` делает dry run обеих сборок, секреты ей не нужны, поэтому она идёт и для pull request из форка, и кладёт оба плана в summary джобы. Проваливается, если сборка не запланировала ни одной ячейки или запланировала ячейку другого варианта.
 - `gate-local` ждёт `gate-plan` и гоняет гейт на локальной цели: вариант `cli` (`-timeout 25m`), затем вариант `mobile` (`-tags olcrtc_lean`, `-timeout 45m`) при любом исходе первого. Рендерит оба отчёта в summary джобы и выгружает артефакт `gate-local`: отчёты, очищенные логи и сэмплы. Один прогон на ref за раз (`concurrency: gate-<ref>`). Pull request из форка не получает секретов, поэтому для него джоба не запускается; гейт прогонит push, который его вмёржит.
