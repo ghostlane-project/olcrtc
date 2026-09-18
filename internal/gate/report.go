@@ -47,11 +47,14 @@ type Cell struct {
 	Metrics    map[string]float64 `json:"metrics"`
 	Thresholds map[string]float64 `json:"thresholds"`
 	Failures   []string           `json:"failures"`
+	Known      string             `json:"known,omitempty"` // the issue of a cell on the known list (known.go)
 	Log        string             `json:"log,omitempty"`
 	DurationS  float64            `json:"duration_s"`
 }
 
-// Report is gate-report.json, schema 1.
+// Report is gate-report.json, schema 1. A cell's known and failed_known came
+// later and only add to it: a reader that knows neither still reads every
+// failure as one.
 type Report struct {
 	Schema       int     `json:"schema"`
 	EngineCommit string  `json:"engine_commit"`
@@ -65,6 +68,7 @@ type Report struct {
 	Executed     int     `json:"executed"`
 	Passed       int     `json:"passed"`
 	Failed       int     `json:"failed"`
+	FailedKnown  int     `json:"failed_known"` // the failed cells that carry an issue; Failed counts them too
 	Cells        []Cell  `json:"cells"`
 }
 
@@ -112,12 +116,37 @@ func (r *Recorder) Plan(cells []Cell) {
 // planned, a second outcome for one cell, and a number JSON cannot hold (NaN,
 // an infinity) each fail the cell with a reason rather than hide in it: the
 // first two are runner bugs, the last would stop the report being written.
-// Finish keeps copies, so the caller may reuse what it passed.
+// A cell whose id is on the known list carries the issue that tracks it,
+// passed or failed. Finish keeps copies, so the caller may reuse what it
+// passed.
 func (r *Recorder) Finish(
 	id string, m Metrics, thresholds map[string]float64, failures []string, logPath string, took time.Duration,
 ) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	c := r.outcome(id, m, thresholds, failures)
+	c.Log = logPath
+	c.DurationS = took.Seconds()
+	if k, ok := knownFailure(id); ok {
+		c.Known = k.Issue
+	}
+	r.cells[id] = c
+}
+
+// NotRun fails a cell whose scenario never ran with the reason: its server
+// or its client never came up. Such a cell is never a known failure,
+// whatever its id: what failed is the gate's world (a relay, a secret, a
+// start), not the bug an entry of the list is tracked for.
+func (r *Recorder) NotRun(id string, thresholds map[string]float64, reason string) {
+	// ai-generated: a cell failed before it ran, never known.
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.cells[id] = r.outcome(id, nil, thresholds, []string{reason})
+}
+
+// outcome is a cell with what it measured and its outcome, as Finish
+// describes it, and no log, time or issue yet. The caller holds the lock.
+func (r *Recorder) outcome(id string, m Metrics, thresholds map[string]float64, failures []string) Cell {
 	c, known := r.cells[id]
 	var reasons []string
 	switch {
@@ -134,13 +163,12 @@ func (r *Recorder) Finish(
 	reasons = append(reasons, bad...)
 	reasons = append(reasons, failures...)
 	c.Metrics, c.Thresholds, c.Failures = metrics, limits, reasons
-	c.Log = logPath
-	c.DurationS = took.Seconds()
+	c.Log, c.DurationS, c.Known = "", 0, ""
 	c.Status = StatusPass
 	if len(reasons) > 0 {
 		c.Status = StatusFail
 	}
-	r.cells[id] = c
+	return c
 }
 
 // Withhold adds secrets of the run the report must not carry: every failure
@@ -168,13 +196,14 @@ func (r *Recorder) Cell(id string) (Cell, bool) {
 // Report builds the report: every cell by ID, a cell still planned as a
 // failure that did not run, and the counts. Planned counts every cell, one
 // finished without a plan included, so it is always Passed plus Failed;
-// Executed leaves out the cells that never ran.
+// Executed leaves out the cells that never ran; FailedKnown is the failed
+// cells that carry an issue, which a cell that did not run never does.
 func (r *Recorder) Report() Report {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	rep := r.meta
 	rep.DurationS = time.Since(r.started).Seconds()
-	rep.Planned, rep.Executed, rep.Passed, rep.Failed = len(r.cells), 0, 0, 0
+	rep.Planned, rep.Executed, rep.Passed, rep.Failed, rep.FailedKnown = len(r.cells), 0, 0, 0, 0
 	rep.Cells = make([]Cell, 0, len(r.cells))
 	for _, id := range slices.Sorted(maps.Keys(r.cells)) {
 		c := r.shown(r.cells[id])
@@ -185,9 +214,13 @@ func (r *Recorder) Report() Report {
 		case StatusFail:
 			rep.Executed++
 			rep.Failed++
+			if c.Known != "" {
+				rep.FailedKnown++
+			}
 		default:
 			c.Status = StatusFail
 			c.Failures = []string{reasonDidNotRun}
+			c.Known = "" // ai-generated: a cell that did not run is never known
 			rep.Failed++
 		}
 		rep.Cells = append(rep.Cells, c)

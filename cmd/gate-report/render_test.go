@@ -50,6 +50,56 @@ func TestRenderGolden(t *testing.T) {
 	}
 }
 
+// ai-generated: a known cell names its issue, passed or failed, and the
+// line under the table says the known failures fail no gate.
+func TestRenderMarksKnownCellsWithTheirIssue(t *testing.T) {
+	const issue9, issue15 = "https://github.com/romanpodpriatov/olcrtc/issues/9",
+		"https://github.com/romanpodpriatov/olcrtc/issues/15"
+	want := strings.Join([]string{
+		"### Gate: local target, engine 850aa5f9, app 1.0.431",
+		"",
+		"1 of 2 cells failed · Linux/ubuntu24 · 612 s",
+		"",
+		"| Cell | Verdict | Key metrics | Took |",
+		"| --- | --- | --- | --- |",
+		"| `engine-linux/jitsi/datachannel/mobile/S2` | ✅ pass (known: [#15](" + issue15 + ")) | " +
+			"↓ 4.8 Mbit/s, on-top p95 830 ms | 95 s |",
+		"| `engine-linux/jitsi/datachannel/mobile/S4` | ❌ fail (known: [#9](" + issue9 + ")): missed_pong 2 > 0 | " +
+			"missed pongs 2 | 61 s |",
+		"",
+		"1 known failure is tracked by an issue and does not fail the gate.",
+		"",
+	}, "\n")
+	r := sampleReport()
+	r.Cells[0].Known, r.Cells[1].Known, r.FailedKnown = issue15, issue9, 1
+	if got := Render(r); got != want {
+		t.Fatalf("render =\n%s\nwant\n%s", got, want)
+	}
+	r.Cells[0].Status, r.Cells[0].Failures = "fail", []string{}
+	r.Failed, r.FailedKnown = 2, 2
+	md := Render(r)
+	if !strings.HasSuffix(md, "\n\n2 known failures are tracked by issues and do not fail the gate.\n") ||
+		!strings.Contains(md, "| ❌ fail (known: [#15]("+issue15+")) |") {
+		t.Fatalf("two known failures, one without a reason:\n%s", md)
+	}
+}
+
+func TestIssueRefIsTheURLsNumberOrTheTextAsItIs(t *testing.T) {
+	for in, want := range map[string]string{
+		"https://github.com/romanpodpriatov/olcrtc/issues/12": "[#12](https://github.com/romanpodpriatov/olcrtc/issues/12)",
+		"https://github.com/example/fake/issues/latest":       "https://github.com/example/fake/issues/latest",
+		"olcrtc#12":                      "olcrtc#12",
+		"http://example.invalid/12":      "http://example.invalid/12",
+		"https://example.invalid/a|b/12": `https://example.invalid/a\|b/12`,
+		"https://example.invalid/<x>/12": "https://example.invalid/&lt;x>/12",
+		"https://example.invalid/x)/12":  "https://example.invalid/x)/12",
+	} {
+		if got := issueRef(in); got != want {
+			t.Errorf("issueRef(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestRenderHeadingAndSummary(t *testing.T) {
 	all := sampleReport()
 	all.Cells[1].Status, all.Cells[1].Failures = "pass", []string{}

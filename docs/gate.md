@@ -14,7 +14,7 @@
 
 `internal/gate` runs the engine's client against a real relay and a real server with the load shapes that broke the tunnel, judges each cell against thresholds and writes `gate-report.json`. It is a `go test` suite: `TestGate`, switched on by `-olcrtc.gate`. Without the flag `go test ./internal/gate` runs only the unit tests.
 
-Every planned cell ends `pass` or `fail`. A cell that did not run (its server or client never came up, a `-run` filter left it out, the deadline came first) fails with the reason. Nothing is skipped.
+Every planned cell ends `pass` or `fail`. A cell that did not run (its server or client never came up, a `-run` filter left it out, the deadline came first) fails with the reason. Nothing is skipped. A failure of a cell on the known list is reported and does not fail the gate: see [Known failures](#known-failures).
 
 ## Run it locally
 
@@ -161,6 +161,18 @@ The bounds a verdict judges by are in `internal/gate/thresholds.go`: `Local` for
 The handshake budget is not among them, so an S0 or S6 cell does not show the bound it was judged by. The other rules take no number: every transfer and connect must succeed, S4 allows no missed pong and no reconnect. A failure names the metric and what it measured, for example `connect_ok 23 of connect_total 24`.
 
 S7 weighs the test process, which holds the harness too (the test binary, the origin, the load, what earlier pairs left), so it judges what the client adds. Before each client starts, the runner collects the garbage, hands the freed memory back to the OS and reads a baseline; an S7 cell records it as `heap_baseline_bytes` and `rss_baseline_bytes` next to `heap_peak_bytes` and `rss_peak_bytes`, and the verdict bounds the difference. The two bounds are the spec's for a process that runs the client alone (16 MiB of live heap, 45 MiB RSS) less what such a process holds before its client starts.
+
+## Known failures
+
+`internal/gate/known.go` lists the cells an open engine issue fails on every run, one entry per line: a cell id pattern, in which `*` stands for exactly one whole segment (`engine-linux/jitsi/seichannel/*/S0` is that cell of both flavours), the issue's URL and a few words on what fails. Without the list a red gate says nothing about new regressions, because those cells fail every run.
+
+- A known cell still runs and is reported. A failed one stays `fail` with its reasons; the report adds `known`, the issue's URL, to the cell and counts it in `failed` and in `failed_known`. `render` shows it as `fail (known: #9)` and says under the table how many known failures there are.
+- A known failure fails neither its subtest nor `TestGate`, which logs it with its issue; any other failed cell fails the gate. The app's verdict does the same: it fails on `failed` minus `failed_known`.
+- A cell that did not run is never known, whatever its id: one still planned when the report is built, or one whose server or client never came up. What failed there is the gate's world (a relay, a secret, a start), not the bug the issue tracks.
+- Every entry needs an open issue. Once the issue is closed and its cells pass, drop the entry: `TestGate` logs `known failure passed: <cell> (<issue>)` for each known cell that passed, and `render` shows it as `pass (known: #9)`.
+- WB Stream cells are never on the list: without the WB token they fail on configuration, and that must stay a blocking failure.
+
+The unit tests hold the list to these rules: each pattern matches a cell of the plan and names a provider other than `wbstream`, each entry has an issue URL and a reason, and no cell is matched by two entries.
 
 ## Artifacts
 

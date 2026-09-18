@@ -466,6 +466,52 @@ func TestRunPlanFailsTheCellsOfAClientThatNeverStarts(t *testing.T) {
 	}
 }
 
+// ai-generated: a known failure's run says so with its issue, and the entry
+// logs it rather than failing it; a known cell that passed runs as any pass;
+// a known cell whose server never came up is no known failure, and neither
+// is a failure off the list.
+func TestRunPlanRunsAKnownFailureWithItsIssue(t *testing.T) {
+	resetRegistryForTest(t)
+	withKnown(t,
+		KnownFailure{Cell: "engine-test/jitsi/*/cli/S1", Issue: fakeIssue, Why: "fake: connects fail"},
+		KnownFailure{Cell: "engine-test/jitsi/datachannel/cli/S7", Issue: fakeIssue2, Why: "fake: fixed since"},
+	)
+	Register(fixed("S0", Metrics{}, nil))
+	Register(fixed("S1", Metrics{}, nil))
+	Register(fixed("S7", passS7(), nil))
+	target := &scriptTarget{pairs: []Pair{{"jitsi", "vp8channel"}, {"jitsi", "datachannel"}},
+		errs: []error{fmt.Errorf("fake: %w: the pool is empty", ErrPoolRoom)}}
+	h := newHarness(t, target, &fakeClient{name: "cli"})
+	rep := h.run(context.Background(), t)
+	if rep.Planned != 6 || rep.Passed != 1 || rep.Failed != 5 || rep.FailedKnown != 1 {
+		t.Fatalf("report = planned %d passed %d failed %d failed_known %d",
+			rep.Planned, rep.Passed, rep.Failed, rep.FailedKnown)
+	}
+	known := h.errs["jitsi/datachannel/cli/S1"]
+	if !errors.Is(known, ErrCellFailed) || !errors.Is(known, ErrKnownFailure) ||
+		!strings.Contains(known.Error(), fakeIssue) || !strings.Contains(known.Error(), "connect_ok 0 of connect_total 0") {
+		t.Fatalf("the known failure ran as %v, want it failed and known, with its issue and its reasons", known)
+	}
+	if err := h.errs["jitsi/datachannel/cli/S7"]; err != nil {
+		t.Fatalf("the known cell that passed ran as %v", err)
+	}
+	for _, name := range []string{"jitsi/datachannel/cli/S0", "jitsi/vp8channel/cli/S0", "jitsi/vp8channel/cli/S1",
+		"jitsi/vp8channel/cli/S7"} {
+		if err := h.errs[name]; !errors.Is(err, ErrCellFailed) || errors.Is(err, ErrKnownFailure) {
+			t.Fatalf("%s ran as %v, want a failure no known issue excuses", name, err)
+		}
+	}
+	cells := cellsByID(rep)
+	for id, want := range map[string]string{
+		"engine-test/jitsi/datachannel/cli/S1": fakeIssue, "engine-test/jitsi/datachannel/cli/S7": fakeIssue2,
+		"engine-test/jitsi/vp8channel/cli/S1": "", "engine-test/jitsi/datachannel/cli/S0": "",
+	} {
+		if c := cells[id]; c.Known != want {
+			t.Fatalf("%s = %+v, want known %q", id, c, want)
+		}
+	}
+}
+
 func TestRunPlanStartsNoCellOnceTheRunEnds(t *testing.T) {
 	resetRegistryForTest(t)
 	ctx, cancel := context.WithCancel(context.Background())

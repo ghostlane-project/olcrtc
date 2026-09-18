@@ -128,7 +128,9 @@ func TestMain(m *testing.M) {
 }
 
 // TestGate is the release gate: every cell of the plan is a subtest named
-// after it, and the report goes to -olcrtc.gate-dir.
+// after it, and the report goes to -olcrtc.gate-dir. A known failure
+// (known.go) is logged with its issue and fails neither its subtest nor the
+// gate; every other failure fails both.
 func TestGate(t *testing.T) {
 	if !*gateOn {
 		t.Skip("the release gate is off; pass -olcrtc.gate")
@@ -170,7 +172,10 @@ func TestGate(t *testing.T) {
 	}
 	RunPlan(ctx, opt, func(name string, cell func() error) {
 		t.Run(name, func(t *testing.T) {
-			if err := cell(); err != nil {
+			switch err := cell(); {
+			case errors.Is(err, ErrKnownFailure): // ai-generated: tracked by an issue, reported, not failed
+				t.Log(err)
+			case err != nil:
 				t.Error(err)
 			}
 		})
@@ -179,9 +184,50 @@ func TestGate(t *testing.T) {
 	for _, id := range unreported(rep) {
 		t.Errorf("%s: %s", id, reasonDidNotRun)
 	}
-	if rep.Failed > 0 {
-		t.Errorf("gate: %d of %d cells failed; the report goes to %s", rep.Failed, rep.Planned, gateRun.path)
+	for _, line := range knownLines(rep) {
+		t.Log(line)
 	}
+	if why := gateFailure(rep); why != "" {
+		t.Errorf("gate: %s; the report goes to %s", why, gateRun.path)
+	}
+}
+
+// gateFailure is why a run's report fails the gate, or "" when it does not:
+// every failed cell fails it but a known failure, which ran and is reported
+// and whose issue tracks it.
+func gateFailure(rep Report) string {
+	// ai-generated: the gate's verdict over a report, known failures aside.
+	if rep.Failed-rep.FailedKnown <= 0 {
+		return ""
+	}
+	why := fmt.Sprintf("%d of %d cells failed", rep.Failed, rep.Planned)
+	if rep.FailedKnown > 0 {
+		why += fmt.Sprintf(" (%d known, tracked by issues)", rep.FailedKnown)
+	}
+	return why
+}
+
+// knownLines is what the gate logs of the known list: each known failure
+// with its issue and what fails, and each known cell that passed, whose
+// entry is due to go.
+func knownLines(rep Report) []string {
+	// ai-generated: the known failures of a run and the known cells that passed.
+	var out []string
+	for _, c := range rep.Cells {
+		switch {
+		case c.Known == "":
+		case c.Status == StatusPass:
+			out = append(out, fmt.Sprintf("known failure passed: %s (%s) - drop it from known.go once the issue is closed",
+				c.ID, c.Known))
+		default:
+			line := fmt.Sprintf("known failure: %s (%s)", c.ID, c.Known)
+			if k, ok := knownFailure(c.ID); ok {
+				line += ": " + k.Why
+			}
+			out = append(out, line)
+		}
+	}
+	return out
 }
 
 // ownFlavour is the flavour a build ships: the phones' runtime in the lean
@@ -736,6 +782,60 @@ func TestUnreportedIsWhatNoCellSubtestFailed(t *testing.T) {
 	}}
 	if got := unreported(rep); !slices.Equal(got, []string{"p/a/b/cli/S6"}) {
 		t.Fatalf("unreported = %q", got)
+	}
+}
+
+// ai-generated: the gate fails on every failed cell but a known one, and a
+// known cell that did not run fails it too.
+func TestGateFailureLeavesKnownFailuresOut(t *testing.T) {
+	for _, tc := range []struct {
+		rep  Report
+		want string // "" passes the gate
+	}{
+		{Report{Planned: 32, Passed: 32}, ""},
+		{Report{Planned: 32, Passed: 30, Failed: 2, FailedKnown: 2}, ""},
+		{Report{Planned: 32, Passed: 29, Failed: 3, FailedKnown: 2}, "3 of 32 cells failed (2 known, tracked by issues)"},
+		{Report{Planned: 32, Passed: 31, Failed: 1}, "1 of 32 cells failed"},
+	} {
+		if got := gateFailure(tc.rep); got != tc.want {
+			t.Errorf("gateFailure(failed %d, known %d) = %q, want %q", tc.rep.Failed, tc.rep.FailedKnown, got, tc.want)
+		}
+	}
+	withKnown(t, KnownFailure{Cell: "p/a/b/cli/S0", Issue: fakeIssue, Why: "fake"},
+		KnownFailure{Cell: "p/a/b/cli/S2", Issue: fakeIssue2, Why: "fake"})
+	r := NewRecorder(Report{})
+	r.Plan([]Cell{{ID: "p/a/b/cli/S0"}, {ID: "p/a/b/cli/S1"}})
+	r.Finish("p/a/b/cli/S0", nil, nil, []string{"pull_ok 0 != 1"}, "", time.Second)
+	r.Finish("p/a/b/cli/S1", Metrics{MetricPullOK: 1}, nil, nil, "", time.Second)
+	if got := gateFailure(r.Report()); got != "" {
+		t.Fatalf("a run whose only failure is known fails the gate: %q", got)
+	}
+	r.Plan([]Cell{{ID: "p/a/b/cli/S2"}})
+	if got, want := gateFailure(r.Report()), "2 of 3 cells failed (1 known, tracked by issues)"; got != want {
+		t.Fatalf("a known cell that did not run: %q, want %q", got, want)
+	}
+	r.Finish("p/a/b/cli/S2", nil, nil, []string{"pull_ok 0 != 1"}, "", time.Second)
+	r.Plan([]Cell{{ID: "p/a/b/cli/S3"}})
+	r.Finish("p/a/b/cli/S3", nil, nil, []string{"connect_ok 1 of connect_total 2"}, "", time.Second)
+	if got, want := gateFailure(r.Report()), "3 of 4 cells failed (2 known, tracked by issues)"; got != want {
+		t.Fatalf("a failure off the list: %q, want %q", got, want)
+	}
+}
+
+func TestKnownLinesNameEachKnownCellWithItsIssue(t *testing.T) {
+	withKnown(t, KnownFailure{Cell: "p/a/b/*/S0", Issue: fakeIssue, Why: "fake: pulls stall"})
+	rep := Report{Cells: []Cell{
+		{ID: "p/a/b/cli/S0", Status: StatusFail, Known: fakeIssue},
+		{ID: "p/a/b/cli/S1", Status: StatusFail},
+		{ID: "p/a/b/mobile/S0", Status: StatusPass, Known: fakeIssue},
+		{ID: "p/a/b/mobile/S1", Status: StatusPass},
+	}}
+	want := []string{
+		"known failure: p/a/b/cli/S0 (" + fakeIssue + "): fake: pulls stall",
+		"known failure passed: p/a/b/mobile/S0 (" + fakeIssue + ") - drop it from known.go once the issue is closed",
+	}
+	if got := knownLines(rep); !slices.Equal(got, want) {
+		t.Fatalf("knownLines =\n%q\nwant\n%q", got, want)
 	}
 }
 

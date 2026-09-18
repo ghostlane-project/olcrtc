@@ -68,10 +68,11 @@ type Options struct {
 // which the entry makes a subtest named after the cell, its id without the
 // platform, so the test output and the report name the same things: run
 // calls cell, and cell returns an error wrapping ErrCellFailed when the cell
-// failed, a server or a client that never came up included. A cell run never
-// calls, the one a -run filter leaves out or one after ctx ended, stays
-// planned, and the report fails it as not run. With a ReportPath the report
-// on disk follows the plan and every cell.
+// failed, a server or a client that never came up included, and
+// ErrKnownFailure as well when the cell is a known failure (known.go). A cell
+// run never calls, the one a -run filter leaves out or one after ctx ended,
+// stays planned, and the report fails it as not run. With a ReportPath the
+// report on disk follows the plan and every cell.
 func RunPlan(ctx context.Context, opt Options, run func(name string, cell func() error)) {
 	o := prepared(opt)
 	names := make([]string, 0, len(o.Clients))
@@ -337,24 +338,37 @@ func runScenario(ctx context.Context, env *Env, s Scenario) (Metrics, error) {
 
 // failCells fails every cell a client has on a pair with reason, without
 // running any: the server or the client never came up. Each still goes
-// through run, so it shows in the test output as the cells that ran do.
+// through run, so it shows in the test output as the cells that ran do, and
+// none is a known failure, whatever its id (see Recorder.NotRun).
 func failCells(o Options, pair Pair, client string, reason error, run func(string, func() error)) {
 	for _, s := range scenariosFor(o.Target, pair, client) {
 		id := CellID(o.Target.Platform(), pair, client, s.ID)
 		run(cellName(pair, client, s.ID), func() error {
-			return o.finish(id, nil, []string{reason.Error()}, "", 0)
+			o.Recorder.NotRun(id, o.Thresholds.Map(), reason.Error())
+			return o.recorded(id)
 		})
 	}
 }
 
-// finish records a cell and returns what its run reports: nil for a pass,
-// ErrCellFailed with the failures as the report shows them for a failure.
+// finish records a cell that ran and returns what its run reports (see
+// recorded).
 func (o Options) finish(id string, m Metrics, failures []string, logPath string, took time.Duration) error {
 	o.Recorder.Finish(id, m, o.Thresholds.Map(), failures, logPath, took)
+	return o.recorded(id)
+}
+
+// recorded saves the report with the cell just recorded and returns what the
+// cell's run reports: nil for a pass, ErrCellFailed with the failures as the
+// report shows them for a failure, and ErrKnownFailure with it and the issue
+// for a known one.
+func (o Options) recorded(id string) error {
 	o.save()
 	c, _ := o.Recorder.Cell(id)
-	if c.Status != StatusFail {
+	switch {
+	case c.Status != StatusFail:
 		return nil
+	case c.Known != "": // ai-generated: a known failure names its issue
+		return fmt.Errorf("%w, %w (%s): %s", ErrCellFailed, ErrKnownFailure, c.Known, strings.Join(c.Failures, "; "))
 	}
 	return fmt.Errorf("%w: %s", ErrCellFailed, strings.Join(c.Failures, "; "))
 }

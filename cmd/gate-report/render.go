@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/openlibrecommunity/olcrtc/internal/gate"
@@ -11,7 +12,8 @@ import (
 
 // ai-generated: the whole file (the Markdown table of one report).
 
-// Render writes the report as the table the job summary and the release show.
+// Render writes the report as the table the job summary and the release
+// show, and under it how many failures are known ones, which fail no gate.
 func Render(r gate.Report) string {
 	heading := fmt.Sprintf("### Gate: %s target, engine %s", r.Target, cmp.Or(short(r.EngineCommit), "unknown"))
 	if r.AppVersion != "" {
@@ -24,6 +26,12 @@ func Render(r gate.Report) string {
 	slices.SortFunc(cells, func(a, b gate.Cell) int { return cmp.Compare(a.ID, b.ID) })
 	for _, c := range cells {
 		_, _ = fmt.Fprintf(&b, "| `%s` | %s | %s | %.0f s |\n", c.ID, verdict(c), keyMetrics(c), c.DurationS)
+	}
+	switch n := r.FailedKnown; { // ai-generated: what the known failures do to the gate
+	case n == 1:
+		_, _ = b.WriteString("\n1 known failure is tracked by an issue and does not fail the gate.\n")
+	case n > 1:
+		_, _ = fmt.Fprintf(&b, "\n%d known failures are tracked by issues and do not fail the gate.\n", n)
 	}
 	return b.String()
 }
@@ -47,12 +55,32 @@ func summary(r gate.Report) string {
 }
 
 // verdict is a pass mark, or a failure mark with what missed. Anything but a
-// pass is a failure: a report holds no skipped cell.
+// pass is a failure: a report holds no skipped cell. A known cell says so
+// with its issue, pass (known: #9) or fail (known: #9).
 func verdict(c gate.Cell) string {
-	if c.Status == gate.StatusPass {
+	failures := cellText(strings.Join(c.Failures, "; "))
+	switch {
+	case c.Known != "" && c.Status == gate.StatusPass: // ai-generated: a cell on the engine's known list
+		return "✅ pass (known: " + issueRef(c.Known) + ")"
+	case c.Known != "":
+		return strings.TrimSuffix("❌ fail (known: "+issueRef(c.Known)+"): "+failures, ": ")
+	case c.Status == gate.StatusPass:
 		return "✅"
 	}
-	return strings.TrimSpace("❌ " + cellText(strings.Join(c.Failures, "; ")))
+	return strings.TrimSpace("❌ " + failures)
+}
+
+// issueRef is a known cell's issue as #<number>, the number being its URL's
+// last segment, linked to the URL: a bare #9 in the app's release notes would
+// link the app's own issue 9. An issue that is no such URL shows as it is.
+func issueRef(issue string) string {
+	// ai-generated: the issue number from the URL tail.
+	number := issue[strings.LastIndexByte(issue, '/')+1:]
+	if _, err := strconv.ParseUint(number, 10, 32); err != nil || !strings.HasPrefix(issue, "https://") ||
+		strings.ContainsAny(issue, " \t\r\n()[]<>|\\") {
+		return cellText(issue)
+	}
+	return "[#" + number + "](" + issue + ")"
 }
 
 // cellText keeps free text inside one table cell: a pipe would end the cell,
