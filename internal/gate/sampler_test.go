@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -78,6 +79,55 @@ func TestPeakBetweenTakesTheHighestInsideTheWindowOnly(t *testing.T) {
 		if heap, rss, ok := s.PeakBetween(w[0], w[1]); ok {
 			t.Fatalf("PeakBetween(%s, %s) = %d %d, want no sample in it", w[0], w[1], heap, rss)
 		}
+	}
+}
+
+// TestAMarkTakesASampleOfItsOwnWhileRunning holds a mark to a reading of its
+// own moment, S1's baseline before its burst and not a tick into it. A mark
+// on a sampler that is not running only names the time and reads the next
+// sample, if there is one.
+func TestAMarkTakesASampleOfItsOwnWhileRunning(t *testing.T) {
+	s := NewSampler(time.Hour)
+	s.Mark("early")
+	s.Start()
+	t.Cleanup(s.Stop)
+	waitSamples(t, s, 1)
+	s.Mark("idle")
+	got := s.Samples()
+	if len(got) != 2 {
+		t.Fatalf("%d samples after Start and a mark, want 2", len(got))
+	}
+	if idle, ok := s.sampleAt("idle"); !ok || !idle.At.Equal(got[1].At) {
+		t.Fatalf("sampleAt(idle) = %+v %v, want the mark's own sample", idle, ok)
+	}
+	if early, ok := s.sampleAt("early"); !ok || !early.At.Equal(got[0].At) {
+		t.Fatalf("sampleAt(early) = %+v %v, want the first sample after it", early, ok)
+	}
+	s.Stop()
+	n := len(s.Samples())
+	s.Mark("stopped")
+	if len(s.Samples()) != n {
+		t.Fatal("a mark on a stopped sampler took a sample")
+	}
+	for _, mark := range []string{"stopped", "unknown"} {
+		if sm, ok := s.sampleAt(mark); ok {
+			t.Fatalf("sampleAt(%s) = %+v, want none", mark, sm)
+		}
+	}
+}
+
+// TestSamplesStayInTimeOrder races marks against a fast ticker: a mark's
+// reading and a tick's may reach the lock in either order, and the samples,
+// the CSV and a read at a mark still go by time.
+func TestSamplesStayInTimeOrder(t *testing.T) {
+	s := NewSampler(time.Millisecond)
+	s.Start()
+	for range 200 {
+		s.Mark("m")
+	}
+	s.Stop()
+	if !slices.IsSortedFunc(s.Samples(), func(a, b Sample) int { return a.At.Compare(b.At) }) {
+		t.Fatal("samples out of time order")
 	}
 }
 

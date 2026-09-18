@@ -90,22 +90,44 @@ func (s *Sampler) loop(stop <-chan struct{}, done chan<- struct{}) {
 	}
 }
 
-// take appends one reading of the process.
+// take adds one reading of the process.
 func (s *Sampler) take() {
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-	sm := Sample{At: time.Now(), HeapInuse: m.HeapInuse, RSS: readRSS(), Goroutines: runtime.NumGoroutine()}
+	sm := readSample()
 	s.mu.Lock()
-	s.samples = append(s.samples, sm)
+	s.add(sm)
 	s.mu.Unlock()
 }
 
-// Mark names now; marking a name again moves it.
+// add puts a reading among the samples in time order: a tick's and a mark's
+// are read before the lock is taken and may reach it in either order. The
+// caller holds the lock.
+func (s *Sampler) add(sm Sample) {
+	i := len(s.samples)
+	for i > 0 && s.samples[i-1].At.After(sm.At) {
+		i--
+	}
+	s.samples = slices.Insert(s.samples, i, sm)
+}
+
+// readSample reads the process once.
+func readSample() Sample {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	return Sample{At: time.Now(), HeapInuse: m.HeapInuse, RSS: readRSS(), Goroutines: runtime.NumGoroutine()}
+}
+
+// Mark names now; marking a name again moves it. While the sampler runs, a
+// mark also takes a sample of its own, so what is read at a mark is the
+// process at that moment: S7 reads the goroutines before S1's burst and 60 s
+// after the load, not up to a tick into whatever runs next.
 func (s *Sampler) Mark(name string) {
-	now := time.Now()
+	sm := readSample()
 	s.mu.Lock()
-	s.marks[name] = now
-	s.mu.Unlock()
+	defer s.mu.Unlock()
+	s.marks[name] = sm.At
+	if s.stop != nil {
+		s.add(sm)
+	}
 }
 
 // PeakBetween returns the highest heap and the highest RSS sampled between
@@ -132,7 +154,25 @@ func (s *Sampler) PeakBetween(fromMark, toMark string) (uint64, uint64, bool) {
 	return heap, rss, seen
 }
 
-// Samples returns a copy of everything sampled so far.
+// sampleAt returns the first sample taken at or after a mark: the mark's own
+// reading when the sampler ran at the mark, else the next tick's. It reports
+// false for an unknown mark and for a mark nothing was sampled after.
+func (s *Sampler) sampleAt(mark string) (Sample, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	at, ok := s.marks[mark]
+	if !ok {
+		return Sample{}, false
+	}
+	for _, sm := range s.samples {
+		if !sm.At.Before(at) {
+			return sm, true
+		}
+	}
+	return Sample{}, false
+}
+
+// Samples returns a copy of everything sampled so far, in time order.
 func (s *Sampler) Samples() []Sample {
 	s.mu.Lock()
 	defer s.mu.Unlock()
