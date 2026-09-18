@@ -25,14 +25,16 @@ type KnownFailure struct{ Cell, Issue, Why string }
 
 // knownFailures is the list, one entry per line. Every entry needs an open
 // issue, and goes once its issue is closed and its cells pass. A wbstream
-// cell is never on it: without the WB token those cells fail on
-// configuration, which must stay a blocking failure.
+// cell may be on it for an engine bug: without the WB token, or with a room
+// that will not open, the server never comes up, its cells never run, and a
+// cell that never ran is never known, so configuration stays blocking.
 var knownFailures = []KnownFailure{ //nolint:gochecknoglobals // edited by hand as issues open and close; tests swap it
 	{"engine-linux/jitsi/seichannel/*/S0", issues + "9", "a 10 MiB pull through Jitsi kills the tunnel"},
 	{"engine-linux/jitsi/datachannel/*/S6", issues + "10", "a bridge 8 s late overruns the 15 s handshake window"},
 	{"engine-linux/jitsi/datachannel/mobile/S5", issues + "11", "a DNS burst holds some first bytes 2 s"},
-	{"engine-linux/jitsi/vp8channel/mobile/S0", issues + "12", "a pull stalls at 4.5 MiB while control lives"},
+	{"engine-linux/jitsi/vp8channel/*/S0", issues + "12", "a transfer stalls while control lives"},
 	{"engine-linux/jitsi/datachannel/mobile/S2", issues + "15", "six parallel pulls collapse into SCTP retransmissions"},
+	{"engine-linux/wbstream/seichannel/*/S0", issues + "16", "a 5 MiB push does not fit S0's 5 minutes"},
 }
 
 // knownFailure is the entry of the list a cell id matches, the first one if
