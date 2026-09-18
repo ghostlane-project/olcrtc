@@ -170,9 +170,9 @@ S7 weighs the test process, which holds the harness too (the test binary, the or
 - A known failure fails neither its subtest nor `TestGate`, which logs it with its issue; any other failed cell fails the gate. The app's verdict does the same: it fails on `failed` minus `failed_known`.
 - A cell that did not run is never known, whatever its id: one still planned when the report is built, or one whose server or client never came up. What failed there is the gate's world (a relay, a secret, a start), not the bug the issue tracks.
 - Every entry needs an open issue. Once the issue is closed and its cells pass, drop the entry: `TestGate` logs `known failure passed: <cell> (<issue>)` for each known cell that passed, and `render` shows it as `pass (known: #9)`.
-- WB Stream cells are never on the list: without the WB token they fail on configuration, and that must stay a blocking failure.
+- A WB Stream cell may be on the list for an engine bug. Without the WB token, or with a room that will not open, the server never comes up and its cells never run, so configuration stays a blocking failure however the list reads.
 
-The unit tests hold the list to these rules: each pattern matches a cell of the plan and names a provider other than `wbstream`, each entry has an issue URL and a reason, and no cell is matched by two entries.
+The unit tests hold the list to these rules: each pattern matches a cell of the plan and names its provider, each entry has an issue URL and a reason, and no cell is matched by two entries.
 
 ## Artifacts
 

@@ -81,8 +81,8 @@ func TestKnownFailureIsTheFirstEntryACellMatches(t *testing.T) {
 }
 
 // TestTheKnownListNamesPlannedCellsAndOpenIssues holds the list to its own
-// rules: each entry a well-formed pattern that matches cells of the plan,
-// none a wbstream cell, an issue URL and a reason, and no cell matched by two
+// rules: each entry a well-formed pattern that matches cells of the plan and
+// names its provider, an issue URL and a reason, and no cell matched by two
 // entries, which would leave one of them unread.
 func TestTheKnownListNamesPlannedCellsAndOpenIssues(t *testing.T) {
 	lt, err := NewLocalTarget(LocalOptions{WorkDir: t.TempDir(), JitsiHosts: []string{"meet.example.invalid"},
@@ -99,8 +99,8 @@ func TestTheKnownListNamesPlannedCellsAndOpenIssues(t *testing.T) {
 			t.Errorf("%q is not platform/provider/transport/client/scenario", k.Cell)
 			continue
 		}
-		if p := segments[1]; p == "*" || p == providerWBStream {
-			t.Errorf("%q covers wbstream cells, whose failures without the token are configuration", k.Cell)
+		if segments[1] == "*" {
+			t.Errorf("%q names no provider: an entry is about one provider's bug", k.Cell)
 		}
 		if !issue.MatchString(k.Issue) || strings.TrimSpace(k.Why) == "" {
 			t.Errorf("%q needs an issue URL and a reason: %+v", k.Cell, k)
@@ -126,6 +126,29 @@ func TestTheKnownListNamesPlannedCellsAndOpenIssues(t *testing.T) {
 // a known cell that passed, a failure the list does not know, a known cell
 // whose server never came up and one that never ran: only the first two
 // carry the issue, and only the first counts in FailedKnown.
+// ai-generated: the wbstream case of the rule that a cell that never ran is
+// never known.
+// TestAWBCellWithoutItsServerIsNeverKnown pins why a wbstream entry is safe:
+// a missing token fails the pair before any cell runs, and such a cell stays
+// a blocking failure even though the list names it.
+func TestAWBCellWithoutItsServerIsNeverKnown(t *testing.T) {
+	withKnown(t, KnownFailure{Cell: "engine-linux/wbstream/seichannel/*/S0", Issue: fakeIssue, Why: "fake: slow"})
+	r := NewRecorder(Report{})
+	r.Plan([]Cell{{ID: "engine-linux/wbstream/seichannel/cli/S0"}})
+	r.NotRun("engine-linux/wbstream/seichannel/cli/S0", nil,
+		"server: wbstream: OLCRTC_GATE_WBSTREAM_TOKEN is not set")
+	rep := r.Report()
+	if rep.Failed != 1 || rep.FailedKnown != 0 {
+		t.Fatalf("failed %d, failed_known %d; want 1 and 0", rep.Failed, rep.FailedKnown)
+	}
+	if c := cellsByID(rep)["engine-linux/wbstream/seichannel/cli/S0"]; c.Known != "" {
+		t.Fatalf("a cell that never ran is known: %q", c.Known)
+	}
+	if gateFailure(rep) == "" {
+		t.Fatal("a WB cell without its server did not fail the gate")
+	}
+}
+
 func TestRecorderMarksKnownCellsAndCountsTheirFailures(t *testing.T) {
 	withKnown(t,
 		KnownFailure{Cell: "p/a/*/cli/S0", Issue: fakeIssue, Why: "fake: pulls stall"},
