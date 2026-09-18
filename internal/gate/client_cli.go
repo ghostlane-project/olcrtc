@@ -73,11 +73,11 @@ func cliConfig(ep Endpoint) client.Config {
 		KeyHex: ep.Key, LocalAddr: "127.0.0.1:0", DNSServer: ep.DNS, DeviceID: "gate-cli",
 	}
 	switch ep.Transport {
-	case "vp8channel":
+	case transportVP8:
 		cfg.TransportOptions = client.VP8Options{
 			FPS: cmp.Or(ep.VP8FPS, appVP8FPS), BatchSize: cmp.Or(ep.VP8Batch, appVP8Batch),
 		}
-	case "seichannel":
+	case transportSEI:
 		cfg.TransportOptions = client.SEIOptions{FPS: 60, BatchSize: 64, FragmentSize: 900, AckTimeoutMS: 2000}
 	}
 	return cfg
