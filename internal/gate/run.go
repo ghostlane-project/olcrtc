@@ -54,6 +54,11 @@ type Options struct {
 	// its room, key and channel, which RunPlan adds.
 	Secrets *[]string
 	Logf    func(format string, args ...any)
+	// ReportPath is where the report is kept as the run goes, rewritten
+	// after the plan and after every cell: a process that dies mid-run (a
+	// panic outside a scenario, a -timeout kill) still leaves every cell it
+	// finished, the rest failed as not run. Empty keeps none on disk.
+	ReportPath string
 }
 
 // RunPlan records the plan, then walks it pair by pair, client by client and
@@ -63,7 +68,8 @@ type Options struct {
 // calls cell, and cell returns an error wrapping ErrCellFailed when the cell
 // failed, a server or a client that never came up included. A cell run never
 // calls, the one a -run filter leaves out or one after ctx ended, stays
-// planned, and the report fails it as not run.
+// planned, and the report fails it as not run. With a ReportPath the report
+// on disk follows the plan and every cell.
 func RunPlan(ctx context.Context, opt Options, run func(name string, cell func() error)) {
 	o := prepared(opt)
 	names := make([]string, 0, len(o.Clients))
@@ -71,6 +77,7 @@ func RunPlan(ctx context.Context, opt Options, run func(name string, cell func()
 		names = append(names, c.Name())
 	}
 	o.Recorder.Plan(PlanCells(o.Target, names))
+	o.save()
 	for _, pair := range o.Target.Pairs() {
 		if err := ctx.Err(); err != nil {
 			o.Logf("the run ended before %s: %v", pair, err)
@@ -327,11 +334,25 @@ func failCells(o Options, pair Pair, client string, reason error, run func(strin
 // ErrCellFailed with the failures as the report shows them for a failure.
 func (o Options) finish(id string, m Metrics, failures []string, logPath string, took time.Duration) error {
 	o.Recorder.Finish(id, m, o.Thresholds.Map(), failures, logPath, took)
+	o.save()
 	c, _ := o.Recorder.Cell(id)
 	if c.Status != StatusFail {
 		return nil
 	}
 	return fmt.Errorf("%w: %s", ErrCellFailed, strings.Join(c.Failures, "; "))
+}
+
+// save writes the report as it stands to ReportPath, if the run keeps one:
+// a cell that has not finished reads as failed, not run, so a process that
+// dies before the next save leaves the cell in flight failed.
+func (o Options) save() {
+	// ai-generated: the report kept on disk as the run goes.
+	if o.ReportPath == "" {
+		return
+	}
+	if err := o.Recorder.Write(o.ReportPath); err != nil {
+		o.Logf("report: %v", err)
+	}
 }
 
 // writeLog stores a log scrubbed of the run's secrets in dir and returns its

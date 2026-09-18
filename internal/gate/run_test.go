@@ -2,11 +2,13 @@ package gate
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -200,6 +202,96 @@ func TestRunPlanRecordsEveryCellThroughASubtestOfItsOwn(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(h.opt.Dir, "jitsi-datachannel", "cli-start.log")); err != nil {
 		t.Fatalf("no start log: %v", err)
 	}
+}
+
+// ai-generated: the report on disk follows the run, a cell at a time.
+func TestRunPlanKeepsTheReportOnDiskAfterEveryCell(t *testing.T) {
+	resetRegistryForTest(t)
+	path := filepath.Join(t.TempDir(), reportName)
+	var seen [][]byte // the report as S1 found it on disk, read in S1's subtest
+	look := func(context.Context, *Env) (Metrics, error) {
+		raw, err := os.ReadFile(path)
+		seen = append(seen, raw)
+		return passS1(), err
+	}
+	Register(fixed("S0", passS0(), nil))
+	Register(Scenario{ID: "S1", Applies: always, Run: look})
+	h := newHarness(t, &scriptTarget{pairs: []Pair{{"jitsi", "datachannel"}}}, &fakeClient{name: "cli"})
+	h.opt.ReportPath = path
+	h.run(context.Background(), t)
+	var during Report
+	if len(seen) != 1 || json.Unmarshal(seen[0], &during) != nil {
+		t.Fatalf("S1 found %q on disk", seen)
+	}
+	if cells := cellsByID(during); cells["engine-test/jitsi/datachannel/cli/S0"].Status != StatusPass ||
+		!slices.Equal(cells["engine-test/jitsi/datachannel/cli/S1"].Failures, []string{reasonDidNotRun}) {
+		t.Fatalf("the report on disk while S1 ran = %+v, want S0 passed and S1 not run yet", during.Cells)
+	}
+	if after := readReport(t, path); after.Passed != 2 {
+		t.Fatalf("the report on disk after the run = %+v, want both cells passed", after.Cells)
+	}
+}
+
+// envCrashReport is where the child run of
+// TestRunPlanLeavesAReportWhenTheProcessDies keeps its report.
+const envCrashReport = "OLCRTC_GATE_TEST_CRASH_REPORT"
+
+// ai-generated: a panic no recover in the runner reaches, on a goroutine of
+// the client or of the load, ends the process with no TestMain write. The
+// report the runner kept on disk still holds the cell that finished and
+// fails the one the process died in and the one after it as not run.
+func TestRunPlanLeavesAReportWhenTheProcessDies(t *testing.T) {
+	if path := os.Getenv(envCrashReport); path != "" {
+		crashingRun(t, path)
+		return
+	}
+	path := filepath.Join(t.TempDir(), reportName)
+	// #nosec G204,G702 -- the test runs its own binary with fixed arguments.
+	cmd := exec.CommandContext(t.Context(), os.Args[0],
+		"-test.run=^TestRunPlanLeavesAReportWhenTheProcessDies$", "-test.timeout=2m")
+	cmd.Env = append(os.Environ(), envCrashReport+"="+path)
+	out, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "fake crash") {
+		t.Fatalf("the child run did not die of its panic: %v\n%s", err, out)
+	}
+	cells := cellsByID(readReport(t, path))
+	if c := cells["engine-test/jitsi/datachannel/cli/S0"]; c.Status != StatusPass {
+		t.Fatalf("the cell finished before the crash = %+v", c)
+	}
+	for _, id := range []string{"engine-test/jitsi/datachannel/cli/S1", "engine-test/jitsi/datachannel/cli/S2"} {
+		if c := cells[id]; c.Status != StatusFail || !slices.Equal(c.Failures, []string{reasonDidNotRun}) {
+			t.Fatalf("%s = %+v, want it failed as not run", id, c)
+		}
+	}
+}
+
+// crashingRun walks a plan whose second cell starts a goroutine that
+// panics, as a client or a load worker might, and waits: the process dies
+// there.
+func crashingRun(t *testing.T, path string) {
+	t.Helper()
+	resetRegistryForTest(t)
+	Register(fixed("S0", passS0(), nil))
+	Register(Scenario{ID: "S1", Applies: always, Run: func(ctx context.Context, _ *Env) (Metrics, error) {
+		go func() { panic("fake crash on a goroutine of the client") }()
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}})
+	Register(fixed("S2", nil, nil))
+	h := newHarness(t, &scriptTarget{pairs: []Pair{{"jitsi", "datachannel"}}}, &fakeClient{name: "cli"})
+	h.opt.ReportPath = path
+	h.run(context.Background(), t)
+	t.Fatal("the run outlived its crash")
+}
+
+// readReport reads a report the runner wrote.
+func readReport(t *testing.T, path string) Report {
+	t.Helper()
+	var rep Report
+	if err := json.Unmarshal([]byte(readTargetFile(t, path)), &rep); err != nil {
+		t.Fatal(err)
+	}
+	return rep
 }
 
 func TestRunPlanTimesTheClientsStartForS0(t *testing.T) {

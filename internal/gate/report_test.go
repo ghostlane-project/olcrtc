@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -70,6 +71,34 @@ func TestWriteProducesSchemaOne(t *testing.T) {
 	}
 	if back.Schema != 1 || back.EngineCommit != "abc" || back.Passed != 1 || len(back.Cells) != 1 {
 		t.Fatalf("written report = %+v", back)
+	}
+}
+
+// ai-generated: the report is replaced in one step, so a reader, or a crash,
+// never sees half of it, and no temporary file is left beside it.
+func TestWriteReplacesTheReportInOneStep(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gate-report.json")
+	r := NewRecorder(Report{})
+	r.Plan([]Cell{{ID: "p/a/b/cli/S0"}, {ID: "p/a/b/cli/S1"}})
+	if err := r.Write(path); err != nil {
+		t.Fatal(err)
+	}
+	r.Finish("p/a/b/cli/S0", Metrics{"pull_ok": 1}, nil, nil, "", time.Second)
+	if err := r.Write(path); err != nil {
+		t.Fatal(err)
+	}
+	if back := readReport(t, path); back.Passed != 1 || back.Failed != 1 || back.Cells[1].Failures[0] != reasonDidNotRun {
+		t.Fatalf("the report on disk = %+v, want the second write's", back)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Fatalf("the report's directory holds %v, want the report alone", entries)
+	}
+	if info, err := os.Stat(path); err != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != reportPerm) {
+		t.Fatalf("report mode = %v, %v; want %v", info.Mode(), err, os.FileMode(reportPerm))
+	}
+	if err := r.Write(filepath.Join(dir, "missing", "gate-report.json")); err == nil {
+		t.Fatal("a report into a missing directory was written")
 	}
 }
 

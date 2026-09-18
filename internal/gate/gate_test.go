@@ -57,8 +57,9 @@ const (
 	// reportName is the report's file in the artifacts directory.
 	reportName = "gate-report.json"
 	// reportMargin is how long before the go test deadline the run ends, so
-	// the cell in flight can unwind and TestMain can write the report before
-	// -timeout kills the binary with it unwritten.
+	// the cell in flight can unwind and be recorded with its own reason, and
+	// TestMain can write the final report, before -timeout kills the binary
+	// with the cell in flight read as not run.
 	reportMargin = 90 * time.Second
 	// phoneMemoryLimit and phoneGCPercent are the phone's settings, which a
 	// mobile run alone is under (amendment A8).
@@ -106,8 +107,9 @@ var gateRun struct {
 	path string
 }
 
-// TestMain writes the report once every test has run, so a run with failed
-// cells, or one its deadline cut short, still leaves one. Without
+// TestMain writes the report once more when every test has run, with the
+// run's whole duration. The runner has kept it on disk after every cell, so
+// a process that dies before this point still leaves one. Without
 // -olcrtc.gate nothing is written.
 func TestMain(m *testing.M) {
 	flag.Parse()
@@ -160,6 +162,7 @@ func TestGate(t *testing.T) {
 	opt := Options{
 		Target: target, Clients: []Client{flavourClient(flavour)}, Thresholds: thresholds, Dir: dir,
 		Recorder: rec, Capture: capture, Secrets: &secrets, Logf: t.Logf,
+		ReportPath: gateRun.path, // ai-generated: kept on disk after every cell
 	}
 	RunPlan(ctx, opt, func(name string, cell func() error) {
 		t.Run(name, func(t *testing.T) {
