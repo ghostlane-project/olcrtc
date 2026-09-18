@@ -67,6 +67,11 @@ type Session struct {
 	name       string
 	resolver   protect.Lookup
 	httpClient *http.Client
+	// configJSLimits times config.js discovery; its zero fields take the
+	// constants. Tests shorten them.
+	//
+	// ai-generated: added with the config.js guard (ghostlane#22).
+	configJSLimits configJSLimits
 
 	onData              func([]byte)
 	onPeerData          func(peerID string, data []byte)
@@ -215,15 +220,11 @@ func (s *Session) Connect(ctx context.Context) error {
 	}
 
 	logger.Infof("jitsi: joining MUC %s/%s as %s …", s.host, s.room, s.name)
-	jSess, err := j.JoinMUC(ctx, j.Config{
-		Host:       s.host,
-		Room:       s.room,
-		Nick:       s.name,
-		Debug:      logger.IsVerbose(),
-		HTTPClient: s.httpClient,
-	})
+	// ai-generated: joinMUC puts config.js discovery under the library and
+	// falls back to the docker-jitsi-meet domain (ghostlane#22).
+	jSess, err := s.joinMUC(ctx)
 	if err != nil {
-		return fmt.Errorf("jitsi join muc: %w", err)
+		return err
 	}
 	s.setJSession(jSess)
 	logger.Infof("jitsi: MUC joined %s/%s; waiting for peer …", s.host, s.room)
