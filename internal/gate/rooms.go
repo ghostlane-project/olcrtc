@@ -242,15 +242,22 @@ func lastSegment(s string) string {
 }
 
 // Secrets lists what of the endpoint must never leave a run: the room as
-// given, its last path segment when that differs (the part the engine logs
-// on its own, e.g. "joining MUC host/<name>"), the key and the channel id.
-// Empty ones are left out. Feed them to Scrub.
+// given; its last path segment, as it is and cut at a query or a fragment,
+// where each differs (the part the engine logs on its own, e.g. "joining
+// MUC host/<name>", and the id the telemost provider leaves bare when it
+// escapes the whole room URL into its API path); the key and the channel
+// id. Empty ones are left out. Feed them to Scrub.
 func (e Endpoint) Secrets() []string {
-	out := make([]string, 0, 4)
+	out := make([]string, 0, 5)
 	if e.Room != "" {
 		out = append(out, e.Room)
-		if name := lastSegment(e.Room); name != "" && name != e.Room {
-			out = append(out, name)
+		// ai-generated: the id cut at a query or fragment, as the CI's mask cuts it.
+		path, _, _ := strings.Cut(e.Room, "#")
+		path, _, _ = strings.Cut(path, "?")
+		for _, name := range []string{lastSegment(e.Room), lastSegment(path)} {
+			if name != "" && !slices.Contains(out, name) {
+				out = append(out, name)
+			}
 		}
 	}
 	for _, s := range []string{e.Key, e.Channel} {
