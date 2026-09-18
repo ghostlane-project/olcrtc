@@ -97,6 +97,8 @@ func TestRunUsage(t *testing.T) {
 		{"draw", r},
 		{"render"},
 		{"render", r, r},
+		{"render", "-h"},
+		{"compare", "-h"},
 		{"compare", r},
 		{"compare", r, r, r},
 		{"compare", "-severity", "loud", r, r},
