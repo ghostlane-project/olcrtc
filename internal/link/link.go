@@ -57,11 +57,17 @@ type Link struct {
 // Parse reads one line the way the app imports it: surrounding space and a
 // byte order mark are dropped and every field is trimmed. The transport
 // token's options give VP8FPS and VP8Batch; the key must be 64 hex chars.
+// A line break inside is refused: the app splits a body into lines before
+// it parses, so what follows a break is another link, never more label,
+// device or key of this one.
 func Parse(line string) (Link, error) {
 	text := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), bom))
 	payload, ok := strings.CutPrefix(text, prefix)
 	if !ok {
 		return Link{}, fmt.Errorf("%w: no olcrtc:// prefix", ErrMalformed)
+	}
+	if strings.ContainsAny(payload, "\r\n") {
+		return Link{}, fmt.Errorf("%w: more than one line", ErrMalformed)
 	}
 	q := strings.IndexByte(payload, '?')
 	if q < 0 {
@@ -95,8 +101,9 @@ func Parse(line string) (Link, error) {
 
 // String prints l in the same grammar, so Parse gives back any Link it
 // returned: the options block only when fps or batch is off its default,
-// the device and the label only when set. The result carries the room and
-// the key.
+// the device and the label only when set. Fps and batch print as they are,
+// so a Link built by hand sets both: a 0 would read back as 1. The result
+// carries the room and the key.
 func (l Link) String() string {
 	s := prefix + l.Provider + "?" + l.Transport
 	if l.VP8FPS != defaultVP8FPS || l.VP8Batch != defaultVP8Batch {
