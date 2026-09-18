@@ -153,6 +153,15 @@ func TestS4ReadsTheCapturedLog(t *testing.T) {
 	if m, err = s4.Run(context.Background(), env); err != nil || m[MetricAlive] != 0 {
 		t.Fatalf("S4 after a conference end = %v, %v; want alive 0", m, err)
 	}
+	// A death at the end of the load logs its reason line in S3's cell; the
+	// fallback's attempts 30 s later run in the quiet with no reason line.
+	env.Log = &CellLog{}
+	env.Log.add("client reconnect: no provider callback within 30s - re-establishing session\n")
+	env.Log.add("client reconnect attempt=1 reason=liveness-fallback\n")
+	env.Log.add("client reconnect attempt=2 reason=liveness-fallback\n")
+	if m, err = s4.Run(context.Background(), env); err != nil || m[MetricReconnects] != 1 {
+		t.Fatalf("S4 over attempts alone = %v, %v; want one reconnect", m, err)
+	}
 }
 
 func TestS4EndsWithItsContext(t *testing.T) {
@@ -200,6 +209,7 @@ func TestS4CountsLinesTheEngineWrites(t *testing.T) {
 	for _, c := range []struct{ dir, call string }{
 		{"tunnelcore", `logger.Warnf("` + logMissedPong + " "},
 		{"client", `logger.Infof("` + logReconnect},
+		{"client", `logger.Infof("` + logReconnectAttempt},
 		{"client", `logger.Infof("` + logConferenceEnd + ": "},
 	} {
 		if n := strings.Count(engineSource(t, c.dir), c.call); n != 1 {
