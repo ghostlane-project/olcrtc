@@ -174,9 +174,11 @@ jobs:
     # checkout leaves no credential in .git/config for the test's children.
     permissions:
       contents: read
-    # The two flavours run one after the other (amendment A8), so a pool
-    # room never holds two servers: 25 and 45 minutes of go test, plus the
-    # builds and the upload.
+    # The two flavours run one after the other (amendment A8): 25 and 45
+    # minutes of go test, plus the builds and the upload. So a pool room
+    # holds one server of this job at a time, unless a crashed test binary
+    # leaves its server there until the job ends; A4's per-pair channels
+    # keep the two apart.
     timeout-minutes: 85
     concurrency:
       group: gate-${{ github.ref }}
