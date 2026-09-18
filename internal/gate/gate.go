@@ -112,6 +112,7 @@ type Env struct {
 	Load     LoadURLs
 	HTTP     *http.Client
 	Dial     DialFunc
+	Sampler  *Sampler
 	Dir      string
 	Logf     func(format string, args ...any)
 	// Thresholds are what the cell is judged by: Local or Link.
