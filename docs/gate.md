@@ -174,7 +174,7 @@ The handshake budget is not among them, so an S0 or S6 cell does not show the bo
     delay-8s/srv.log
 ```
 
-Every log is scrubbed before it is written: the run's rooms, room ids, channel ids, override hosts and WB token read `<room>`, keys read `<key>`. The failures in the report are scrubbed the same way. The link target writes no logs: the fleet's rooms are not the run's to show.
+Every log is scrubbed before it is written: the run's rooms, room ids, channel ids, override hosts and WB token read `<room>`, keys read `<key>`. A secret is caught base64-encoded too: a server's debug log quotes XMPP stanza ids, base64 of a JID with the Jitsi host in it. The failures in the report are scrubbed the same way. The link target writes no logs: the fleet's rooms are not the run's to show.
 
 `TestMain` writes the report when the test binary exits, so a run with failed cells or one its deadline cut short still leaves one. A binary that `-timeout` kills leaves none.
 
