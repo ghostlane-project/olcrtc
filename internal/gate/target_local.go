@@ -343,11 +343,11 @@ func (t *LocalTarget) token(provider string) string {
 
 // secrets is what a server's log and errors lose before they leave: the
 // endpoint's, the WB token and the Jitsi hosts of an override, which come
-// from a secret too.
+// from a secret too, in every form a log writes them (see hostForms).
 func (t *LocalTarget) secrets(ep Endpoint) []string {
 	out := append(ep.Secrets(), t.opts.WBStreamToken)
 	if len(jitsiHostList(t.opts.JitsiHosts)) > 0 {
-		out = append(out, t.jitsiHosts...)
+		out = append(out, hostForms(t.jitsiHosts)...) // ai-generated: bare and lowercased too
 	}
 	return out
 }

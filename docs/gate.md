@@ -176,7 +176,7 @@ S7 weighs the test process, which holds the harness too (the test binary, the or
     delay-8s/srv.log
 ```
 
-Every log is scrubbed before it is written: the run's rooms, room ids, channel ids, override hosts and WB token read `<room>`, keys read `<key>`. A secret is caught base64-encoded too: a server's debug log quotes XMPP stanza ids, base64 of a JID with the Jitsi host in it. The failures in the report are scrubbed the same way. The link target writes no logs: the fleet's rooms are not the run's to show.
+Every log is scrubbed before it is written: the run's rooms, room ids, channel ids, override hosts (as given, without their port and lowercased, the forms a resolver's error and an XMPP JID carry) and WB token read `<room>`, keys read `<key>`. A secret is caught base64-encoded too: a server's debug log quotes XMPP stanza ids, base64 of a JID with the Jitsi host in it. The failures in the report are scrubbed the same way. The link target writes no logs: the fleet's rooms are not the run's to show.
 
 The report is written after the plan, again after every cell and once more by `TestMain` when the test binary exits; each write replaces the file whole (a temporary file renamed over it). A cell not finished yet reads as failed, not run, so a binary that dies mid-run, of a panic outside a scenario or killed by `-timeout`, leaves every cell it finished, and the cell in flight and the ones after it fail as not run.
 

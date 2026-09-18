@@ -6,9 +6,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -100,6 +102,28 @@ func jitsiHostList(entries []string) []string {
 		}
 	}
 	return hosts
+}
+
+// hostForms is every form an override host takes in what a run writes: as
+// given, which the room URL carries; without its port, which a resolver's
+// error, the Jitsi config the server fetches and an XMPP JID carry; and each
+// lowercased, as a JID writes a domain. jitsiHostList keeps the port: the
+// room URL needs it.
+func hostForms(hosts []string) []string {
+	// ai-generated: an override host withheld with and without its port.
+	out := make([]string, 0, 4*len(hosts))
+	for _, h := range hosts {
+		bare := h
+		if host, _, err := net.SplitHostPort(h); err == nil {
+			bare = host
+		}
+		for _, f := range []string{h, strings.ToLower(h), bare, strings.ToLower(bare)} {
+			if f != "" && !slices.Contains(out, f) {
+				out = append(out, f)
+			}
+		}
+	}
+	return out
 }
 
 // JitsiRoom names a fresh room, https://<host>/gate-<12 hex>, on the first

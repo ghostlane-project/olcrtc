@@ -117,31 +117,40 @@ func TestScrubFileLeavesNoSecretOfTheRun(t *testing.T) {
 	room := "https://meet.example.invalid/" + slug
 	channel := "gate-ba9876543210"
 	token := "fake-wb-token-not-a-real-one"
+	// ai-generated: an override host given with a port reaches a log bare.
+	override := "https://Jitsi.Example.Invalid:8443/"
 	raw := strings.Join([]string{
 		"2026/09/18 10:00:00 Connecting transport=datachannel provider=jitsi ...",
 		"2026/09/18 10:00:00 jitsi: joining MUC meet.example.invalid/" + slug + " as olcrtc …",
 		"2026/09/18 10:00:01 j: rejoin joining room " + slug + " as olcrtc",
 		"2026/09/18 10:00:02 room=" + room + " key=" + key + " channel=" + channel + " token=" + token,
 		"2026/09/18 10:00:03 Link connected",
+		"2026/09/18 10:00:04 dial wss://jitsi.example.invalid:8443/xmpp-websocket: " +
+			"lookup jitsi.example.invalid on 8.8.8.8:53: no such host",
+		"2026/09/18 10:00:05 <service host='jitsi.example.invalid' port='443' type='turns'/>",
 	}, "\n") + "\n"
 	dir := t.TempDir()
 	src, dst := filepath.Join(dir, "srv-raw.log"), filepath.Join(dir, "srv.log")
 	if err := os.WriteFile(src, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := ScrubFile(src, dst, room, key, slug, channel, token); err != nil {
+	secrets := append(localSecrets(LocalOptions{JitsiHosts: []string{override}}), room, key, slug, channel, token)
+	if err := ScrubFile(src, dst, secrets...); err != nil {
 		t.Fatal(err)
 	}
 	out, err := os.ReadFile(dst)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, secret := range []string{key, slug, channel, token, "0123456789ab"} {
-		if strings.Contains(string(out), secret) {
+	for _, secret := range []string{key, slug, channel, token, "0123456789ab", "jitsi.example.invalid"} {
+		if strings.Contains(strings.ToLower(string(out)), secret) {
 			t.Fatalf("scrubbed log still carries %q:\n%s", secret, out)
 		}
 	}
-	for _, kept := range []string{"joining MUC meet.example.invalid/<room> as olcrtc", "room=<room> key=<key>", "Link connected"} {
+	for _, kept := range []string{
+		"joining MUC meet.example.invalid/<room> as olcrtc", "room=<room> key=<key>", "Link connected",
+		"dial wss://<room>/xmpp-websocket: lookup <room> on 8.8.8.8:53", "<service host='<room>' port='443'",
+	} {
 		if !strings.Contains(string(out), kept) {
 			t.Fatalf("scrubbed log lost %q:\n%s", kept, out)
 		}

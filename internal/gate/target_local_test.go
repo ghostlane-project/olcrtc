@@ -380,6 +380,32 @@ func TestLocalTargetStopsAServerThatNeverLinks(t *testing.T) {
 	}
 }
 
+// ai-generated: an override host given with a port (docker-jitsi-meet serves
+// on 8443) reaches the server's log bare, in a resolver's error and in the
+// Jitsi config the server fetches, and lowercased: neither the line the
+// error quotes nor the log keeps it.
+func TestLocalTargetWithholdsAnOverrideHostWithoutItsPort(t *testing.T) {
+	dir := t.TempDir()
+	lt := fakeLocal(t, t.TempDir(), LocalOptions{
+		Providers: []string{"jitsi"}, Transports: []string{"datachannel"}, JitsiHosts: []string{"Up.Example.Invalid:8443"},
+	}, `echo "<service host='up.example.invalid' port='443' type='turns'/>"
+echo "jitsi: dial: lookup up.example.invalid on 8.8.8.8:53: no such host"; exec sleep 30`)
+	lt.probe = func(context.Context, string) bool { return true }
+	lt.linkWait = 300 * time.Millisecond
+	_, stop, err := lt.Open(context.Background(), Pair{"jitsi", "datachannel"}, dir, OpenOptions{})
+	if stop != nil {
+		t.Cleanup(stop)
+	}
+	if !errors.Is(err, ErrLineNotSeen) || !strings.Contains(err.Error(), "lookup <room> on 8.8.8.8:53") ||
+		strings.Contains(strings.ToLower(err.Error()), "up.example.invalid") {
+		t.Fatalf("err = %v", err)
+	}
+	log := readTargetFile(t, filepath.Join(dir, "srv.log"))
+	if strings.Contains(strings.ToLower(log), "up.example.invalid") || !strings.Contains(log, "<service host='<room>'") {
+		t.Fatalf("scrubbed log keeps the host:\n%s", log)
+	}
+}
+
 func TestLocalTargetNamesACancelledRunNotADeadServer(t *testing.T) {
 	lt := fakeLocal(t, t.TempDir(), LocalOptions{
 		Providers: []string{"telemost"}, Transports: []string{"vp8channel"}, TelemostRooms: []string{"fake-telemost-1"},

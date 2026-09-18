@@ -90,6 +90,28 @@ func TestJitsiHostsComeFromTheOverrideOrTheInstanceList(t *testing.T) {
 	}
 }
 
+// ai-generated: an override host is withheld as the room URL carries it and
+// bare, as a resolver's error, the Jitsi config and a JID carry it.
+func TestHostFormsAreEveryFormALogWrites(t *testing.T) {
+	for _, c := range []struct {
+		host string
+		want []string
+	}{
+		{"meet.example.invalid", []string{"meet.example.invalid"}},
+		{"jitsi.example.invalid:8443", []string{"jitsi.example.invalid:8443", "jitsi.example.invalid"}},
+		{"Jitsi.Example.Invalid:8443", []string{"Jitsi.Example.Invalid:8443", "jitsi.example.invalid:8443",
+			"Jitsi.Example.Invalid", "jitsi.example.invalid"}},
+		{"[2001:db8::1]:8443", []string{"[2001:db8::1]:8443", "2001:db8::1"}},
+	} {
+		if got := hostForms([]string{c.host}); !slices.Equal(got, c.want) {
+			t.Errorf("hostForms(%q) = %q, want %q", c.host, got, c.want)
+		}
+	}
+	if got := hostForms([]string{"a.example.invalid", "A.example.invalid"}); len(got) != 2 {
+		t.Fatalf("hostForms repeats a form: %q", got)
+	}
+}
+
 func TestPoolRoomTakesOneEntryByRunNumber(t *testing.T) {
 	pool := []string{"a", " b ", "c"}
 	for run, want := range map[int]string{0: "a", 7: "b", 2: "c", -1: "c", math.MinInt: "b"} {
