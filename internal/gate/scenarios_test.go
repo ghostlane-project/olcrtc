@@ -238,6 +238,20 @@ func TestS5CountsEachBurstOnAnAssociationOfItsOwn(t *testing.T) {
 	}
 }
 
+// TestS5SkipsADatagramItCannotRead has each association's first datagram be
+// one S5 cannot read: it is no answer, and the ones after it still count.
+func TestS5SkipsADatagramItCannotRead(t *testing.T) {
+	socks := startFakeSocks(t, func(r *net.UDPAddr) []byte { return udpReply(0, r.IP, r) })
+	socks.junkFirst.Store(true)
+	env := &Env{Logf: t.Logf, UDP: func(ctx context.Context) (*UDPAssoc, error) {
+		return UDPAssociate(ctx, socks.addr())
+	}}
+	m, err := scenario(t, "S5").Run(context.Background(), env)
+	if err != nil || !maps.Equal(m, Metrics{MetricAnswered1: 64, MetricAnswered2: 64}) {
+		t.Fatalf("S5 past a datagram it cannot read = %v, %v; want 64 and 64", m, err)
+	}
+}
+
 func TestS5NeedsAUDPAssociate(t *testing.T) {
 	s5 := scenario(t, "S5")
 	if _, err := s5.Run(context.Background(), &Env{Logf: t.Logf}); !errors.Is(err, ErrNoUDP) {
