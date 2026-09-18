@@ -247,6 +247,9 @@ type Session struct {
 	// joinTimeout overrides connectTimeout. Zero means the default; only
 	// tests set it. ai-generated: this field.
 	joinTimeout time.Duration
+	// joinGen counts joins; a room's OnDisconnected acts only while its
+	// join is the latest. ai-generated: this field.
+	joinGen atomic.Uint64
 	// roomReady overrides roomReadyTimeout. Zero means the default; only
 	// tests set it.
 	roomReady      time.Duration
@@ -321,6 +324,12 @@ func (s *Session) Connect(ctx context.Context) error {
 }
 
 func (s *Session) connectSession(ctx context.Context) error {
+	// ai-generated: gen and its check in OnDisconnected.
+	// The SDK reports the end of a room we already left (its recovery
+	// goroutine ends in OnDisconnected), and a join its caller gave up on
+	// can be kicked by the next one. Neither may queue a reconnect of the
+	// room that replaced it.
+	gen := s.joinGen.Add(1)
 	roomCB := &lksdk.RoomCallback{
 		ParticipantCallback: lksdk.ParticipantCallback{
 			OnDataPacket: s.handleDataPacket,
@@ -335,7 +344,7 @@ func (s *Session) connectSession(ctx context.Context) error {
 			},
 		},
 		OnDisconnected: func() {
-			if s.closed.Load() || s.reconnecting.Load() {
+			if s.joinGen.Load() != gen || s.closed.Load() || s.reconnecting.Load() {
 				return
 			}
 			if !s.queueReconnect() {
@@ -358,7 +367,11 @@ func (s *Session) connectSession(ctx context.Context) error {
 		return fmt.Errorf("connect to room: %w", err)
 	}
 
-	s.setRoom(room)
+	// ai-generated: leaving a room that lands after shutdown.
+	if !s.setRoom(room) {
+		go room.disconnect()
+		return ErrSessionClosed
+	}
 	return s.publishPendingTracks()
 }
 
@@ -690,10 +703,20 @@ func (s *Session) currentRoom() roomHandle {
 	return s.room
 }
 
-func (s *Session) setRoom(room roomHandle) {
+// setRoom installs room and reports whether it did. A session that has shut
+// down refuses it and the caller leaves it. Shutdown closes done before it
+// swaps the room out under roomMu, so a room is either refused here or left
+// by shutdown. ai-generated: the done check and the result.
+func (s *Session) setRoom(room roomHandle) bool {
 	s.roomMu.Lock()
 	defer s.roomMu.Unlock()
+	select {
+	case <-s.done:
+		return false
+	default:
+	}
 	s.room = room
+	return true
 }
 
 func (s *Session) swapRoom(room roomHandle) roomHandle {
