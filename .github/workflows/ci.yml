@@ -96,12 +96,17 @@ jobs:
           name: coverage-${{ matrix.name }}
           path: coverage.out
 
-  real-e2e:
-    name: Real E2E (Providers x Transports)
-    # Talks to third-party services, but runs on every push and PR so
-    # breakage is caught immediately instead of waiting for a schedule.
+  gate-plan:
+    # ai-generated: the gate's dry run, the plan printed before anything runs.
+    # It needs no secret, so it runs on every event, a fork's pull request
+    # included. One flavour per build (amendment A8): it fails when a build
+    # plans no cell or a cell of the other flavour.
+    name: Gate plan (dry run)
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
         with:
@@ -112,12 +117,163 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      - name: Run real provider e2e matrix
+      - name: Print the plan
         run: |
-          go test -count=1 -v ./internal/e2e \
-            -olcrtc.real-providers=telemost,wbstream,jitsi \
-            -run '^TestRealProviderTransportMatrix$' \
-            -olcrtc.real-e2e
+          printf '### Gate plan\n\n' >> "$GITHUB_STEP_SUMMARY"
+          for build in cli: mobile:olcrtc_lean; do
+            flavour=${build%%:*} tags=${build#*:}
+            out="$RUNNER_TEMP/plan-$flavour.txt"
+            go test -v -tags "$tags" ./internal/gate -run '^TestGate$' -olcrtc.gate -olcrtc.gate-dry | tee "$out"
+            cells=$(grep -c '^engine-linux/' "$out" || true)
+            own=$(grep -cxE "engine-linux/[a-z0-9]+/[a-z0-9]+/$flavour/S[0-9]+" "$out" || true)
+            if [ "$cells" -eq 0 ] || [ "$own" -ne "$cells" ]; then
+              echo "::error title=Gate plan::the ${tags:-default} build planned $cells cells, $own of them $flavour cells"
+              exit 1
+            fi
+            {
+              echo "<details><summary>$flavour flavour, ${tags:-default} build: $cells cells</summary>"
+              echo
+              echo '```text'
+              grep '^engine-linux/' "$out"
+              echo '```'
+              echo '</details>'
+              echo
+            } >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: Say why a fork's pull request runs no gate
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+        run: |
+          note="The gate did not run: GitHub gives a pull request from a fork no repository secrets (the room pools, the WB token). It runs on this repository's own events, such as the push that merges this change."
+          echo "::notice title=Gate not run::$note"
+          printf '\n%s\n' "$note" >> "$GITHUB_STEP_SUMMARY"
+
+  gate-local:
+    # ai-generated: the release gate on the real relays, a child server per
+    # pair. It replaces the real E2E matrix, which counted a skipped cell as
+    # green: here every planned cell ends pass or fail.
+    #
+    # Secrets reach go test through step env only, never argv or script text
+    # (amendment A7). GATE_TELEMOST_ROOMS and GATE_WBSTREAM_ROOMS (pools of
+    # room ids or URLs, comma-separated) and GATE_WBSTREAM_TOKEN are
+    # required; GATE_JITSI_HOSTS is optional, empty means the instance list.
+    #
+    # Fork rule: GitHub gives a pull request from a fork no secrets, so this
+    # job does not run for one. It shows as skipped, not passed, and
+    # gate-plan's summary says why. On this repository's own events it
+    # always runs, and a missing secret fails it. The head repository is
+    # compared by name because this repository is itself a fork, so
+    # head.repo.fork is true for its own branches too.
+    name: Gate (local server, real relays)
+    needs: gate-plan
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    # The two flavours run one after the other (amendment A8), so a pool
+    # room never holds two servers: 25 and 45 minutes of go test, plus the
+    # builds and the upload.
+    timeout-minutes: 85
+    concurrency:
+      group: gate-${{ github.ref }}
+      cancel-in-progress: true
+    defaults:
+      run:
+        shell: bash
+    env:
+      OLCRTC_GATE_ENGINE_REF: ${{ github.ref_name }}
+      OLCRTC_GATE_ENGINE_COMMIT: ${{ github.sha }}
+    steps:
+      - name: Mask and require the secrets
+        env:
+          GATE_TELEMOST_ROOMS: ${{ secrets.GATE_TELEMOST_ROOMS }}
+          GATE_WBSTREAM_ROOMS: ${{ secrets.GATE_WBSTREAM_ROOMS }}
+          GATE_WBSTREAM_TOKEN: ${{ secrets.GATE_WBSTREAM_TOKEN }}
+          GATE_JITSI_HOSTS: ${{ secrets.GATE_JITSI_HOSTS }}
+        run: |
+          # Every value is masked before any step could print it. Split on
+          # line breaks too: a line of a value the mask missed would print.
+          entries() { printf '%s\n' "$1" | tr ',' '\n' | tr '\r' '\n' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; /^$/d'; }
+          # The runner reads the rest of the line and turns %25 back into %.
+          mask() { if [ -n "$1" ]; then printf '::add-mask::%s\n' "${1//%/%25}"; fi; }
+          # A pool entry, and the room id its URL ends in: the engine logs it bare.
+          while IFS= read -r e; do
+            mask "$e"
+            mask "$(sed -E 's|^[A-Za-z]+://||; s|[?#].*||; s|/+$||; s|.*/||' <<<"$e")"
+          done < <(entries "$GATE_TELEMOST_ROOMS,$GATE_WBSTREAM_ROOMS")
+          # A Jitsi host as given, and bare, as room URLs and errors carry it.
+          while IFS= read -r e; do
+            mask "$e"
+            mask "$(sed -E 's|^[A-Za-z]+://||; s|[/?#].*||; s|:[0-9]*$||' <<<"$e")"
+          done < <(entries "$GATE_JITSI_HOSTS")
+          while IFS= read -r e; do mask "$e"; done < <(entries "$GATE_WBSTREAM_TOKEN")
+
+          # A missing required secret fails the job by name: the cells that
+          # need it could only fail, and a skip is never a pass.
+          missing=0
+          require() {
+            if [ -z "$(entries "${!1}")" ]; then
+              echo "::error title=Gate secret not set::$1 is not set. Add it under Settings > Secrets and variables > Actions: $2."
+              missing=1
+            fi
+          }
+          require GATE_TELEMOST_ROOMS "a comma-separated pool of Telemost room ids or URLs"
+          require GATE_WBSTREAM_ROOMS "a comma-separated pool of WB Stream room ids or URLs"
+          require GATE_WBSTREAM_TOKEN "the WB Stream account token the local server joins with (WB refuses a guest as the first participant of an idle room)"
+          exit "$missing"
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Go
+        id: go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Run the gate, cli flavour (default build)
+        env:
+          OLCRTC_GATE_TELEMOST_ROOMS: ${{ secrets.GATE_TELEMOST_ROOMS }}
+          OLCRTC_GATE_WBSTREAM_ROOMS: ${{ secrets.GATE_WBSTREAM_ROOMS }}
+          OLCRTC_GATE_WBSTREAM_TOKEN: ${{ secrets.GATE_WBSTREAM_TOKEN }}
+          OLCRTC_GATE_JITSI_HOSTS: ${{ secrets.GATE_JITSI_HOSTS }}
+        run: |
+          go test -count=1 -timeout 25m ./internal/gate -run '^TestGate$' -v \
+            -olcrtc.gate -olcrtc.gate-target=local -olcrtc.gate-dir=gate-artifacts/cli
+
+      - name: Run the gate, mobile flavour (olcrtc_lean build)
+        # Its cells are owed to the report whatever the cli run did.
+        if: ${{ !cancelled() && steps.go.outcome == 'success' }}
+        env:
+          OLCRTC_GATE_TELEMOST_ROOMS: ${{ secrets.GATE_TELEMOST_ROOMS }}
+          OLCRTC_GATE_WBSTREAM_ROOMS: ${{ secrets.GATE_WBSTREAM_ROOMS }}
+          OLCRTC_GATE_WBSTREAM_TOKEN: ${{ secrets.GATE_WBSTREAM_TOKEN }}
+          OLCRTC_GATE_JITSI_HOSTS: ${{ secrets.GATE_JITSI_HOSTS }}
+        run: |
+          go test -count=1 -tags olcrtc_lean -timeout 45m ./internal/gate -run '^TestGate$' -v \
+            -olcrtc.gate -olcrtc.gate-target=local -olcrtc.gate-dir=gate-artifacts/mobile
+
+      - name: Summary
+        if: ${{ always() && steps.go.outcome == 'success' }}
+        run: |
+          for flavour in cli mobile; do
+            report="gate-artifacts/$flavour/gate-report.json"
+            if [ -f "$report" ]; then
+              go run ./cmd/gate-report render "$report" | sed "1s/\$/ ($flavour flavour)/"
+            else
+              echo "### Gate: the $flavour run wrote no report"
+            fi
+            echo
+          done >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifacts
+        if: ${{ always() && steps.go.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-local
+          path: |
+            gate-artifacts/**/*.log
+            gate-artifacts/**/*.csv
+            gate-artifacts/**/gate-report.json
 
   build-cli:
     name: Build CLI (Binaries)
