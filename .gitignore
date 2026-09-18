@@ -258,3 +258,6 @@ package-lock.json
 .opencode
 .direnv
 .kb
+
+# release gate artifacts (go test ./internal/gate -olcrtc.gate)
+/gate-artifacts/

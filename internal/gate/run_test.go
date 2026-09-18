@@ -1,0 +1,497 @@
+package gate
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io/fs"
+	"log"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/openlibrecommunity/olcrtc/internal/link"
+)
+
+// ai-generated: whole file, unit cover for the runner: every planned cell
+// ends pass or fail through a subtest of its own, a stuck or panicking
+// scenario fails its cell alone, a server gets one more try, the run starts
+// no cell once it has ended, and no room, key or token of the run leaves it.
+
+// Made-up secrets of a run: none of them is real.
+const (
+	fakeRoomURL  = "https://meet.example.invalid/gate-fakeroom0001"
+	fakeRoomSlug = "gate-fakeroom0001"
+	fakeChannel  = "gate-fakechan0001"
+	fakeToken    = "fake-wb-token-0001"
+	fakeKey      = "5a5a5a5a5a5a5a5a" + "5a5a5a5a5a5a5a5a" + "5a5a5a5a5a5a5a5a" + "5a5a5a5a5a5a5a5a"
+)
+
+// fakeClient comes up on an address nothing listens on: the runner builds its
+// dialer, and the scenarios here never dial. It can write a line to the
+// process log as it starts, take a while, and fail.
+type fakeClient struct {
+	name    string
+	line    string
+	delay   time.Duration
+	err     error
+	started atomic.Int32
+	stopped atomic.Int32
+}
+
+func (c *fakeClient) Name() string { return c.name }
+
+func (c *fakeClient) Start(context.Context, Endpoint) (*Tunnel, error) {
+	c.started.Add(1)
+	if c.line != "" {
+		log.Print(c.line)
+	}
+	time.Sleep(c.delay)
+	if c.err != nil {
+		return nil, c.err
+	}
+	return &Tunnel{SocksAddr: "127.0.0.1:1", Stop: func() { c.stopped.Add(1) }}, nil
+}
+
+// scriptTarget fails its first opens with errs, in order, and then hands out
+// ep for the pair asked. It counts the opens and the stops.
+type scriptTarget struct {
+	pairs []Pair
+	ep    Endpoint
+	errs  []error
+	mu    sync.Mutex
+	opens int
+	stops int
+}
+
+func (*scriptTarget) Name() string     { return "fake" }
+func (*scriptTarget) Platform() string { return "engine-test" }
+func (s *scriptTarget) Pairs() []Pair  { return s.pairs }
+func (*scriptTarget) Load() LoadURLs   { return LoadURLs{} }
+func (s *scriptTarget) counts() (int, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.opens, s.stops
+}
+
+func (s *scriptTarget) Open(_ context.Context, p Pair, _ string, _ OpenOptions) (Endpoint, func(), error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.opens++
+	if s.opens <= len(s.errs) {
+		return Endpoint{}, nil, s.errs[s.opens-1]
+	}
+	ep := s.ep
+	ep.Provider, ep.Transport = p.Provider, p.Transport
+	return ep, func() {
+		s.mu.Lock()
+		s.stops++
+		s.mu.Unlock()
+	}, nil
+}
+
+// harness is a runner test's world: options over a fresh recorder, capture
+// and artifacts directory, the lines the runner logged and what each cell's
+// run returned, by the cell's name.
+type harness struct {
+	opt     Options
+	secrets []string
+	mu      sync.Mutex
+	lines   []string
+	errs    map[string]error
+}
+
+func newHarness(t *testing.T, target Target, clients ...Client) *harness {
+	t.Helper()
+	capture := StartCapture()
+	t.Cleanup(capture.Stop)
+	h := &harness{errs: map[string]error{}}
+	h.opt = Options{
+		Target: target, Clients: clients, Thresholds: Local, Dir: t.TempDir(),
+		Recorder: NewRecorder(Report{Target: target.Name()}), Capture: capture, Secrets: &h.secrets, Logf: h.logf,
+	}
+	return h
+}
+
+func (h *harness) logf(format string, args ...any) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.lines = append(h.lines, fmt.Sprintf(format, args...))
+}
+
+// run walks the plan with every cell a subtest of t, as the entry does, and
+// returns the report.
+func (h *harness) run(ctx context.Context, t *testing.T) Report {
+	t.Helper()
+	RunPlan(ctx, h.opt, func(name string, cell func() error) {
+		t.Run(name, func(*testing.T) { h.errs[name] = cell() })
+	})
+	return h.opt.Recorder.Report()
+}
+
+// fixed is a scenario that measures m and returns err whatever the tunnel.
+func fixed(id string, m Metrics, err error) Scenario {
+	return Scenario{ID: id, Name: "fixed " + id, Applies: always, Run: func(context.Context, *Env) (Metrics, error) {
+		return m, err
+	}}
+}
+
+// Metrics that pass S0, S1 and S7.
+func passS0() Metrics { return Metrics{MetricHandshakeMs: 10, MetricPullOK: 1, MetricPushOK: 1} }
+func passS1() Metrics {
+	return Metrics{MetricConnectOK: 2, MetricConnectTotal: 2, MetricConnectP95Ms: 1}
+}
+func passS7() Metrics {
+	return Metrics{MetricHeapPeakBytes: 1 << 20, MetricRSSPeakBytes: 1 << 20,
+		MetricGoroutinesIdle: 10, MetricGoroutinesAfter: 10}
+}
+
+// cellsByID indexes a report's cells.
+func cellsByID(rep Report) map[string]Cell {
+	out := make(map[string]Cell, len(rep.Cells))
+	for _, c := range rep.Cells {
+		out[c.ID] = c
+	}
+	return out
+}
+
+func TestRunPlanRecordsEveryCellThroughASubtestOfItsOwn(t *testing.T) {
+	resetRegistryForTest(t)
+	Register(fixed("S0", passS0(), nil))
+	Register(fixed("S1", Metrics{MetricConnectOK: 1, MetricConnectTotal: 2, MetricConnectP95Ms: 1}, nil))
+	target := &scriptTarget{pairs: []Pair{{"jitsi", "datachannel"}}}
+	client := &fakeClient{name: "cli"}
+	h := newHarness(t, target, client)
+	rep := h.run(context.Background(), t)
+	if rep.Planned != 2 || rep.Executed != 2 || rep.Passed != 1 || rep.Failed != 1 {
+		t.Fatalf("report = planned %d executed %d passed %d failed %d", rep.Planned, rep.Executed, rep.Passed, rep.Failed)
+	}
+	for _, c := range rep.Cells {
+		if strings.ContainsAny(c.ID, "@#") {
+			t.Fatalf("cell id carries link material: %s", c.ID)
+		}
+		if want := "jitsi-datachannel/cli-" + c.Scenario + ".log"; c.Log != want {
+			t.Fatalf("%s log = %q, want %q, relative to the artifacts", c.ID, c.Log, want)
+		}
+		if _, err := os.Stat(filepath.Join(h.opt.Dir, c.Log)); err != nil {
+			t.Fatalf("%s: %v", c.ID, err)
+		}
+		if c.Thresholds[MetricConnectP95Ms] != 5000 {
+			t.Fatalf("%s carries thresholds %v, not Local's", c.ID, c.Thresholds)
+		}
+	}
+	s1 := h.errs["jitsi/datachannel/cli/S1"]
+	if err := h.errs["jitsi/datachannel/cli/S0"]; err != nil || len(h.errs) != 2 {
+		t.Fatalf("cell runs = %v, want S0 passed and every cell run under its name", h.errs)
+	}
+	if !errors.Is(s1, ErrCellFailed) || !strings.Contains(s1.Error(), "connect_ok 1 of connect_total 2") {
+		t.Fatalf("S1's run = %v, want the verdict", s1)
+	}
+	if opens, stops := target.counts(); opens != 1 || stops != 1 || client.started.Load() != 1 ||
+		client.stopped.Load() != 1 {
+		t.Fatalf("opened %d servers, stopped %d, started %d clients, stopped %d; want one of each",
+			opens, stops, client.started.Load(), client.stopped.Load())
+	}
+	if _, err := os.Stat(filepath.Join(h.opt.Dir, "jitsi-datachannel", "cli-start.log")); err != nil {
+		t.Fatalf("no start log: %v", err)
+	}
+}
+
+func TestRunPlanTimesTheClientsStartForS0(t *testing.T) {
+	resetRegistryForTest(t)
+	var handshake time.Duration
+	Register(Scenario{ID: "S0", Applies: always, Run: func(_ context.Context, env *Env) (Metrics, error) {
+		handshake = env.handshake
+		return passS0(), nil
+	}})
+	h := newHarness(t, &scriptTarget{pairs: []Pair{{"jitsi", "datachannel"}}},
+		&fakeClient{name: "cli", delay: 30 * time.Millisecond})
+	h.run(context.Background(), t)
+	if handshake < 30*time.Millisecond || handshake > 5*time.Second {
+		t.Fatalf("handshake = %s for a client that took 30 ms", handshake)
+	}
+}
+
+func TestRunCellTimesOutAStuckScenario(t *testing.T) {
+	cellDeadline = 100 * time.Millisecond
+	t.Cleanup(func() { cellDeadline = 5 * time.Minute })
+	stuck := Scenario{ID: "S0", Run: func(ctx context.Context, _ *Env) (Metrics, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}}
+	env := &Env{Logf: func(string, ...any) {}, Log: &CellLog{}, Thresholds: Local}
+	m, failures, took := RunCell(context.Background(), env, stuck)
+	if m == nil || took > time.Second || !slices.Contains(failures, "cell deadline 100ms reached") {
+		t.Fatalf("stuck scenario: metrics %v, failures %q, took %v", m, failures, took)
+	}
+}
+
+func TestRunCellFailsAPanickingScenarioAlone(t *testing.T) {
+	resetRegistryForTest(t)
+	Register(Scenario{ID: "S0", Applies: always, Run: func(context.Context, *Env) (Metrics, error) {
+		panic("fake scenario bug")
+	}})
+	Register(fixed("S1", passS1(), nil))
+	h := newHarness(t, &scriptTarget{pairs: []Pair{{"jitsi", "datachannel"}}}, &fakeClient{name: "cli"})
+	cells := cellsByID(h.run(context.Background(), t))
+	s0 := cells["engine-test/jitsi/datachannel/cli/S0"]
+	if s0.Status != StatusFail || !slices.Contains(s0.Failures, "scenario error: scenario panicked: fake scenario bug") {
+		t.Fatalf("panicking S0 = %+v", s0)
+	}
+	if s1 := cells["engine-test/jitsi/datachannel/cli/S1"]; s1.Status != StatusPass {
+		t.Fatalf("the cell after a panic = %+v, want it run and passed", s1)
+	}
+}
+
+func TestRunPlanTriesAServerOnceMoreThenFailsItsCells(t *testing.T) {
+	resetRegistryForTest(t)
+	openRetryDelay = 10 * time.Millisecond
+	t.Cleanup(func() { openRetryDelay = 30 * time.Second })
+	Register(fixed("S0", passS0(), nil))
+	Register(fixed("S1", passS1(), nil))
+	target := &scriptTarget{pairs: []Pair{{"telemost", "vp8channel"}},
+		errs: []error{errors.New("fake: status 429"), errors.New("fake: status 403")}}
+	client := &fakeClient{name: "mobile"}
+	h := newHarness(t, target, client)
+	rep := h.run(context.Background(), t)
+	if opens, _ := target.counts(); opens != 2 || client.started.Load() != 0 {
+		t.Fatalf("opened %d times and started %d clients, want two opens and no client", opens, client.started.Load())
+	}
+	if rep.Planned != 2 || rep.Executed != 2 || rep.Failed != 2 {
+		t.Fatalf("report = planned %d executed %d failed %d", rep.Planned, rep.Executed, rep.Failed)
+	}
+	want := "server: tried twice, 10ms apart: fake: status 403"
+	for _, c := range rep.Cells {
+		if !slices.Equal(c.Failures, []string{want}) {
+			t.Fatalf("%s failures = %q, want %q", c.ID, c.Failures, want)
+		}
+		name := strings.TrimPrefix(c.ID, "engine-test/")
+		if err := h.errs[name]; !errors.Is(err, ErrCellFailed) || !strings.Contains(err.Error(), want) {
+			t.Fatalf("%s ran as %v", name, err)
+		}
+	}
+	if !slices.ContainsFunc(h.lines, func(l string) bool { return strings.Contains(l, "fake: status 429") }) {
+		t.Fatalf("the first failure was not logged: %q", h.lines)
+	}
+}
+
+func TestRunPlanRunsAPairWhoseServerCameUpOnTheRetry(t *testing.T) {
+	resetRegistryForTest(t)
+	openRetryDelay = 10 * time.Millisecond
+	t.Cleanup(func() { openRetryDelay = 30 * time.Second })
+	Register(fixed("S0", passS0(), nil))
+	target := &scriptTarget{pairs: []Pair{{"jitsi", "datachannel"}}, errs: []error{errors.New("fake: status 503")}}
+	rep := newHarness(t, target, &fakeClient{name: "cli"}).run(context.Background(), t)
+	if opens, stops := target.counts(); opens != 2 || stops != 1 || rep.Passed != 1 {
+		t.Fatalf("opens %d stops %d passed %d, want the second open to carry the cell", opens, stops, rep.Passed)
+	}
+}
+
+func TestRunPlanDoesNotRetryWhatASecondTryCannotChange(t *testing.T) {
+	openRetryDelay = time.Hour // a retry would hang the test
+	t.Cleanup(func() { openRetryDelay = 30 * time.Second })
+	for _, err := range []error{
+		ErrNoWBStreamToken,
+		fmt.Errorf("telemost: %w: the pool is empty", ErrPoolRoom),
+		fmt.Errorf("%w: wbstream/datachannel", ErrPairNotCarried),
+	} {
+		resetRegistryForTest(t)
+		Register(fixed("S0", passS0(), nil))
+		target := &scriptTarget{pairs: []Pair{{"wbstream", "vp8channel"}}, errs: []error{err}}
+		var rep Report
+		within(t, 5*time.Second, "a plan with a server that cannot come up", func() {
+			rep = newHarness(t, target, &fakeClient{name: "mobile"}).run(context.Background(), t)
+		})
+		opens, _ := target.counts()
+		if opens != 1 || rep.Failed != 1 || !slices.Equal(rep.Cells[0].Failures, []string{"server: " + err.Error()}) {
+			t.Fatalf("%v: opened %d times, cells %+v", err, opens, rep.Cells)
+		}
+	}
+}
+
+func TestRunPlanFailsTheCellsOfAClientThatNeverStarts(t *testing.T) {
+	resetRegistryForTest(t)
+	Register(fixed("S0", passS0(), nil))
+	target := &scriptTarget{pairs: []Pair{{"jitsi", "datachannel"}}, ep: Endpoint{Room: fakeRoomURL, Key: fakeKey}}
+	dead := &fakeClient{name: "cli", err: fmt.Errorf("fake: joining %s: status 429", fakeRoomURL)}
+	live := &fakeClient{name: "mobile"}
+	h := newHarness(t, target, dead, live)
+	cells := cellsByID(h.run(context.Background(), t))
+	want := "client: fake: joining <room>: status 429"
+	if c := cells["engine-test/jitsi/datachannel/cli/S0"]; !slices.Equal(c.Failures, []string{want}) || c.Log != "" {
+		t.Fatalf("the dead client's cell = %+v, want %q", c, want)
+	}
+	if err := h.errs["jitsi/datachannel/cli/S0"]; !errors.Is(err, ErrCellFailed) || !strings.Contains(err.Error(), want) {
+		t.Fatalf("the dead client's cell ran as %v", err)
+	}
+	if c := cells["engine-test/jitsi/datachannel/mobile/S0"]; c.Status != StatusPass {
+		t.Fatalf("the live client's cell = %+v", c)
+	}
+	for _, name := range []string{"cli-start.log", "mobile-start.log"} {
+		if _, err := os.Stat(filepath.Join(h.opt.Dir, "jitsi-datachannel", name)); err != nil {
+			t.Fatalf("no %s: %v", name, err)
+		}
+	}
+	if opens, stops := target.counts(); opens != 1 || stops != 1 || live.stopped.Load() != 1 {
+		t.Fatalf("opens %d stops %d, live client stopped %d times", opens, stops, live.stopped.Load())
+	}
+}
+
+func TestRunPlanStartsNoCellOnceTheRunEnds(t *testing.T) {
+	resetRegistryForTest(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	Register(Scenario{ID: "S0", Applies: always, Run: func(context.Context, *Env) (Metrics, error) {
+		cancel()
+		return passS0(), nil
+	}})
+	Register(fixed("S1", passS1(), nil))
+	target := &scriptTarget{pairs: []Pair{{"jitsi", "datachannel"}, {"jitsi", "vp8channel"}}}
+	h := newHarness(t, target, &fakeClient{name: "cli"})
+	rep := h.run(ctx, t)
+	if rep.Planned != 4 || rep.Executed != 1 || rep.Failed != 4 || len(h.errs) != 1 {
+		t.Fatalf("report = planned %d executed %d failed %d, cells run %v",
+			rep.Planned, rep.Executed, rep.Failed, h.errs)
+	}
+	for id, c := range cellsByID(rep) {
+		cut := id == "engine-test/jitsi/datachannel/cli/S0"
+		if cut && !slices.Contains(c.Failures, "the run ended during the cell: context canceled") {
+			t.Fatalf("the cell the run ended in = %+v", c)
+		}
+		if !cut && !slices.Equal(c.Failures, []string{"did not run"}) {
+			t.Fatalf("%s = %+v, want it never run", id, c)
+		}
+	}
+	if opens, stops := target.counts(); opens != 1 || stops != 1 {
+		t.Fatalf("opens %d stops %d, want the second pair never opened", opens, stops)
+	}
+}
+
+func TestRunPlanKeepsTheRunsSecretsOut(t *testing.T) {
+	resetRegistryForTest(t)
+	Register(Scenario{ID: "S0", Applies: always, Run: func(_ context.Context, env *Env) (Metrics, error) {
+		ep := env.Endpoint
+		log.Printf("joining %s with key %s on %s, token %s", ep.Room, ep.Key, ep.Channel, fakeToken)
+		env.Logf("S0 saw %s and %s", fakeRoomSlug, ep.Key)
+		return Metrics{MetricHandshakeMs: 1}, fmt.Errorf("fake: refused in %s for %s (%s)", ep.Room, ep.Key, fakeToken)
+	}})
+	target := &scriptTarget{pairs: []Pair{{"jitsi", "datachannel"}},
+		ep: Endpoint{Room: fakeRoomURL, Key: fakeKey, Channel: fakeChannel, DNS: "192.0.2.53:53"}}
+	h := newHarness(t, target, &fakeClient{name: "cli", line: "dialing " + fakeRoomURL + " key " + fakeKey})
+	h.secrets = append(h.secrets, fakeToken)
+	rep := h.run(context.Background(), t)
+	reportPath := filepath.Join(t.TempDir(), "gate-report.json")
+	if err := h.opt.Recorder.Write(reportPath); err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]string{
+		"report":    readTargetFile(t, reportPath),
+		"cell log":  readTargetFile(t, filepath.Join(h.opt.Dir, "jitsi-datachannel", "cli-S0.log")),
+		"start log": readTargetFile(t, filepath.Join(h.opt.Dir, "jitsi-datachannel", "cli-start.log")),
+		"logf":      strings.Join(h.lines, "\n"),
+		"subtest":   fmt.Sprint(h.errs["jitsi/datachannel/cli/S0"]),
+	}
+	for what, text := range out {
+		for _, secret := range []string{fakeRoomSlug, fakeKey, fakeChannel, fakeToken} {
+			if strings.Contains(text, secret) {
+				t.Fatalf("the %s keeps %q:\n%s", what, secret, text)
+			}
+		}
+	}
+	for what, kept := range map[string]string{
+		"report":    "fake: refused in <room> for <key> (<room>)",
+		"cell log":  "joining <room> with key <key> on <room>, token <room>",
+		"start log": "dialing <room> key <key>",
+		"logf":      "S0 saw <room> and <key>",
+	} {
+		if !strings.Contains(out[what], kept) {
+			t.Fatalf("the %s lost %q:\n%s", what, kept, out[what])
+		}
+	}
+	if rep.Failed != 1 {
+		t.Fatalf("report failed %d cells, want the one", rep.Failed)
+	}
+}
+
+func TestRunPlanWritesNoCellLogForALinkTarget(t *testing.T) {
+	resetRegistryForTest(t)
+	delayed := true
+	Register(Scenario{ID: "S0", Applies: always, Run: func(_ context.Context, env *Env) (Metrics, error) {
+		delayed = env.Delayed != nil
+		return passS0(), nil
+	}})
+	Register(fixed("S7", passS7(), nil))
+	l := link.Link{Provider: "telemost", Transport: "vp8channel", Room: "fake-telemost-room-1", Key: fakeKey}
+	h := newHarness(t, NewLinkTarget(l, LoadURLs{}, "192.0.2.53:53"), &fakeClient{name: "mobile"})
+	rep := h.run(context.Background(), t)
+	if rep.Passed != 2 || delayed {
+		t.Fatalf("passed %d of %d cells, a late server offered: %t", rep.Passed, rep.Planned, delayed)
+	}
+	var files []string
+	err := filepath.WalkDir(h.opt.Dir, func(path string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			files = append(files, strings.TrimPrefix(path, h.opt.Dir+string(filepath.Separator)))
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{filepath.Join("telemost-vp8channel", "mobile-samples.csv")}; !slices.Equal(files, want) {
+		t.Fatalf("a link run left %q, want only the samples: the fleet's rooms are not ours to show", files)
+	}
+	for _, c := range rep.Cells {
+		if c.Log != "" {
+			t.Fatalf("%s names a log: %q", c.ID, c.Log)
+		}
+	}
+}
+
+func TestRunPlanGivesALocalTargetsCellsALateServer(t *testing.T) {
+	resetRegistryForTest(t)
+	work := t.TempDir()
+	lt := fakeLocal(t, work, LocalOptions{
+		Providers: []string{"jitsi"}, Transports: []string{"datachannel"}, JitsiHosts: []string{"meet.example.invalid"},
+	}, `trap 'exit 0' TERM
+echo "bridge delay $OLCRTC_TEST_BRIDGE_DELAY"; echo "Link connected"
+i=0; while [ "$i" -lt 600 ]; do sleep 0.05; i=$((i+1)); done`)
+	lt.probe = func(context.Context, string) bool { return true }
+	var late Endpoint
+	Register(Scenario{ID: "S6", Applies: always, Run: func(ctx context.Context, env *Env) (Metrics, error) {
+		if env.Delayed == nil {
+			return nil, errors.New("no late server on a local target")
+		}
+		ep, stop, err := env.Delayed(ctx, OpenOptions{BridgeDelay: 3 * time.Second})
+		if err != nil {
+			return nil, err
+		}
+		late = ep
+		stop()
+		return Metrics{MetricReady3sMs: 100, MetricReady8sMs: 100}, nil
+	}})
+	h := newHarness(t, lt, &fakeClient{name: "cli"})
+	if rep := h.run(context.Background(), t); rep.Passed != 1 {
+		t.Fatalf("report = %+v", rep.Cells)
+	}
+	srv := readTargetFile(t, filepath.Join(h.opt.Dir, "jitsi-datachannel", "delay-3s", "srv.log"))
+	if !strings.Contains(srv, "bridge delay 3s") || !strings.Contains(srv, "<key>") {
+		t.Fatalf("the late server's log:\n%s", srv)
+	}
+	for _, s := range late.Secrets() {
+		if strings.Contains(srv, s) || !slices.Contains(h.secrets, s) {
+			t.Fatalf("the late server's %q: in its log %t, kept as a secret %t",
+				s, strings.Contains(srv, s), slices.Contains(h.secrets, s))
+		}
+	}
+	if _, err := os.Stat(filepath.Join(h.opt.Dir, "jitsi-datachannel", "srv.log")); err != nil {
+		t.Fatalf("the pair's own server log: %v", err)
+	}
+	if left, _ := os.ReadDir(work); len(left) != 0 {
+		t.Fatalf("private files left after the run: %v", left)
+	}
+}

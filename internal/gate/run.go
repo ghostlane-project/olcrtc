@@ -1,0 +1,368 @@
+package gate
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"time"
+)
+
+// ai-generated: the whole file (the runner: the plan walked pair by pair,
+// client by client and scenario by scenario, one cell at a time under its
+// deadline, every outcome recorded, and every line that leaves the run
+// scrubbed of its rooms, keys and tokens).
+
+var (
+	// ErrCellFailed is what a cell's run returns when the cell failed; the
+	// entry fails the cell's subtest with it, the reasons the report shows
+	// included.
+	ErrCellFailed = errors.New("cell failed")
+	// ErrScenarioPanic is a scenario that panicked. Its cell fails and the
+	// run goes on: a panic that reached the test would end the process with
+	// the report unwritten.
+	ErrScenarioPanic = errors.New("scenario panicked")
+)
+
+var (
+	// cellDeadline bounds one scenario; the bulk transfers S2 and S3 get
+	// twice as long, which also bounds each of their requests.
+	cellDeadline = 5 * time.Minute //nolint:gochecknoglobals // tests shorten it
+	// openRetryDelay is how long a server that did not come up waits for its
+	// one more try (spec section 11): a provider's refusal may pass.
+	openRetryDelay = 30 * time.Second //nolint:gochecknoglobals // tests shorten it
+)
+
+// artifactsPerm is a directory under the run's artifacts.
+const artifactsPerm = 0o750
+
+// Options is everything RunPlan needs. Recorder and Capture are required.
+type Options struct {
+	Target     Target
+	Clients    []Client
+	Thresholds Thresholds
+	// Dir is where the scrubbed logs and the samples go, a directory per
+	// pair; the report names each cell's log relative to it.
+	Dir      string
+	Recorder *Recorder
+	Capture  *Capture
+	// Secrets are what no log line, cell log or report may carry: the
+	// caller's (a token, a link, the pools) and, as each server comes up,
+	// its room, key and channel, which RunPlan adds.
+	Secrets *[]string
+	Logf    func(format string, args ...any)
+}
+
+// RunPlan records the plan, then walks it pair by pair, client by client and
+// scenario by scenario, one cell at a time. Every cell goes through run,
+// which the entry makes a subtest named after the cell, its id without the
+// platform, so the test output and the report name the same things: run
+// calls cell, and cell returns an error wrapping ErrCellFailed when the cell
+// failed, a server or a client that never came up included. A cell run never
+// calls, the one a -run filter leaves out or one after ctx ended, stays
+// planned, and the report fails it as not run.
+func RunPlan(ctx context.Context, opt Options, run func(name string, cell func() error)) {
+	o := prepared(opt)
+	names := make([]string, 0, len(o.Clients))
+	for _, c := range o.Clients {
+		names = append(names, c.Name())
+	}
+	o.Recorder.Plan(PlanCells(o.Target, names))
+	for _, pair := range o.Target.Pairs() {
+		if err := ctx.Err(); err != nil {
+			o.Logf("the run ended before %s: %v", pair, err)
+			return
+		}
+		runPair(ctx, o, pair, run)
+	}
+}
+
+// prepared fills what a caller may leave out, makes every line the run logs
+// scrubbed of the secrets known when it is written, and hands the recorder
+// those known up front.
+func prepared(opt Options) Options {
+	o := opt
+	if o.Secrets == nil {
+		o.Secrets = &[]string{}
+	}
+	logf, secrets := o.Logf, o.Secrets
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+	o.Logf = func(format string, args ...any) {
+		logf("%s", Scrub(fmt.Sprintf(format, args...), *secrets...))
+	}
+	o.Recorder.Withhold(*o.Secrets...)
+	return o
+}
+
+// keep adds secrets of the run: every log line and cell log from now on is
+// scrubbed of them, and the report of all of them.
+func (o Options) keep(secrets ...string) {
+	*o.Secrets = append(*o.Secrets, secrets...)
+	o.Recorder.Withhold(secrets...)
+}
+
+// runPair brings up the pair's server and runs every client against it; a
+// server that never came up fails every cell of the pair.
+func runPair(ctx context.Context, o Options, pair Pair, run func(string, func() error)) {
+	dir := filepath.Join(o.Dir, pair.Provider+"-"+pair.Transport)
+	ep, stop, err := openPair(ctx, o, pair, dir)
+	if err != nil {
+		o.Logf("%s: %v", pair, err)
+		for _, c := range o.Clients {
+			failCells(o, pair, c.Name(), err, run)
+		}
+		return
+	}
+	defer stop()
+	for _, c := range o.Clients {
+		if ctx.Err() != nil {
+			return
+		}
+		runClient(ctx, o, pair, c, ep, dir, run)
+	}
+}
+
+// openPair opens the pair's server, once more after openRetryDelay when it
+// did not come up and a second try could change that, and keeps the
+// endpoint's secrets.
+func openPair(ctx context.Context, o Options, pair Pair, dir string) (Endpoint, func(), error) {
+	if err := os.MkdirAll(dir, artifactsPerm); err != nil {
+		return Endpoint{}, nil, fmt.Errorf("artifacts: %w", err)
+	}
+	start := time.Now()
+	ep, stop, err := o.Target.Open(ctx, pair, dir, OpenOptions{})
+	if err != nil && retryable(err) && ctx.Err() == nil {
+		o.Logf("%s: the server did not come up, one more try in %s: %v", pair, openRetryDelay, err)
+		if pause(ctx, openRetryDelay) {
+			start = time.Now()
+			if ep, stop, err = o.Target.Open(ctx, pair, dir, OpenOptions{}); err != nil {
+				err = fmt.Errorf("tried twice, %s apart: %w", openRetryDelay, err)
+			}
+		}
+	}
+	if err != nil {
+		return Endpoint{}, nil, fmt.Errorf("server: %w", err)
+	}
+	o.keep(ep.Secrets()...)
+	o.Logf("%s: server up in %s", pair, time.Since(start).Round(time.Millisecond))
+	return ep, stop, nil
+}
+
+// retryable says whether a server that did not come up may on a second try:
+// a provider's refusal or the network may pass, a plan without a room, a
+// token or the pair never will.
+func retryable(err error) bool {
+	return !errors.Is(err, ErrNoWBStreamToken) && !errors.Is(err, ErrPoolRoom) && !errors.Is(err, ErrPairNotCarried)
+}
+
+// pause waits d, or less if ctx ends first, and says whether it waited d out.
+func pause(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// runClient starts one flavour against the pair's server and runs its
+// scenarios on the one tunnel, under a sampler of their own; a client that
+// never came up fails every cell it had.
+func runClient(ctx context.Context, o Options, pair Pair, client Client, ep Endpoint, dir string,
+	run func(string, func() error),
+) {
+	sampler := NewSampler(time.Second)
+	sampler.Start()
+	defer sampler.Stop()
+	env := newEnv(o, pair, client, ep, dir, sampler)
+	tun, err := startClient(ctx, o, env)
+	if err != nil {
+		o.Logf("%s/%s: %v", pair, client.Name(), err)
+		failCells(o, pair, client.Name(), err, run)
+		return
+	}
+	defer tun.Stop()
+	for _, s := range scenariosFor(o.Target, pair, client.Name()) {
+		if ctx.Err() != nil {
+			return
+		}
+		run(cellName(pair, client.Name(), s.ID), func() error { return runCell(ctx, o, env, s) })
+	}
+}
+
+// newEnv is the world a client's cells share. On a local target a cell may
+// also open a server of its own with a late bridge (S6); its log goes next to
+// the pair's, and its room and key join the run's secrets.
+func newEnv(o Options, pair Pair, client Client, ep Endpoint, dir string, sampler *Sampler) *Env {
+	env := &Env{
+		Target: o.Target, Pair: pair, Client: client, Endpoint: ep, Load: o.Target.Load(),
+		Sampler: sampler, Dir: dir, Logf: o.Logf, Thresholds: o.Thresholds,
+	}
+	if _, local := o.Target.(*LocalTarget); local {
+		env.Delayed = func(ctx context.Context, opt OpenOptions) (Endpoint, func(), error) {
+			sub := filepath.Join(dir, "delay-"+opt.BridgeDelay.String())
+			if err := os.MkdirAll(sub, artifactsPerm); err != nil {
+				return Endpoint{}, nil, fmt.Errorf("artifacts: %w", err)
+			}
+			late, stop, err := o.Target.Open(ctx, pair, sub, opt)
+			if err != nil {
+				return Endpoint{}, nil, fmt.Errorf("late server: %w", err)
+			}
+			o.keep(late.Secrets()...)
+			return late, stop, nil
+		}
+	}
+	return env
+}
+
+// startClient starts the flavour with the start's log in a cell of its own,
+// times the start for S0 and points the helpers the scenarios use at the
+// tunnel's SOCKS listener.
+func startClient(ctx context.Context, o Options, env *Env) (*Tunnel, error) {
+	startLog := o.Capture.Begin()
+	start := time.Now()
+	tun, err := env.Client.Start(ctx, env.Endpoint)
+	env.handshake = time.Since(start)
+	o.writeLog(startLog, env.Dir, env.Client.Name()+"-start.log")
+	if err != nil {
+		return nil, fmt.Errorf("client: %w", err)
+	}
+	dial, err := SocksDialer(tun.SocksAddr)
+	if err != nil {
+		tun.Stop()
+		return nil, fmt.Errorf("client: %w", err)
+	}
+	env.Tunnel, env.Dial = tun, dial
+	// A request is bounded by its cell's deadline; this only stops one
+	// that outlives the longest cell.
+	env.HTTP = HTTPClient(dial, 2*cellDeadline)
+	env.UDP = func(ctx context.Context) (*UDPAssoc, error) { return UDPAssociate(ctx, tun.SocksAddr) }
+	o.Logf("%s/%s: client ready in %s", env.Pair, env.Client.Name(), env.handshake.Round(time.Millisecond))
+	return tun, nil
+}
+
+// runCell is one cell: a fresh log, the scenario under its deadline, the log
+// scrubbed next to the pair's artifacts (and after S7 the samples), and the
+// outcome recorded.
+func runCell(ctx context.Context, o Options, env *Env, s Scenario) error {
+	id := CellID(o.Target.Platform(), env.Pair, env.Client.Name(), s.ID)
+	env.Log = o.Capture.Begin()
+	m, failures, took := RunCell(ctx, env, s)
+	logPath := o.writeLog(env.Log, env.Dir, env.Client.Name()+"-"+s.ID+".log")
+	if s.ID == "S7" {
+		if err := env.Sampler.WriteCSV(filepath.Join(env.Dir, env.Client.Name()+"-samples.csv")); err != nil {
+			o.Logf("%s: %v", id, err)
+		}
+	}
+	return o.finish(id, m, failures, logPath, took)
+}
+
+// RunCell runs one scenario under its deadline and judges what it measured
+// by env.Thresholds. A scenario that panics fails its cell rather than the
+// process that holds the report, and one that its deadline or the end of the
+// run cut short says so among its failures.
+func RunCell(ctx context.Context, env *Env, s Scenario) (Metrics, []string, time.Duration) {
+	deadline := cellDeadline
+	if s.ID == "S2" || s.ID == "S3" {
+		deadline *= 2
+	}
+	cctx, cancel := context.WithTimeout(ctx, deadline)
+	defer cancel()
+	start := time.Now()
+	m, err := runScenario(cctx, env, s)
+	took := time.Since(start)
+	if m == nil {
+		m = Metrics{}
+	}
+	var failures []string
+	switch {
+	case ctx.Err() != nil:
+		failures = append(failures, "the run ended during the cell: "+ctx.Err().Error())
+	case cctx.Err() != nil:
+		failures = append(failures, fmt.Sprintf("cell deadline %s reached", deadline))
+	}
+	if err != nil {
+		failures = append(failures, "scenario error: "+err.Error())
+	}
+	return m, append(failures, Evaluate(s.ID, m, env.Thresholds)...), took
+}
+
+// runScenario runs s and turns a panic in it into an error.
+func runScenario(ctx context.Context, env *Env, s Scenario) (Metrics, error) {
+	var (
+		m   Metrics
+		err error
+	)
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				err = fmt.Errorf("%w: %v", ErrScenarioPanic, r)
+			}
+		}()
+		m, err = s.Run(ctx, env)
+	}()
+	return m, err
+}
+
+// failCells fails every cell a client has on a pair with reason, without
+// running any: the server or the client never came up. Each still goes
+// through run, so it shows in the test output as the cells that ran do.
+func failCells(o Options, pair Pair, client string, reason error, run func(string, func() error)) {
+	for _, s := range scenariosFor(o.Target, pair, client) {
+		id := CellID(o.Target.Platform(), pair, client, s.ID)
+		run(cellName(pair, client, s.ID), func() error {
+			return o.finish(id, nil, []string{reason.Error()}, "", 0)
+		})
+	}
+}
+
+// finish records a cell and returns what its run reports: nil for a pass,
+// ErrCellFailed with the failures as the report shows them for a failure.
+func (o Options) finish(id string, m Metrics, failures []string, logPath string, took time.Duration) error {
+	o.Recorder.Finish(id, m, o.Thresholds.Map(), failures, logPath, took)
+	c, _ := o.Recorder.Cell(id)
+	if c.Status != StatusFail {
+		return nil
+	}
+	return fmt.Errorf("%w: %s", ErrCellFailed, strings.Join(c.Failures, "; "))
+}
+
+// writeLog stores a log scrubbed of the run's secrets in dir and returns its
+// path relative to the artifacts, what the report names. A link target's
+// logs are never written: the fleet's rooms are not ours to show (spec
+// section 10).
+func (o Options) writeLog(l *CellLog, dir, name string) string {
+	if o.Target.Name() == targetLink {
+		return ""
+	}
+	path := filepath.Join(dir, name)
+	if err := l.WriteScrubbed(path, *o.Secrets...); err != nil {
+		o.Logf("%s: %v", name, err)
+		return ""
+	}
+	rel, err := filepath.Rel(o.Dir, path)
+	if err != nil {
+		return path
+	}
+	return filepath.ToSlash(rel)
+}
+
+// scenariosFor is the registered scenarios that apply to a client on a pair,
+// in ID order.
+func scenariosFor(target Target, pair Pair, client string) []Scenario {
+	return slices.DeleteFunc(Scenarios(), func(s Scenario) bool {
+		return s.Applies != nil && !s.Applies(target, pair, client)
+	})
+}
+
+// cellName is a cell's id without its platform, the name of its subtest.
+func cellName(pair Pair, client, scenario string) string {
+	return pair.Provider + "/" + pair.Transport + "/" + client + "/" + scenario
+}
