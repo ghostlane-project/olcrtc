@@ -169,7 +169,10 @@ func OnTop(ctx context.Context, hc *http.Client, url string, every time.Duration
 }
 
 // onTop is OnTop's loop: a fetch, then the next tick, until stop closes or
-// ctx ends.
+// ctx ends. A fetch slower than the interval leaves a tick waiting when it
+// returns, and select picks among ready cases at random, so a tick is let
+// through only while stop and ctx still say go on: a fetch started after
+// the end would run past the load and count in its connects.
 func onTop(ctx context.Context, hc *http.Client, url string, every time.Duration, stop <-chan struct{}) Outcome {
 	tick := time.NewTicker(every)
 	defer tick.Stop()
@@ -189,7 +192,12 @@ func onTop(ctx context.Context, hc *http.Client, url string, every time.Duration
 		}
 		select {
 		case <-tick.C:
-			continue
+			select {
+			case <-stop:
+			case <-ctx.Done():
+			default:
+				continue
+			}
 		case <-stop:
 		case <-ctx.Done():
 		}
