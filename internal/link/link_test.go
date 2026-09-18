@@ -35,6 +35,10 @@ func TestParseAppFixtures(t *testing.T) {
 		{"\uFEFFolcrtc://wbstream?vp8channel@room#" + hex64('d') + "$Fallback",
 			Link{Provider: "wbstream", Transport: "vp8channel", Room: "room", Key: hex64('d'),
 				Label: "Fallback", VP8FPS: 60, VP8Batch: 64}},
+		// Space before the byte order mark is trimmed first, as the app does.
+		{" \uFEFFolcrtc://wbstream?vp8channel@room#" + hex64('d') + "$Fallback",
+			Link{Provider: "wbstream", Transport: "vp8channel", Room: "room", Key: hex64('d'),
+				Label: "Fallback", VP8FPS: 60, VP8Batch: 64}},
 		// The fleet's shape: no options, a label with a middle dot.
 		{"olcrtc://telemost?vp8channel@https://telemost.yandex.ru/j/1234567890#" + hex64('e') + "$DE · olcRTC\r\n",
 			Link{Provider: "telemost", Transport: "vp8channel", Room: "https://telemost.yandex.ru/j/1234567890",
@@ -78,6 +82,13 @@ func TestParseRejectsMalformed(t *testing.T) {
 		"olcrtc://jitsi?datachannel@room#" + hex64('g'),
 		"OLCRTC://jitsi?datachannel@room#" + hex64('a'),
 		"olcrtc://crypt1/AAAA",
+		// One line only: the app splits a body into lines before it parses,
+		// so what follows a line break is another line, never more of this one.
+		"olcrtc://wbstream?vp8channel@first#" + hex64('c') + "$First\n" +
+			"olcrtc://wbstream?vp8channel@second#" + hex64('d') + "$Second",
+		"olcrtc://jitsi?datachannel@room#" + hex64('a') + "\r\n$DE",
+		"olcrtc://jitsi?datachannel@room#" + hex64('a') + "\r$DE",
+		"olcrtc://jitsi?datachannel@room\n#" + hex64('a'),
 	} {
 		got, err := Parse(in)
 		if !errors.Is(err, ErrMalformed) {
@@ -99,6 +110,7 @@ func TestParseErrorsQuoteNothing(t *testing.T) {
 		"olcrtc://jitsi?datachannel@" + room,
 		"olcrtc://?datachannel@" + room + "#" + hex64('a'),
 		"olcrtc://jitsi?datachannel@" + room + "#" + badKey[:40],
+		"olcrtc://jitsi?datachannel@" + room + "#" + hex64('a') + "\n$never-in-an-error",
 	} {
 		_, err := Parse(in)
 		if err == nil {
@@ -123,6 +135,7 @@ func TestParseOptionsFollowTheApp(t *testing.T) {
 		{"vp8channel", "vp8channel", 60, 64},
 		{"vp8channel<>", "vp8channel", 60, 64},
 		{"seichannel<fps=30&batch=32&frag=900&ack-ms=2000>", "seichannel", 30, 32},
+		{"seichannel<fps=30&batch=8>>", "seichannel", 30, 64}, // the last '>' ends it: "8>" is no int
 		{"vp8channel<vp8-fps=20&fps=30>", "vp8channel", 20, 64},
 		{"vp8channel<fps=30&vp8-fps=20&batch=8&vp8-batch=16>", "vp8channel", 20, 16},
 		{"vp8channel <VP8-FPS=25& vp8-batch = 8 >", "vp8channel", 25, 8},
