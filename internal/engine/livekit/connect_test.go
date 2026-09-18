@@ -16,14 +16,14 @@ import (
 	"github.com/openlibrecommunity/olcrtc/internal/engine"
 )
 
-// ai-generated: whole file, cover for the join budget and for giving up on a
-// join (ghostlane#38).
+// ai-generated: whole file, cover for the join budget, for giving up on a
+// join and for what a join leaves behind (ghostlane#38).
 
 const (
-	// testJoinBudget stands in for connectTimeout. It is longer than the
-	// SDK's own 5 s default, so a join that ends before it shows the budget
-	// never reached the SDK.
-	testJoinBudget = 7 * time.Second
+	// testJoinBudget stands in for connectTimeout. It is well under the
+	// SDK's own 5 s default, so a join still going testGrace past it shows
+	// the budget never reached the SDK.
+	testJoinBudget = 1500 * time.Millisecond
 	// testJoinSlack is how much earlier than its budget a join may end.
 	testJoinSlack = 500 * time.Millisecond
 	// testGrace is how long a test waits past a deadline, a budget or a
@@ -143,7 +143,7 @@ func TestConnectReturnsWhenContextIsCancelled(t *testing.T) {
 	done := connectInBackground(ctx, s)
 	select {
 	case <-stub.joined:
-	case <-time.After(testJoinBudget):
+	case <-time.After(testJoinBudget + testGrace):
 		t.Fatal("the join never reached the signalling stub")
 	}
 	cancel()
@@ -228,5 +228,84 @@ func TestConnectLeavesAJoinThatLandsLate(t *testing.T) {
 				t.Fatal("a join that landed after its caller left was installed")
 			}
 		})
+	}
+}
+
+// TestDisconnectOfALeftRoomIsIgnored covers the SDK reporting the end of a
+// room after a reconnect left it for another: the room in use stays.
+func TestDisconnectOfALeftRoomIsIgnored(t *testing.T) {
+	t.Parallel()
+	connector := newFakeConnector()
+	s := &Session{
+		url:         testOldURL,
+		token:       testOldToken,
+		connectRoom: connector.connect,
+		closeCh:     make(chan struct{}),
+		sendQueue:   make(chan []byte, engine.DefaultSendQueueSize),
+		done:        make(chan struct{}),
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	// With reconnects refused, a disconnect that is acted on ends the
+	// session there and then.
+	s.SetShouldReconnect(func() bool { return false })
+	ended := make(chan string, 1)
+	s.SetEndedCallback(func(reason string) { ended <- reason })
+
+	ctx := context.Background()
+	if err := s.Connect(ctx); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	if err := s.reconnect(ctx); err != nil {
+		t.Fatalf("reconnect() error = %v", err)
+	}
+	connector.callback(0).OnDisconnected()
+	select {
+	case reason := <-ended:
+		t.Fatalf("the disconnect of the room reconnect left ended the session: %s", reason)
+	default:
+	}
+	if s.currentRoom() != roomHandle(connector.room(1)) {
+		t.Fatal("the disconnect of the room reconnect left replaced the room in use")
+	}
+
+	connector.callback(1).OnDisconnected()
+	select {
+	case <-ended:
+	case <-time.After(testGrace):
+		t.Fatal("the disconnect of the room in use was ignored")
+	}
+}
+
+// TestConnectLeavesARoomThatLandsAfterClose covers Close landing while the
+// join returns: the room is left, not installed on a closed session.
+func TestConnectLeavesARoomThatLandsAfterClose(t *testing.T) {
+	t.Parallel()
+	room := newFakeRoom()
+	s := &Session{
+		url:       testOldURL,
+		token:     testOldToken,
+		closeCh:   make(chan struct{}),
+		sendQueue: make(chan []byte, engine.DefaultSendQueueSize),
+		done:      make(chan struct{}),
+	}
+	s.connectRoom = func(string, string, *lksdk.RoomCallback, ...lksdk.ConnectOption) (roomHandle, error) {
+		_ = s.Close()
+		return room, nil
+	}
+	if err := s.Connect(context.Background()); !errors.Is(err, ErrSessionClosed) {
+		t.Fatalf("Connect() error = %v, want %v", err, ErrSessionClosed)
+	}
+	waitFor(t, func() bool {
+		room.mu.Lock()
+		defer room.mu.Unlock()
+		return room.disconnected == 1
+	})
+	if s.currentRoom() != nil {
+		t.Fatal("a room that landed after Close was installed")
+	}
+	// Whether joinRoom saw the join or the Close first is the scheduler's
+	// call, so the gate behind it is checked on its own as well.
+	if s.setRoom(newFakeRoom()) {
+		t.Fatal("setRoom() installed a room on a closed session")
 	}
 }
