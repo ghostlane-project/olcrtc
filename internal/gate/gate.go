@@ -32,6 +32,7 @@ type Endpoint struct {
 	Provider  string
 	Transport string
 	Room      string // a URL or an id, as the provider wants it
+	Channel   string // peer-routing channel both ends set, fresh per local pair; empty = the room's default
 	Key       string
 	DNS       string
 	VP8FPS    int
