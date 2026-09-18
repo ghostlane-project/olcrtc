@@ -257,15 +257,20 @@ jobs:
       - name: Summary
         if: ${{ always() && steps.go.outcome == 'success' }}
         run: |
+          # A report that cannot be read fails the step, after the other
+          # flavour's table is written.
+          unreadable=0
           for flavour in cli mobile; do
             report="gate-artifacts/$flavour/gate-report.json"
-            if [ -f "$report" ]; then
-              go run ./cmd/gate-report render "$report" | sed "1s/\$/ ($flavour flavour)/"
-            else
+            if [ ! -f "$report" ]; then
               echo "### Gate: the $flavour run wrote no report"
+            elif ! go run ./cmd/gate-report render "$report" | sed "1s/\$/ ($flavour flavour)/"; then
+              echo "### Gate: the $flavour report could not be rendered"
+              unreadable=1
             fi
             echo
           done >> "$GITHUB_STEP_SUMMARY"
+          exit "$unreadable"
 
       - name: Upload artifacts
         if: ${{ always() && steps.go.outcome == 'success' }}
