@@ -46,7 +46,7 @@ go test -count=1 -tags olcrtc_lean -timeout 45m ./internal/gate -run '^TestGate$
 | `-olcrtc.gate-target` | `local` | `local`: дочерний сервер на каждую пару; `link`: сервер за ссылкой `olcrtc://` |
 | `-olcrtc.gate-dir` | `gate-artifacts` | куда пишутся отчёт и очищенные логи; относительный путь считается от корня модуля |
 | `-olcrtc.gate-providers` | `jitsi,telemost,wbstream` | провайдеры локальной цели, по очереди |
-| `-olcrtc.gate-transports` | `datachannel,videochannel,seichannel,vp8channel` | транспорты локальной цели, см. [Пары](#пары) |
+| `-olcrtc.gate-transports` | `datachannel,seichannel,vp8channel` | транспорты локальной цели, см. [Пары](#пары); `videochannel` запускается, только если его назвать |
 | `-olcrtc.gate-clients` | свой для сборки | `cli` в обычной сборке, `mobile` в сборке `olcrtc_lean`, один вариант на процесс |
 | `-olcrtc.gate-telemost-rooms` | пусто | пул Telemost; иначе `OLCRTC_GATE_TELEMOST_ROOMS` |
 | `-olcrtc.gate-wbstream-rooms` | пусто | пул WB Stream; иначе `OLCRTC_GATE_WBSTREAM_ROOMS` |
@@ -116,7 +116,7 @@ go test -count=1 -tags olcrtc_lean -timeout 45m ./internal/gate -run '^TestGate$
 | `telemost` | `vp8channel`, `videochannel` (Telemost режет SCTP, а seichannel там не работает по устройству) |
 | `wbstream` | `vp8channel`, `videochannel`, `seichannel` (гости WB не могут публиковать data) |
 
-По умолчанию `-olcrtc.gate-transports` оставляет транспорты, которые слинкованы в эту сборку (в lean-сборке нет `videochannel`) и которые несёт хоть один провайдер. Список, заданный в командной строке, берётся как есть: неизвестное имя, транспорт, которого нет в сборке или который не несёт ни один провайдер, и провайдер, оставшийся без транспортов, - ошибки плана. У цели link одна пара - пара ссылки.
+По умолчанию `-olcrtc.gate-transports` запускает `datachannel`, `seichannel` и `vp8channel`, те из них, что несёт хоть один провайдер. `videochannel` запускается, только если его назвать: он шлёт один фрагмент в 256 байт на кадр при 30 fps, около 7,5 KiB/s, так что одна большая загрузка S0 на 10 MiB не уложилась бы в 5 мин ячейки. Список, заданный в командной строке, берётся как есть: неизвестное имя, транспорт, которого нет в сборке (в lean-сборке нет `videochannel`) или который не несёт ни один провайдер, и провайдер, оставшийся без транспортов, - ошибки плана. У цели link одна пара - пара ссылки.
 
 ## Что такое ячейка
 

@@ -46,7 +46,7 @@ go test -count=1 -tags olcrtc_lean -timeout 45m ./internal/gate -run '^TestGate$
 | `-olcrtc.gate-target` | `local` | `local`: a child server per pair; `link`: the server behind an `olcrtc://` link |
 | `-olcrtc.gate-dir` | `gate-artifacts` | where the report and the scrubbed logs go; a relative path is taken from the module root |
 | `-olcrtc.gate-providers` | `jitsi,telemost,wbstream` | providers of the local target, run one after another |
-| `-olcrtc.gate-transports` | `datachannel,videochannel,seichannel,vp8channel` | transports of the local target, see [Pairs](#pairs) |
+| `-olcrtc.gate-transports` | `datachannel,seichannel,vp8channel` | transports of the local target, see [Pairs](#pairs); `videochannel` runs only when named |
 | `-olcrtc.gate-clients` | the build's own | `cli` in a default build, `mobile` in an `olcrtc_lean` one, one flavour per process |
 | `-olcrtc.gate-telemost-rooms` | empty | Telemost pool; else `OLCRTC_GATE_TELEMOST_ROOMS` |
 | `-olcrtc.gate-wbstream-rooms` | empty | WB Stream pool; else `OLCRTC_GATE_WBSTREAM_ROOMS` |
@@ -116,7 +116,7 @@ The local target crosses the providers with the transports in the order given an
 | `telemost` | `vp8channel`, `videochannel` (Telemost drops SCTP, and seichannel fails there by design) |
 | `wbstream` | `vp8channel`, `videochannel`, `seichannel` (WB guests cannot publish data) |
 
-Left at its default, `-olcrtc.gate-transports` keeps the transports this build links (the lean build has no `videochannel`) and some provider carries. A list given on the command line is taken as it is: an unknown name, a transport this build does not link or no provider carries, and a provider left with none are plan errors. The link target has one pair, the link's.
+Left at its default, `-olcrtc.gate-transports` runs `datachannel`, `seichannel` and `vp8channel`, those of them some provider carries. `videochannel` runs only when named: it sends one 256-byte fragment a frame at 30 fps, about 7.5 KiB/s, so S0's 10 MiB pull alone would outlast the cell's 5 min. A list given on the command line is taken as it is: an unknown name, a transport this build does not link (the lean build has no `videochannel`) or no provider carries, and a provider left with none are plan errors. The link target has one pair, the link's.
 
 ## What a cell is
 
