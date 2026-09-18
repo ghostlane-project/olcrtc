@@ -59,10 +59,13 @@ jobs:
           args: --timeout=5m
 
   test:
-    # ai-generated: the default/lean matrix. The lean leg compiles what the
-    # olcrtc_lean tag selects for the mobile bind, which the default run never
-    # builds; it would have caught the lean build losing the livekit engine
-    # that wbstream needs (olcbox#22).
+    # ai-generated: the default/lean/testhooks matrix. The lean leg compiles
+    # what the olcrtc_lean tag selects for the mobile bind, which the default
+    # run never builds; it would have caught the lean build losing the livekit
+    # engine that wbstream needs (olcbox#22). The testhooks leg builds and
+    # tests what the gate's local server is built with: the bridge delay S6
+    # relies on is tested only under that tag, and a fork's pull request,
+    # which runs no gate-local, still has the tagged build checked.
     name: Test (-race, ${{ matrix.name }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -74,6 +77,8 @@ jobs:
             tags: ""
           - name: lean
             tags: "olcrtc_lean"
+          - name: testhooks
+            tags: "olcrtc_testhooks"
     steps:
       - uses: actions/checkout@v4
         with:

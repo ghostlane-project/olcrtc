@@ -596,7 +596,8 @@ i=0; while [ "$i" -lt 600 ]; do sleep 0.05; i=$((i+1)); done`)
 		}
 		late = ep
 		stop()
-		return Metrics{MetricReady3sMs: 100, MetricReady8sMs: 100}, nil
+		// ai-generated: a client ready after each delay, as S6 wants it.
+		return Metrics{MetricReady3sMs: 4100, MetricReady8sMs: 9200}, nil
 	}})
 	h := newHarness(t, lt, &fakeClient{name: "cli"})
 	if rep := h.run(context.Background(), t); rep.Passed != 1 {

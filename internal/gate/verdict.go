@@ -145,17 +145,22 @@ func allOf(okKey, totalKey string) rule {
 }
 
 // readyWithin is S6's: the client got ready at all (a scenario records 0 when
-// it never did), and within the delay the server's bridge opened with plus
-// the handshake budget.
+// it never did), no sooner than the delay the server's bridge opened with,
+// and within that delay plus the handshake budget. The floor proves the
+// delay happened: no handshake completes before the bridge opens, so a
+// client ready sooner met a bridge that was not late, and the cell would
+// have tested nothing (undelayed, a Jitsi handshake takes about 4 s).
 func readyWithin(key string, delay time.Duration) rule {
-	limit := ms(delay + handshakeBudget)
+	floor, limit := ms(delay), ms(delay+handshakeBudget)
 	return func(m Metrics) string {
 		v := m[key]
 		switch {
-		case v > 0 && v <= limit:
+		case v >= floor && v <= limit:
 			return ""
-		case v > 0:
+		case v > limit:
 			return breach(key, v, ">", limit)
+		case v > 0: // ai-generated: the floor, the proof the bridge was late
+			return breach(key, v, "<", floor) + ": the bridge was not late"
 		}
 		return key + " " + num(v) + ": never ready"
 	}

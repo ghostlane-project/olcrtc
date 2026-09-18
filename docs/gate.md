@@ -137,7 +137,7 @@ The client flavours, one per process:
 | S3 | upload saturation | 4 parallel 5 MiB pushes, connects on top as in S2 (olcbox#15) | as S2, with `throughput_up_bps` | load pairs, `mobile` |
 | S4 | quiet after load | 60 s idle after S3 (olcbox#25) | no missed pong, no reconnect, the conference alive, then a 1 KB pull | load pairs, `mobile` |
 | S5 | resolver burst | 64 concurrent DNS queries to 8.8.8.8 through a SOCKS UDP associate, twice | `resolver_answered` of the 64 within 5 s, both times | load pairs, `mobile` |
-| S6 | late server bridge | a fresh server whose Jitsi bridge opens 3 s late, then one 8 s late (olcbox#22) | the client ready within the delay plus the handshake budget | local target, `jitsi/datachannel`, both flavours |
+| S6 | late server bridge | a fresh server whose Jitsi bridge opens 3 s late, then one 8 s late (olcbox#22) | the client ready no sooner than the delay, the proof the bridge was late, and within the delay plus the handshake budget | local target, `jitsi/datachannel`, both flavours |
 | S7 | phone memory | peak heap and RSS from S2's start to S4's end over the baseline read before the client started; goroutines before S1 and at S4's end | `heap_growth_bytes`, `rss_growth_bytes`, `goroutine_growth` | load pairs, `mobile` |
 
 Load pairs are `jitsi/datachannel`, `telemost/vp8channel` and `wbstream/vp8channel` on the local target, the link's pair on the link target. The big pull is `-olcrtc.gate-big-mb` MiB. The scenarios of a client run in order on one tunnel. S6 delays the bridge through `OLCRTC_TEST_BRIDGE_DELAY`, which only a server built with `olcrtc_testhooks` reads; a release build has no such hook.
@@ -146,7 +146,7 @@ A cell has 5 min, S2 and S3 have 10. A server that did not come up gets one more
 
 ## Thresholds
 
-The bounds a verdict judges by are in `internal/gate/thresholds.go`: `Local` for the local target, `Link` for a fleet node, and the handshake budget of S0 and S6. S6 adds the budget to how late its server's bridge opens, 3 s and then 8 s, a delay the scenario sets. A cell of a report carries its target's thresholds, all of them, whatever its scenario:
+The bounds a verdict judges by are in `internal/gate/thresholds.go`: `Local` for the local target, `Link` for a fleet node, and the handshake budget of S0 and S6. S6 adds the budget to how late its server's bridge opens, 3 s and then 8 s, a delay the scenario sets, and fails a client ready sooner than that delay: no handshake completes before the bridge opens, so that bridge was not late and the cell tested nothing. A cell of a report carries its target's thresholds, all of them, whatever its scenario:
 
 | Threshold | Bounds |
 |---|---|
@@ -191,7 +191,7 @@ go run ./cmd/gate-report compare -severity fail previous.json current.json
 
 ## CI
 
-Two jobs in `.github/workflows/ci.yml`:
+The `Test` job runs the unit tests of three builds: the default one, `olcrtc_lean` and `olcrtc_testhooks`, the one the local target's server is built with, so the hook S6 relies on is tested on every event, a fork's pull request included. Two more jobs in `.github/workflows/ci.yml` run the gate:
 
 - `gate-plan` runs the dry run of both builds, needs no secret and so runs for a pull request from a fork too, and puts both plans in the job summary. It fails when a build plans no cell or a cell of the other flavour.
 - `gate-local` needs `gate-plan` and runs the gate on the local target: the `cli` flavour (`-timeout 25m`), then the `mobile` flavour (`-tags olcrtc_lean`, `-timeout 45m`) whatever the first run did. It renders both reports into the job summary and uploads the `gate-local` artifact: the reports, the scrubbed logs and the samples. One run per ref at a time (`concurrency: gate-<ref>`). A pull request from a fork gets no secrets, so the job does not run for it; the push that merges it runs the gate.
