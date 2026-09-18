@@ -38,8 +38,10 @@ const (
 	// endpoint that names none.
 	appVP8FPS   = 60
 	appVP8Batch = 64
-	// cliFlavour is the cli flavour's element of a cell id.
-	cliFlavour = "cli"
+	// cliFlavour and mobileFlavour are the flavours' elements of a cell id.
+	// Every build plans with both; only the lean build runs mobile.
+	cliFlavour    = "cli"
+	mobileFlavour = "mobile"
 )
 
 // cliRun runs the public client until ctx ends and reports the SOCKS address
