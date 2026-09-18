@@ -189,6 +189,9 @@ type fakeSocks struct {
 	ln       net.Listener
 	reply    func(relay *net.UDPAddr) []byte
 	connects atomic.Int32
+	// junkFirst has each association send a datagram the client cannot read
+	// ahead of its first answer.
+	junkFirst atomic.Bool
 }
 
 func startFakeSocks(t *testing.T, reply func(relay *net.UDPAddr) []byte) *fakeSocks {
@@ -273,14 +276,21 @@ func (f *fakeSocks) serveAssociate(conn net.Conn) {
 		_ = relay.Close()
 	}()
 	peer := conn.RemoteAddr().(*net.TCPAddr).IP
+	junk := f.junkFirst.Load()
 	buf := make([]byte, 2048)
 	for {
 		n, src, err := relay.ReadFromUDP(buf)
 		if err != nil {
 			return
 		}
-		if src.IP.Equal(peer) {
-			_, _ = relay.WriteToUDP(buf[:n], src)
+		if !src.IP.Equal(peer) {
+			continue
 		}
+		if junk {
+			// A fragment, which the client does not reassemble.
+			_, _ = relay.WriteToUDP([]byte{0, 0, 1, 1, 127, 0, 0, 1, 0, 53}, src)
+			junk = false
+		}
+		_, _ = relay.WriteToUDP(buf[:n], src)
 	}
 }
