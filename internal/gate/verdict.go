@@ -67,7 +67,7 @@ func rulesFor(scenario string, t Thresholds) []rule {
 	p95 := ms(t.ConnectP95)
 	switch scenario {
 	case "S0":
-		return []rule{atMost(MetricHandshakeMs, ms(handshakeBudget)), isOne(MetricPullOK), isOne(MetricPushOK)}
+		return []rule{atMost(MetricHandshakeMs, ms(connectBudget)), isOne(MetricPullOK), isOne(MetricPushOK)}
 	case "S1":
 		return []rule{allOf(MetricConnectOK, MetricConnectTotal), atMost(MetricConnectP95Ms, p95)}
 	case "S2":

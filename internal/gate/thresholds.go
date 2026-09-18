@@ -29,11 +29,20 @@ type Thresholds struct {
 	ResolverAnswered int
 }
 
-// handshakeBudget bounds a handshake on every target: S0's, and each of S6's
-// on top of the delay its server's bridge opens with. It equals the engine's
-// reply deadline (handshake.DefaultTimeout) but is written out, so a change
-// to the engine cannot loosen the gate.
+// handshakeBudget bounds each of S6's handshakes on top of the delay its
+// server's bridge opens with. It equals the engine's reply deadline
+// (handshake.DefaultTimeout) but is written out, so a change to the engine
+// cannot loosen the gate.
 const handshakeBudget = 15 * time.Second
+
+// ai-generated: connectBudget and its reasoning.
+// connectBudget bounds S0's handshake_ms, which runs from the client's start
+// to a working tunnel: MUC join or room auth, ICE, the bridge, then the hello.
+// The engine's 15 s reply deadline starts only at the first hello, so it is
+// not a bound on that span. What a user waits for is the app's ready wait,
+// and the tightest is Android's (MOBILE_READY_TIMEOUT_MS, 25 s; iOS waits
+// 35 s). On GitHub runners a public Jitsi relay put a healthy S0 at 15.8 s.
+const connectBudget = 25 * time.Second
 
 // The spec's memory bounds are for a process that runs the client alone: a
 // peak of 16 MiB of live heap and 45 MiB of RSS. Such a process holds

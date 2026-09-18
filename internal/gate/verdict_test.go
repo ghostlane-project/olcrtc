@@ -28,7 +28,7 @@ func TestEvaluateEachRuleWithAPassAndAFail(t *testing.T) {
 		reason   string
 	}{
 		{"S0", Metrics{"handshake_ms": 900, "pull_ok": 1, "push_ok": 1},
-			Metrics{"handshake_ms": 16000, "pull_ok": 1, "push_ok": 1}, "handshake_ms"},
+			Metrics{"handshake_ms": 26000, "pull_ok": 1, "push_ok": 1}, "handshake_ms"},
 		{"S0", Metrics{"handshake_ms": 900, "pull_ok": 1, "push_ok": 1},
 			Metrics{"handshake_ms": 900, "pull_ok": 0, "push_ok": 1}, "pull_ok"},
 		{"S1", Metrics{"connect_ok": 48, "connect_total": 48, "connect_p95_ms": 700},
@@ -190,7 +190,7 @@ func TestEvaluateBoundsAreInclusive(t *testing.T) {
 		key      string  // the metric then stepped one past its bound
 		step     float64 // +1 past a ceiling, -1 past a floor
 	}{
-		{"S0", Metrics{"handshake_ms": hs, "pull_ok": 1, "push_ok": 1}, "handshake_ms", 1},
+		{"S0", Metrics{"handshake_ms": float64(connectBudget.Milliseconds()), "pull_ok": 1, "push_ok": 1}, "handshake_ms", 1},
 		{"S1", Metrics{"connect_ok": 48, "connect_total": 48, "connect_p95_ms": 5000}, "connect_p95_ms", 1},
 		{"S2", Metrics{"pull_ok": 6, "pull_total": 6, "throughput_down_bps": 2e6,
 			"on_top_ok": 1, "on_top_total": 1, "on_top_p95_ms": 5000}, "throughput_down_bps", -1},
