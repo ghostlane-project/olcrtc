@@ -11,6 +11,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/openlibrecommunity/olcrtc/internal/engine/builtin"
 )
 
 // ai-generated: the whole file (the runner: the plan walked pair by pair,
@@ -170,6 +172,15 @@ func retryable(err error) bool {
 	return !errors.Is(err, ErrNoWBStreamToken) && !errors.Is(err, ErrPoolRoom) && !errors.Is(err, ErrPairNotCarried)
 }
 
+// providerRefused says whether a client failed on its provider's refusal (auth,
+// a room that would not open, the provider's own outage), which a second try
+// may pass. The phone flavour's errors cross gomobile's string boundary, so
+// the sentinel's text counts as well as the sentinel.
+func providerRefused(err error) bool {
+	// ai-generated: the test for a provider refusal behind a client error.
+	return errors.Is(err, builtin.ErrAuthFailed) || strings.Contains(err.Error(), builtin.ErrAuthFailed.Error())
+}
+
 // pause waits d, or less if ctx ends first, and says whether it waited d out.
 func pause(ctx context.Context, d time.Duration) bool {
 	timer := time.NewTimer(d)
@@ -254,6 +265,20 @@ func startClient(ctx context.Context, o Options, env *Env) (*Tunnel, error) {
 	startLog := o.Capture.Begin()
 	start := time.Now()
 	tun, err := env.Client.Start(ctx, env.Endpoint)
+	// ai-generated: one more try for a client the provider refused.
+	// Spec section 11: a provider that will not authenticate is retried once
+	// after the same pause a server gets (a WB guest-register answering 502
+	// for a minute is the case seen), then the cells fail with the reason.
+	if err != nil && providerRefused(err) && ctx.Err() == nil {
+		o.Logf("%s/%s: the provider refused the client, one more try in %s: %v",
+			env.Pair, env.Client.Name(), openRetryDelay, err)
+		if pause(ctx, openRetryDelay) {
+			start = time.Now()
+			if tun, err = env.Client.Start(ctx, env.Endpoint); err != nil {
+				err = fmt.Errorf("tried twice, %s apart: %w", openRetryDelay, err)
+			}
+		}
+	}
 	env.handshake = time.Since(start)
 	o.writeLog(startLog, env.Dir, env.Client.Name()+"-start.log")
 	if err != nil {

@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/openlibrecommunity/olcrtc/internal/engine/builtin"
 	"github.com/openlibrecommunity/olcrtc/internal/link"
 )
 
@@ -42,6 +43,7 @@ type fakeClient struct {
 	line    string
 	delay   time.Duration
 	err     error
+	first   []error // the first starts fail with these, in order, before err applies
 	started atomic.Int32
 	stopped atomic.Int32
 	at      atomic.Pointer[time.Time] // when Start was last called
@@ -60,11 +62,14 @@ func (c *fakeClient) startedAt() time.Time {
 func (c *fakeClient) Start(context.Context, Endpoint) (*Tunnel, error) {
 	now := time.Now()
 	c.at.Store(&now)
-	c.started.Add(1)
+	n := int(c.started.Add(1))
 	if c.line != "" {
 		log.Print(c.line)
 	}
 	time.Sleep(c.delay)
+	if n <= len(c.first) {
+		return nil, c.first[n-1]
+	}
 	if c.err != nil {
 		return nil, c.err
 	}
@@ -413,6 +418,59 @@ func TestRunPlanRunsAPairWhoseServerCameUpOnTheRetry(t *testing.T) {
 	rep := newHarness(t, target, &fakeClient{name: "cli"}).run(context.Background(), t)
 	if opens, stops := target.counts(); opens != 2 || stops != 1 || rep.Passed != 1 {
 		t.Fatalf("opens %d stops %d passed %d, want the second open to carry the cell", opens, stops, rep.Passed)
+	}
+}
+
+// ai-generated: the client-start retry tests.
+// refused is a client error as the engine reports a provider's refusal.
+func refused(why string) error {
+	return fmt.Errorf("cli client: run public client: open engine session: %w: %s", builtin.ErrAuthFailed, why)
+}
+
+func TestRunPlanTriesAClientTheProviderRefusedOnceMore(t *testing.T) {
+	resetRegistryForTest(t)
+	openRetryDelay = 10 * time.Millisecond
+	t.Cleanup(func() { openRetryDelay = 30 * time.Second })
+	Register(fixed("S0", passS0(), nil))
+	client := &fakeClient{name: "cli", first: []error{refused("guest register failed: status 502")}}
+	h := newHarness(t, &scriptTarget{pairs: []Pair{{"wbstream", "vp8channel"}}}, client)
+	rep := h.run(context.Background(), t)
+	if client.started.Load() != 2 || rep.Passed != 1 || rep.Failed != 0 {
+		t.Fatalf("started %d, passed %d, failed %d; want the second start to carry the cell",
+			client.started.Load(), rep.Passed, rep.Failed)
+	}
+	if !slices.ContainsFunc(h.lines, func(l string) bool { return strings.Contains(l, "refused the client") }) {
+		t.Fatalf("the first refusal was not logged: %q", h.lines)
+	}
+}
+
+func TestRunPlanFailsAClientTheProviderRefusedTwice(t *testing.T) {
+	resetRegistryForTest(t)
+	openRetryDelay = 10 * time.Millisecond
+	t.Cleanup(func() { openRetryDelay = 30 * time.Second })
+	Register(fixed("S0", passS0(), nil))
+	client := &fakeClient{name: "cli", err: refused("status 502")}
+	rep := newHarness(t, &scriptTarget{pairs: []Pair{{"wbstream", "vp8channel"}}}, client).run(context.Background(), t)
+	if client.started.Load() != 2 || rep.Failed != 1 {
+		t.Fatalf("started %d, failed %d; want two starts and a failed cell", client.started.Load(), rep.Failed)
+	}
+	if got := rep.Cells[0].Failures; len(got) != 1 || !strings.Contains(got[0], "tried twice, 10ms apart") {
+		t.Fatalf("failures = %q", got)
+	}
+}
+
+func TestRunPlanDoesNotRetryAClientTheProviderDidNotRefuse(t *testing.T) {
+	resetRegistryForTest(t)
+	openRetryDelay = time.Hour // a retry would hang the test
+	t.Cleanup(func() { openRetryDelay = 30 * time.Second })
+	Register(fixed("S0", passS0(), nil))
+	client := &fakeClient{name: "cli", err: errors.New("handshake: peer did not answer the handshake")}
+	var rep Report
+	within(t, 5*time.Second, "a client whose failure a retry cannot change", func() {
+		rep = newHarness(t, &scriptTarget{pairs: []Pair{{"jitsi", "datachannel"}}}, client).run(context.Background(), t)
+	})
+	if client.started.Load() != 1 || rep.Failed != 1 {
+		t.Fatalf("started %d, failed %d; want one start", client.started.Load(), rep.Failed)
 	}
 }
 
