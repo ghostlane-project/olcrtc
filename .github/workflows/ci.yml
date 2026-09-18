@@ -159,11 +159,13 @@ jobs:
     # required; GATE_JITSI_HOSTS is optional, empty means the instance list.
     #
     # Fork rule: GitHub gives a pull request from a fork no secrets, so this
-    # job does not run for one. It shows as skipped, not passed, and
-    # gate-plan's summary says why. On this repository's own events it
-    # always runs, and a missing secret fails it. The head repository is
-    # compared by name because this repository is itself a fork, so
-    # head.repo.fork is true for its own branches too.
+    # job does not run for one. It shows as skipped and gate-plan's summary
+    # says why, but GitHub counts a job skipped by `if:` as passing for a
+    # required check: a fork's pull request first gets the gate on the push
+    # that merges it. On this repository's own events it always runs, and a
+    # missing secret fails it. The head repository is compared by name,
+    # which holds whether or not this repository is itself a fork
+    # (head.repo.fork would be true for every branch of a forked repository).
     name: Gate (local server, real relays)
     needs: gate-plan
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
