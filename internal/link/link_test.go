@@ -47,6 +47,18 @@ func TestParseAppFixtures(t *testing.T) {
 		{"  olcrtc:// telemost ? vp8channel @ room-03 # " + hex64('f') + " $ 100% up ",
 			Link{Provider: "telemost", Transport: "vp8channel", Room: "room-03", Key: hex64('f'),
 				Label: "100% up", VP8FPS: 60, VP8Batch: 64}},
+		// Each marker is the first of its kind after the one before it, so a
+		// later one is data. Here '?' sits in the transport and the room, '@'
+		// in the room, '%' in the device and the label, '#' and '$' in the label.
+		{"olcrtc://jitsi?data?channel@https://meet.example.org/a@b?c#" + hex64('a') + "%dev%ice$DE #1 $5 / 100%",
+			Link{Provider: "jitsi", Transport: "data?channel", Room: "https://meet.example.org/a@b?c", Key: hex64('a'),
+				Device: "dev%ice", Label: "DE #1 $5 / 100%", VP8FPS: 60, VP8Batch: 64}},
+		// The search for each marker starts after the one before it, so the same
+		// char earlier in the line is data too: here '@' and '#' in the provider,
+		// '#' in the transport, '%' and '$' in the room.
+		{"olcrtc://jit@si#?vp8#channel@https://meet.example.org/a%20b$c#" + hex64('b'),
+			Link{Provider: "jit@si#", Transport: "vp8#channel", Room: "https://meet.example.org/a%20b$c",
+				Key: hex64('b'), VP8FPS: 60, VP8Batch: 64}},
 	}
 	for _, c := range cases {
 		got, err := Parse(c.in)
