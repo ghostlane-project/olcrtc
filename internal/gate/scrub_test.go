@@ -1,11 +1,13 @@
 package gate
 
 import (
+	"encoding/base64"
 	"errors"
 	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -39,6 +41,54 @@ func TestScrubReplacesTheLongestSecretWhole(t *testing.T) {
 	if want := "room=<room> slug=<room> channel=<room>"; got != want {
 		t.Fatalf("Scrub = %q, want %q", got, want)
 	}
+}
+
+// ai-generated: a secret a server's debug log quotes base64-encoded, as an
+// XMPP stanza id carries the JID with the Jitsi host in it, is withheld too,
+// at whatever byte of the encoded run it starts and in either alphabet: no
+// reading of what is left decodes to four bytes of it.
+func TestScrubWithholdsTheBase64FormsOfASecret(t *testing.T) {
+	host := "meet.example.invalid"
+	for offset := range 3 {
+		jid := strings.Repeat("u", offset) + "fake-endpoint@" + host + "/fake-resource\x00fake-nonce"
+		for _, enc := range []struct{ encode, decode *base64.Encoding }{
+			{base64.StdEncoding, base64.RawStdEncoding}, {base64.RawURLEncoding, base64.RawURLEncoding},
+		} {
+			line := "[xmpp:loop] <- <iq id='" + enc.encode.EncodeToString([]byte(jid)) + "' type='result'/>"
+			if decodedPart(line, enc.decode, host) == "" {
+				t.Fatalf("offset %d: the check reads no secret in the raw line %q", offset, line)
+			}
+			out := Scrub(line, host)
+			if !strings.Contains(out, "<room>") {
+				t.Fatalf("offset %d: nothing withheld in %q", offset, out)
+			}
+			if part := decodedPart(out, enc.decode, host); part != "" {
+				t.Fatalf("offset %d: %q still decodes to %q of the secret", offset, out, part)
+			}
+		}
+	}
+	// A secret of a few bytes has no encoded form: it would match text that
+	// is not the secret.
+	if forms := base64Forms("abcd"); len(forms) != 0 {
+		t.Fatalf("a 4-byte secret has encoded forms %q", forms)
+	}
+}
+
+// decodedPart is a 4-byte run of secret that a base64 run of text, read
+// from any of its first four characters, decodes to; "" when none does.
+func decodedPart(text string, dec *base64.Encoding, secret string) string {
+	for _, run := range regexp.MustCompile(`[A-Za-z0-9+/_-]+`).FindAllString(text, -1) {
+		for shift := 0; shift < 4 && shift < len(run); shift++ {
+			q := run[shift:]
+			decoded, _ := dec.DecodeString(q[:len(q)/4*4]) // what decodes before a bad byte counts
+			for i := 0; i+4 <= len(secret); i++ {
+				if strings.Contains(string(decoded), secret[i:i+4]) {
+					return secret[i : i+4]
+				}
+			}
+		}
+	}
+	return ""
 }
 
 func TestCellLogWriteScrubbed(t *testing.T) {
