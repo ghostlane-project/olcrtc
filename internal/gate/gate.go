@@ -112,6 +112,7 @@ type Env struct {
 	Load     LoadURLs
 	HTTP     *http.Client
 	Dial     DialFunc
+	UDP      func(ctx context.Context) (*UDPAssoc, error)
 	Sampler  *Sampler
 	Dir      string
 	Logf     func(format string, args ...any)
