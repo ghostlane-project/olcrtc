@@ -7,6 +7,7 @@ import (
 	"maps"
 	"math"
 	"os"
+	"path/filepath"
 	"slices"
 	"sync"
 	"time"
@@ -16,6 +17,9 @@ import (
 
 // ReportSchema is the version of gate-report.json this package writes.
 const ReportSchema = 1
+
+// reportPerm is gate-report.json's mode: a report, not a secret.
+const reportPerm = 0o644
 
 // Cell statuses. A cell is planned until it finishes; a report turns a cell
 // still planned into a failure.
@@ -72,6 +76,9 @@ type Recorder struct {
 	started time.Time
 	cells   map[string]Cell
 	secrets []string
+	// writeMu makes writes take turns, so the last one begun is the one
+	// left on disk.
+	writeMu sync.Mutex
 }
 
 // NewRecorder starts a report with the run's metadata filled in. Counts and
@@ -188,9 +195,13 @@ func (r *Recorder) Report() Report {
 	return rep
 }
 
-// Write stores the report as indented JSON. A scrubbed failure reads <room>
-// and <key> there as it does in a log, not HTML-escaped.
+// Write stores the report as indented JSON, whole or not at all: a process
+// that dies while it writes leaves the report it wrote before, never a cut
+// one (see replaceFile). A scrubbed failure reads <room> and <key> there as
+// it does in a log, not HTML-escaped.
 func (r *Recorder) Write(path string) error {
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
@@ -198,8 +209,34 @@ func (r *Recorder) Write(path string) error {
 	if err := enc.Encode(r.Report()); err != nil {
 		return fmt.Errorf("marshal report: %w", err)
 	}
-	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil { //nolint:gosec // a report, not a secret
+	if err := replaceFile(path, buf.Bytes()); err != nil {
 		return fmt.Errorf("write report: %w", err)
+	}
+	return nil
+}
+
+// replaceFile puts data at path in one step: a temporary file next to it,
+// renamed over it once written. A temporary file a crash leaves is hidden
+// and named apart from what the CI uploads.
+func replaceFile(path string, data []byte) error {
+	// ai-generated: the atomic write the report is kept on disk with.
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*")
+	if err != nil {
+		return fmt.Errorf("create temporary file: %w", err)
+	}
+	_, err = tmp.Write(data)
+	if err == nil {
+		err = tmp.Chmod(reportPerm)
+	}
+	if closeErr := tmp.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = os.Rename(tmp.Name(), path)
+	}
+	if err != nil {
+		_ = os.Remove(tmp.Name())
+		return fmt.Errorf("replace %s: %w", filepath.Base(path), err)
 	}
 	return nil
 }
