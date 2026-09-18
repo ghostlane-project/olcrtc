@@ -15,6 +15,7 @@ import (
 	"github.com/openlibrecommunity/olcrtc/internal/engine"
 	"github.com/openlibrecommunity/olcrtc/internal/logger"
 	"github.com/openlibrecommunity/olcrtc/internal/protect"
+	"github.com/openlibrecommunity/olcrtc/internal/testhooks"
 )
 
 // waitForJingle waits for Jicofo's session-initiate after a peer joins.
@@ -49,6 +50,10 @@ func (s *Session) completeJingleSetup(ctx context.Context, jSess *j.Session) err
 	needBridge := s.onData != nil || s.onPeerData != nil
 	wantVideo := s.shouldRequestVideo()
 	sctpBridge := (needBridge || wantVideo) && jSess.ColibriWS == ""
+
+	// ai-generated: this call. A test build (olcrtc_testhooks) may hold either
+	// bridge back here for the gate's late-server scenario; empty otherwise.
+	testhooks.BeforeBridgeOpen()
 
 	if (needBridge || wantVideo) && !sctpBridge {
 		if err := s.openBridgeWS(ctx, jSess); err != nil {
