@@ -131,7 +131,7 @@ The client flavours, one per process:
 
 | ID | Name | What it does | Pass | Runs on |
 |---|---|---|---|---|
-| S0 | connect | start the client, one big pull, one 5 MiB push | `handshake_ms` within the handshake budget, both transfers complete | every pair, both flavours |
+| S0 | connect | start the client, one big pull, one 5 MiB push | `handshake_ms` within the connect budget (25 s), both transfers complete | every pair, both flavours |
 | S1 | idle burst | 24 concurrent connects fetching 1 KB, then 24 one after another | all succeed, p95 within `connect_p95_ms` | load pairs, `mobile` |
 | S2 | download saturation | 6 parallel big pulls, a 1 KB connect on top every 5 s (olcbox#23) | every pull, `throughput_down_bps`, every connect on top, their p95 within `connect_p95_ms` | load pairs, `mobile` |
 | S3 | upload saturation | 4 parallel 5 MiB pushes, connects on top as in S2 (olcbox#15) | as S2, with `throughput_up_bps` | load pairs, `mobile` |
@@ -146,7 +146,7 @@ A cell has 5 min, S2 and S3 have 10. A server that did not come up gets one more
 
 ## Thresholds
 
-The bounds a verdict judges by are in `internal/gate/thresholds.go`: `Local` for the local target, `Link` for a fleet node, and the handshake budget of S0 and S6. S6 adds the budget to how late its server's bridge opens, 3 s and then 8 s, a delay the scenario sets, and fails a client ready sooner than that delay: no handshake completes before the bridge opens, so that bridge was not late and the cell tested nothing. A cell of a report carries its target's thresholds, all of them, whatever its scenario:
+The bounds a verdict judges by are in `internal/gate/thresholds.go`: `Local` for the local target, `Link` for a fleet node, the connect budget of S0 and the handshake budget of S6. S0's `handshake_ms` runs from the client's start to a working tunnel, so its bound is the tightest app ready wait, Android's 25 s, not the engine's 15 s reply deadline, which starts only at the first hello. S6 adds the handshake budget (15 s) to how late its server's bridge opens, 3 s and then 8 s, a delay the scenario sets, and fails a client ready sooner than that delay: no handshake completes before the bridge opens, so that bridge was not late and the cell tested nothing. A cell of a report carries its target's thresholds, all of them, whatever its scenario:
 
 | Threshold | Bounds |
 |---|---|
@@ -158,7 +158,7 @@ The bounds a verdict judges by are in `internal/gate/thresholds.go`: `Local` for
 | `goroutine_growth` | S7: how many more goroutines run at S4's end than before S1 |
 | `resolver_answered` | S5: how many of the 64 queries each burst must get answered |
 
-The handshake budget is not among them, so an S0 or S6 cell does not show the bound it was judged by. The other rules take no number: every transfer and connect must succeed, S4 allows no missed pong and no reconnect. A failure names the metric and what it measured, for example `connect_ok 23 of connect_total 24`.
+The connect and handshake budgets are not among them, so an S0 or S6 cell does not show the bound it was judged by. The other rules take no number: every transfer and connect must succeed, S4 allows no missed pong and no reconnect. A failure names the metric and what it measured, for example `connect_ok 23 of connect_total 24`.
 
 S7 weighs the test process, which holds the harness too (the test binary, the origin, the load, what earlier pairs left), so it judges what the client adds. Before each client starts, the runner collects the garbage, hands the freed memory back to the OS and reads a baseline; an S7 cell records it as `heap_baseline_bytes` and `rss_baseline_bytes` next to `heap_peak_bytes` and `rss_peak_bytes`, and the verdict bounds the difference. The two bounds are the spec's for a process that runs the client alone (16 MiB of live heap, 45 MiB RSS) less what such a process holds before its client starts.
 
