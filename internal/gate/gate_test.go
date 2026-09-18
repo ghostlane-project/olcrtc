@@ -45,11 +45,14 @@ const (
 )
 
 const (
-	// allTransports is the transport flag's default, the four the real E2E
-	// job ran (amendment A1). Left at it, a run keeps those the providers
-	// carry and this build links; named on the command line, a transport the
-	// build does not link is a plan error.
-	allTransports  = "datachannel,videochannel,seichannel,vp8channel"
+	// allTransports is the transport flag's default: the transports the
+	// real E2E job ran (amendment A1) whose cells can pass. videochannel is
+	// left out: one 256-byte fragment a frame at 30 fps is about 7.5 KiB/s,
+	// so S0's 10 MiB pull alone outlasts its 5 min; name it to run it. Left
+	// at the default, a run keeps those the providers carry and this build
+	// links; named on the command line, a transport the build does not link
+	// is a plan error.
+	allTransports  = "datachannel,seichannel,vp8channel"
 	flagTransports = "olcrtc.gate-transports"
 	// instancesFile is the repository's Jitsi instance list, the default of
 	// -olcrtc.gate-jitsi-instances, from the module root.
@@ -77,7 +80,8 @@ var (
 		"where the report and the scrubbed logs go; a relative path is taken from the module root")
 	gateProviders  = flag.String("olcrtc.gate-providers", "jitsi,telemost,wbstream", "providers for the local target")
 	gateTransports = flag.String(flagTransports, allTransports,
-		"transports for the local target; left alone, those the providers carry and this build links")
+		"transports for the local target; left alone, those the providers carry and this build links "+
+			"(videochannel runs only when named)")
 	gateClients = flag.String("olcrtc.gate-clients", ownFlavour(leanBuild),
 		"client flavour, one per process: cli in a default build, mobile in an olcrtc_lean one")
 	gateTelemost = flag.String("olcrtc.gate-telemost-rooms", "",
@@ -221,10 +225,10 @@ func flavourClient(flavour string) Client {
 
 // pickTransports is the local target's transports. A list left at its
 // default keeps, in its order, those this build links and at least one
-// provider carries: the lean build does not link videochannel, and a cell
-// on it could never pass. A list given is kept as it is, but a transport the
-// gate knows and the build does not link is a plan error; the target refuses
-// the rest of what cannot run.
+// provider carries, so a run of one provider plans no transport it would
+// refuse. A list given is kept as it is, but a transport the gate knows and
+// the build does not link (the lean build has no videochannel) is a plan
+// error; the target refuses the rest of what cannot run.
 func pickTransports(asked []string, explicit bool, providers, linked []string) ([]string, error) {
 	known := transportsOf(providerJitsi)
 	if explicit {
@@ -544,6 +548,8 @@ func TestPickTransportsCutsTheDefaultToWhatCanPass(t *testing.T) {
 	full := []string{"datachannel", "seichannel", "videochannel", "vp8channel"} // sorted, as the registry lists
 	lean := []string{"datachannel", "seichannel", "vp8channel"}
 	three := []string{"jitsi", "telemost", "wbstream"}
+	// ai-generated: a default that named videochannel, as the flag's did.
+	withVideo := []string{"datachannel", "videochannel", "seichannel", "vp8channel"}
 	for _, tc := range []struct {
 		name      string
 		asked     []string
@@ -552,10 +558,13 @@ func TestPickTransportsCutsTheDefaultToWhatCanPass(t *testing.T) {
 		linked    []string
 		want      []string // nil with an error
 	}{
-		{"default build", all, false, three, full, all},
+		// ai-generated: videochannel only when named, its S0 outlasts its cell.
+		{"default build", all, false, three, full, []string{"datachannel", "seichannel", "vp8channel"}},
 		{"lean build", all, false, three, lean, []string{"datachannel", "seichannel", "vp8channel"}},
-		{"telemost alone", all, false, []string{"telemost"}, full, []string{"videochannel", "vp8channel"}},
+		{"telemost alone", all, false, []string{"telemost"}, full, []string{"vp8channel"}},
 		{"telemost alone, lean", all, false, []string{"telemost"}, lean, []string{"vp8channel"}},
+		{"a default the lean build cannot link", withVideo, false, three, lean, lean},
+		{"videochannel named", []string{"videochannel"}, true, three, full, []string{"videochannel"}},
 		{"asked for", []string{"vp8channel", "datachannel"}, true, three, lean, []string{"vp8channel", "datachannel"}},
 		{"asked for, not linked", []string{"vp8channel", "videochannel"}, true, three, lean, nil},
 		{"an unknown name is the target's to refuse", []string{"vp9channel"}, true, three, lean, []string{"vp9channel"}},
