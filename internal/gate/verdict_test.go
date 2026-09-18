@@ -70,9 +70,10 @@ func TestThresholdMapHasEveryKnob(t *testing.T) {
 }
 
 // testThresholds are fixed numbers for the verdict's tests, apart from Local
-// and Link, which get tuned.
+// and Link, which get tuned. The floors differ, as Link's do, so a verdict
+// that judges S2 by the up floor or S3 by the down one fails a test.
 func testThresholds() Thresholds {
-	return Thresholds{ConnectP95: 5 * time.Second, ThroughputDownBps: 2e6, ThroughputUpBps: 2e6,
+	return Thresholds{ConnectP95: 5 * time.Second, ThroughputDownBps: 2e6, ThroughputUpBps: 1.5e6,
 		HeapPeakBytes: 16 << 20, RSSPeakBytes: 45 << 20, GoroutineGrowth: 20, ResolverAnswered: 63}
 }
 
@@ -125,6 +126,7 @@ func TestEvaluateWordsEveryFailure(t *testing.T) {
 		want     []string
 	}{
 		{"S0", Metrics{"pull_ok": 1}, []string{"handshake_ms not measured", "push_ok 0 != 1"}},
+		{"S0", Metrics{"handshake_ms": 900, "pull_ok": 2, "push_ok": 1}, []string{"pull_ok 2 != 1"}}, // a flag, not a count
 		{"S2", Metrics{"pull_ok": 5, "pull_total": 6, "throughput_down_bps": 1_250_000.5,
 			"on_top_ok": 0, "on_top_total": 0, "on_top_p95_ms": 5001}, []string{
 			"pull_ok 5 of pull_total 6", "throughput_down_bps 1250000.5 < 2000000",
@@ -140,6 +142,9 @@ func TestEvaluateWordsEveryFailure(t *testing.T) {
 				"heap_peak_bytes 17825792 > 16777216", "rss_peak_bytes 48234496 > 47185920",
 				"goroutines grew by 21 > 20 (goroutines_idle 80, goroutines_after 101)",
 			}},
+		// A missing idle count read as zero would pass this: growth 10 <= 20.
+		{"S7", Metrics{"heap_peak_bytes": 9 << 20, "rss_peak_bytes": 30 << 20, "goroutines_after": 10},
+			[]string{"goroutines_idle not measured"}},
 	}
 	for _, c := range cases {
 		if got := Evaluate(c.scenario, c.m, testThresholds()); !slices.Equal(got, c.want) {
@@ -149,9 +154,14 @@ func TestEvaluateWordsEveryFailure(t *testing.T) {
 }
 
 // Bounds are inclusive, as the spec words them: p95 at most 5 s, at least
-// 63 of 64 answered, the handshake within its budget. One past fails.
+// 63 of 64 answered, the handshake within its budget. One past fails. S3 and
+// S6 step two bounds each: unstepped, a wrong S3 floor or ready_3s_ms judged
+// by the 8 s limit would pass.
 func TestEvaluateBoundsAreInclusive(t *testing.T) {
 	hs := float64(handshakeBudget.Milliseconds())
+	s3 := Metrics{"push_ok": 4, "push_total": 4, "throughput_up_bps": 1.5e6,
+		"on_top_ok": 1, "on_top_total": 1, "on_top_p95_ms": 5000}
+	s6 := Metrics{"ready_3s_ms": 3000 + hs, "ready_8s_ms": 8000 + hs}
 	cases := []struct {
 		scenario string
 		at       Metrics
@@ -162,11 +172,12 @@ func TestEvaluateBoundsAreInclusive(t *testing.T) {
 		{"S1", Metrics{"connect_ok": 48, "connect_total": 48, "connect_p95_ms": 5000}, "connect_p95_ms", 1},
 		{"S2", Metrics{"pull_ok": 6, "pull_total": 6, "throughput_down_bps": 2e6,
 			"on_top_ok": 1, "on_top_total": 1, "on_top_p95_ms": 5000}, "throughput_down_bps", -1},
-		{"S3", Metrics{"push_ok": 4, "push_total": 4, "throughput_up_bps": 2e6,
-			"on_top_ok": 1, "on_top_total": 1, "on_top_p95_ms": 5000}, "on_top_p95_ms", 1},
+		{"S3", s3, "throughput_up_bps", -1},
+		{"S3", s3, "on_top_p95_ms", 1},
 		{"S4", Metrics{"alive": 1, "missed_pong": 0, "reconnects": 0, "final_pull_ok": 1}, "missed_pong", 1},
 		{"S5", Metrics{"answered_1": 63, "answered_2": 63}, "answered_2", -1},
-		{"S6", Metrics{"ready_3s_ms": 3000 + hs, "ready_8s_ms": 8000 + hs}, "ready_8s_ms", 1},
+		{"S6", s6, "ready_3s_ms", 1},
+		{"S6", s6, "ready_8s_ms", 1},
 		{"S7", Metrics{"heap_peak_bytes": 16 << 20, "rss_peak_bytes": 45 << 20,
 			"goroutines_idle": 80, "goroutines_after": 100}, "goroutines_after", 1},
 	}
