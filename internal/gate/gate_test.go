@@ -285,7 +285,9 @@ func localTarget(t *testing.T, root string, dry bool) (*LocalTarget, []string) {
 		JitsiHosts:    listOf(*gateJitsiHosts, os.Getenv(envJitsiHosts)),
 		TelemostRooms: listOf(*gateTelemost, os.Getenv(envTelemostRooms)),
 		WBStreamRooms: listOf(*gateWBStream, os.Getenv(envWBStreamRooms)),
-		WBStreamToken: os.Getenv(EnvWBStreamToken),
+		// ai-generated: trimmed, as the CI's require step reads it: a line
+		// break stored after the token would reach the server's YAML.
+		WBStreamToken: strings.TrimSpace(os.Getenv(EnvWBStreamToken)),
 		RunNumber:     runNumber(*gateRunNumber, os.Getenv(envRunNumber)),
 		Providers:     providers, Transports: transports, DNS: defaultDNS,
 	}
@@ -354,10 +356,14 @@ func linkSecrets(raw string, l link.Link) []string {
 	return []string{raw, l.Room, l.Key, l.Device}
 }
 
-// splitList splits a comma-separated list and drops blank entries.
+// splitList splits a list on commas and line breaks, as the CI's mask step
+// splits a secret, and drops blank entries: a pool stored one room per line
+// is the rooms it names, not one room with line breaks in it.
 func splitList(v string) []string {
+	// ai-generated: line breaks separate entries too.
+	sep := func(r rune) bool { return r == ',' || r == '\n' || r == '\r' }
 	var out []string
-	for s := range strings.SplitSeq(v, ",") {
+	for s := range strings.FieldsFuncSeq(v, sep) {
 		if s = strings.TrimSpace(s); s != "" {
 			out = append(out, s)
 		}
@@ -572,6 +578,8 @@ func TestListOfPrefersTheFlagToTheEnvironment(t *testing.T) {
 		{" a, ,b ", "c", []string{"a", "b"}},
 		{"", "c,d", []string{"c", "d"}},
 		{"", " , ", nil},
+		// ai-generated: a secret stored one entry per line.
+		{"", "c\r\nd\n,e\n", []string{"c", "d", "e"}},
 	} {
 		if got := listOf(tc.flag, tc.env); !slices.Equal(got, tc.want) {
 			t.Errorf("listOf(%q, %q) = %q, want %q", tc.flag, tc.env, got, tc.want)
@@ -612,6 +620,26 @@ func TestLocalSecretsNameEveryFormOfWhatTheRunWasHanded(t *testing.T) {
 	if s := localSecrets(LocalOptions{Instances: "docs/jitsi.instances.yaml"}); slices.ContainsFunc(s,
 		func(v string) bool { return v != "" }) {
 		t.Fatalf("secrets of a run handed nothing = %q", s)
+	}
+}
+
+// ai-generated: the local target reads its secrets as the CI's mask and
+// require step does, so a value that passed that step is the one the run
+// joins with and the scrubber looks for.
+func TestLocalTargetReadsItsSecretsAsTheCIStepDoes(t *testing.T) {
+	t.Setenv(EnvWBStreamToken, " "+fakeToken+"\n")
+	t.Setenv(envTelemostRooms, "fake-telemost-1\r\nfake-telemost-2\n")
+	t.Setenv(envWBStreamRooms, "")
+	t.Setenv(envJitsiHosts, "")
+	lt, secrets := localTarget(t, moduleRoot(t), true)
+	if lt.opts.WBStreamToken != fakeToken {
+		t.Errorf("token %q, want %q", lt.opts.WBStreamToken, fakeToken)
+	}
+	if want := []string{"fake-telemost-1", "fake-telemost-2"}; !slices.Equal(lt.opts.TelemostRooms, want) {
+		t.Errorf("telemost pool %q, want %q", lt.opts.TelemostRooms, want)
+	}
+	if i := slices.IndexFunc(secrets, func(v string) bool { return strings.ContainsAny(v, " \r\n") }); i >= 0 {
+		t.Errorf("secret %q keeps what the CI step trims", secrets[i])
 	}
 }
 
