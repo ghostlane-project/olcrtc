@@ -39,6 +39,9 @@ const (
 	envEngineRef     = "OLCRTC_GATE_ENGINE_REF"
 	envAppVersion    = "OLCRTC_GATE_APP_VERSION"
 	envRunNumber     = "GITHUB_RUN_NUMBER"
+	// ai-generated: what a GitHub runner sets and the report's runner names.
+	envRunnerOS = "RUNNER_OS"
+	envImageOS  = "ImageOS"
 )
 
 const (
@@ -493,8 +496,8 @@ func engineCommit(t *testing.T, root string) string {
 
 // runnerName is the CI runner's OS and image, else this platform.
 func runnerName() string {
-	if v := os.Getenv("RUNNER_OS"); v != "" {
-		return strings.TrimSuffix(v+"/"+os.Getenv("ImageOS"), "/")
+	if v := os.Getenv(envRunnerOS); v != "" {
+		return strings.TrimSuffix(v+"/"+os.Getenv(envImageOS), "/")
 	}
 	return runtime.GOOS + "/" + runtime.GOARCH
 }
@@ -722,12 +725,12 @@ func TestUnreportedIsWhatNoCellSubtestFailed(t *testing.T) {
 }
 
 func TestRunnerNameIsTheCIsImageOrThePlatform(t *testing.T) {
-	t.Setenv("RUNNER_OS", "Linux")
-	t.Setenv("ImageOS", "ubuntu24")
+	t.Setenv(envRunnerOS, "Linux")
+	t.Setenv(envImageOS, "ubuntu24")
 	if got := runnerName(); got != "Linux/ubuntu24" {
 		t.Fatalf("on a CI runner: %q", got)
 	}
-	t.Setenv("RUNNER_OS", "")
+	t.Setenv(envRunnerOS, "")
 	if got := runnerName(); !strings.Contains(got, "/") || strings.HasPrefix(got, "Linux/ubuntu") {
 		t.Fatalf("off CI: %q", got)
 	}

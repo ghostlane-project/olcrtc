@@ -10,7 +10,7 @@
 </div>
 
 
-# Release gate
+# Релизный гейт
 
 `internal/gate` гоняет клиент движка через настоящий relay против настоящего сервера под теми профилями нагрузки, которые ломали туннель, оценивает каждую ячейку по порогам и пишет `gate-report.json`. Это набор `go test`: `TestGate`, включается флагом `-olcrtc.gate`. Без флага `go test ./internal/gate` запускает только unit-тесты.
 
@@ -32,7 +32,7 @@ go test -count=1 -tags olcrtc_lean -timeout 45m ./internal/gate -run '^TestGate$
   -olcrtc.gate -olcrtc.gate-providers=jitsi -olcrtc.gate-dir=/tmp/gate-mobile
 ```
 
-- `-olcrtc.gate-dry` печатает план, по id ячейки на строку, и ничего не запускает. Ему не нужны ни комнаты, ни токен.
+- `-olcrtc.gate-dry` печатает план, по id ячейки на строку, и ничего не запускает. На локальной цели ему не нужны ни комнаты, ни токен; цели link ссылка нужна и здесь, потому что план берёт пару из неё.
 - Для Jitsi секреты не нужны. Для Telemost и WB Stream нужны заранее созданные комнаты, для WB Stream ещё и токен аккаунта: см. [Комнаты и секреты](#комнаты-и-секреты). Передавайте их через окружение, например из файла вне репозитория (`set -a; . ~/gate.env; set +a`), а не в командной строке.
 - Локальная цель собирает `cmd/olcrtc` с `-tags olcrtc_testhooks`, поэтому `go` должен быть в `PATH`.
 - Прогон заканчивается за 90 с до дедлайна `go test`, чтобы отчёт записался и тогда, когда время вышло; ячейки, до которых он не дошёл, проваливаются как не выполненные. Давайте `-timeout` с большим запасом: стандартные 10 м обрезают почти любой прогон. `-timeout`, после которого остаётся не больше 90 с, отклоняется.
@@ -71,6 +71,7 @@ go test -count=1 -tags olcrtc_lean -timeout 45m ./internal/gate -run '^TestGate$
 | `OLCRTC_GATE_LINK` | ссылка, если её флаг пуст |
 | `OLCRTC_GATE_ENGINE_COMMIT`, `OLCRTC_GATE_ENGINE_REF`, `OLCRTC_GATE_APP_VERSION` | что, по словам отчёта, проверялось; коммит по умолчанию - `HEAD` репозитория |
 | `GITHUB_RUN_NUMBER` | номер прогона, если его флаг не задан |
+| `RUNNER_OS`, `ImageOS` | поле `runner` отчёта: `RUNNER_OS/ImageOS` на раннере GitHub, иначе платформа, `GOOS/GOARCH` |
 
 Флаг виден в списке процессов и в истории shell, поэтому комнаты, токен и ссылка передаются через окружение.
 
@@ -145,7 +146,7 @@ go test -count=1 -tags olcrtc_lean -timeout 45m ./internal/gate -run '^TestGate$
 
 ## Пороги
 
-Все числа, которыми пользуется вердикт, лежат в `internal/gate/thresholds.go`: `Local` для локальной цели, `Link` для ноды флота и бюджет handshake для S0 и S6. Каждая ячейка отчёта несёт пороги, по которым её судили:
+Границы, по которым судит вердикт, лежат в `internal/gate/thresholds.go`: `Local` для локальной цели, `Link` для ноды флота и бюджет handshake для S0 и S6. S6 прибавляет бюджет к опозданию bridge своего сервера, 3 с, затем 8 с; это опоздание задаёт сценарий. Ячейка отчёта несёт пороги своей цели, все, какой бы ни был её сценарий:
 
 | Порог | Ограничивает |
 |---|---|
@@ -157,7 +158,7 @@ go test -count=1 -tags olcrtc_lean -timeout 45m ./internal/gate -run '^TestGate$
 | `goroutine_growth` | S7: на сколько горутин в конце S4 больше, чем до S1 |
 | `resolver_answered` | S5: сколько из 64 запросов каждой пачки должны получить ответ |
 
-Остальные правила без чисел: каждая передача и каждый connect должны пройти, в S4 не допускается ни missed pong, ни reconnect. Провал называет метрику и измеренное значение, например `connect_ok 23 of connect_total 24`.
+Бюджета handshake среди них нет, так что ячейка S0 или S6 не показывает границу, по которой её судили. Остальные правила без чисел: каждая передача и каждый connect должны пройти, в S4 не допускается ни missed pong, ни reconnect. Провал называет метрику и измеренное значение, например `connect_ok 23 of connect_total 24`.
 
 ## Артефакты
 
@@ -180,7 +181,7 @@ go test -count=1 -tags olcrtc_lean -timeout 45m ./internal/gate -run '^TestGate$
 ## Чтение отчёта
 
 ```bash
-go run ./cmd/gate-report render gate-artifacts/gate-report.json
+go run ./cmd/gate-report render /tmp/gate-cli/gate-report.json
 go run ./cmd/gate-report compare -severity fail previous.json current.json
 ```
 

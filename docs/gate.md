@@ -32,7 +32,7 @@ go test -count=1 -tags olcrtc_lean -timeout 45m ./internal/gate -run '^TestGate$
   -olcrtc.gate -olcrtc.gate-providers=jitsi -olcrtc.gate-dir=/tmp/gate-mobile
 ```
 
-- `-olcrtc.gate-dry` prints the plan, one cell id per line, and runs nothing. It needs no room and no token.
+- `-olcrtc.gate-dry` prints the plan, one cell id per line, and runs nothing. On the local target it needs no room and no token; the link target still needs the link, whose pair it plans.
 - Jitsi needs no secret. Telemost and WB Stream need pre-made rooms, WB Stream also an account token: see [Rooms and secrets](#rooms-and-secrets). Put them in the environment, for example from a file outside the repository (`set -a; . ~/gate.env; set +a`), not on the command line.
 - The local target builds `cmd/olcrtc` with `-tags olcrtc_testhooks`, so `go` must be on `PATH`.
 - The run ends 90 s before the `go test` deadline, so the report is written even when time runs out; cells it did not reach fail as not run. Give `-timeout` well above the run: the default 10 m cuts most runs short. A `-timeout` that leaves no more than 90 s is refused.
@@ -71,6 +71,7 @@ The environment:
 | `OLCRTC_GATE_LINK` | the link, when its flag is empty |
 | `OLCRTC_GATE_ENGINE_COMMIT`, `OLCRTC_GATE_ENGINE_REF`, `OLCRTC_GATE_APP_VERSION` | what the report says it tested; the commit defaults to the repository's `HEAD` |
 | `GITHUB_RUN_NUMBER` | the run number, when its flag is not given |
+| `RUNNER_OS`, `ImageOS` | the report's `runner`: `RUNNER_OS/ImageOS` on a GitHub runner, else this platform's `GOOS/GOARCH` |
 
 A flag shows in the process list and the shell history, so rooms, the token and the link go in the environment.
 
@@ -145,7 +146,7 @@ A cell has 5 min, S2 and S3 have 10. A server that did not come up gets one more
 
 ## Thresholds
 
-Every number a verdict uses is in `internal/gate/thresholds.go`: `Local` for the local target, `Link` for a fleet node, and the handshake budget of S0 and S6. Each cell of a report carries the thresholds it was judged by:
+The bounds a verdict judges by are in `internal/gate/thresholds.go`: `Local` for the local target, `Link` for a fleet node, and the handshake budget of S0 and S6. S6 adds the budget to how late its server's bridge opens, 3 s and then 8 s, a delay the scenario sets. A cell of a report carries its target's thresholds, all of them, whatever its scenario:
 
 | Threshold | Bounds |
 |---|---|
@@ -157,7 +158,7 @@ Every number a verdict uses is in `internal/gate/thresholds.go`: `Local` for the
 | `goroutine_growth` | S7: how many more goroutines run at S4's end than before S1 |
 | `resolver_answered` | S5: how many of the 64 queries each burst must get answered |
 
-The other rules take no number: every transfer and connect must succeed, S4 allows no missed pong and no reconnect. A failure names the metric and what it measured, for example `connect_ok 23 of connect_total 24`.
+The handshake budget is not among them, so an S0 or S6 cell does not show the bound it was judged by. The other rules take no number: every transfer and connect must succeed, S4 allows no missed pong and no reconnect. A failure names the metric and what it measured, for example `connect_ok 23 of connect_total 24`.
 
 ## Artifacts
 
@@ -180,7 +181,7 @@ Every log is scrubbed before it is written: the run's rooms, room ids, channel i
 ## Reading a report
 
 ```bash
-go run ./cmd/gate-report render gate-artifacts/gate-report.json
+go run ./cmd/gate-report render /tmp/gate-cli/gate-report.json
 go run ./cmd/gate-report compare -severity fail previous.json current.json
 ```
 

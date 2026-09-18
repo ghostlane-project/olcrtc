@@ -139,9 +139,12 @@ func ProbeHTTPS(ctx context.Context, host string) bool {
 }
 
 // PoolRoom takes the entry of a pre-made pool the run number lands on, so
-// runs in sequence take turns and concurrent ones (bounded by the workflow's
-// concurrency group) never share one. The entry is returned trimmed, as
-// written: TelemostURL and WBStreamRoomID give it its provider's form.
+// runs in sequence take turns. Runs at the same time can still land in one
+// room (a pool of one always puts them there): the workflow's concurrency
+// group runs one gate per ref, and a push to a branch with an open pull
+// request starts two. The per-pair channel id keeps their frames apart. The
+// entry is returned trimmed, as written: TelemostURL and WBStreamRoomID give
+// it its provider's form.
 func PoolRoom(pool []string, runNumber int) (string, error) {
 	if len(pool) == 0 {
 		return "", fmt.Errorf("%w: the pool is empty", ErrPoolRoom)
