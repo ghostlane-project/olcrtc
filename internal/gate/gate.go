@@ -114,6 +114,7 @@ type Env struct {
 	Dial     DialFunc
 	UDP      func(ctx context.Context) (*UDPAssoc, error)
 	Sampler  *Sampler
+	Log      *CellLog
 	Dir      string
 	Logf     func(format string, args ...any)
 	// Thresholds are what the cell is judged by: Local or Link.
