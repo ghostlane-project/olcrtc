@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -170,5 +171,56 @@ func TestRecorderTakesConcurrentFinishes(t *testing.T) {
 	wg.Wait()
 	if rep := r.Report(); rep.Passed != len(cells) || rep.Failed != 0 {
 		t.Fatalf("passed %d failed %d of %d", rep.Passed, rep.Failed, len(cells))
+	}
+}
+
+// TestRecorderWithholdsTheRunsSecretsFromFailures records a failure string
+// carrying the run's own room and key, and withholds one secret only after
+// the failure is in: the report, a written report and a single cell all come
+// out clean, because the report is published with a release (amendment A9).
+func TestRecorderWithholdsTheRunsSecretsFromFailures(t *testing.T) {
+	room, key := "https://meet.example.invalid/gate-fakeroom0002", strings.Repeat("6b", 32)
+	r := NewRecorder(Report{})
+	r.Plan([]Cell{{ID: "p/a/b/cli/S0"}})
+	r.Withhold(room, "", "gate-fakeroom0002")
+	r.Finish("p/a/b/cli/S0", nil, nil, []string{"client: joining " + room + " with " + key + ": refused"}, "", 0)
+	r.Withhold(key)
+	want := "client: joining <room> with <key>: refused"
+	if got := r.Report().Cells[0].Failures; !slices.Equal(got, []string{want}) {
+		t.Fatalf("report failures = %q, want %q", got, want)
+	}
+	if c, ok := r.Cell("p/a/b/cli/S0"); !ok || c.Status != StatusFail || !slices.Equal(c.Failures, []string{want}) {
+		t.Fatalf("Cell = %+v, %t", c, ok)
+	}
+	path := filepath.Join(t.TempDir(), "gate-report.json")
+	if err := r.Write(path); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte("gate-fakeroom0002")) || bytes.Contains(raw, []byte(key)) {
+		t.Fatalf("written report keeps a secret:\n%s", raw)
+	}
+}
+
+func TestRecorderCellShowsOneCellAsItStands(t *testing.T) {
+	r := NewRecorder(Report{})
+	r.Plan([]Cell{{ID: "p/a/b/cli/S0"}, {ID: "p/a/b/cli/S1"}})
+	r.Finish("p/a/b/cli/S0", Metrics{"pull_ok": 1}, nil, nil, "x.log", time.Second)
+	c, ok := r.Cell("p/a/b/cli/S0")
+	if !ok || c.Status != StatusPass || c.Metrics["pull_ok"] != 1 || c.Log != "x.log" {
+		t.Fatalf("finished cell = %+v, %t", c, ok)
+	}
+	c.Metrics["pull_ok"] = 0
+	if again, _ := r.Cell("p/a/b/cli/S0"); again.Metrics["pull_ok"] != 1 {
+		t.Fatal("a cell handed out shares its metrics with the recorder")
+	}
+	if c, ok := r.Cell("p/a/b/cli/S1"); !ok || c.Status != StatusPlanned {
+		t.Fatalf("unfinished cell = %+v, %t; want it planned", c, ok)
+	}
+	if _, ok := r.Cell("p/a/b/cli/S9"); ok {
+		t.Fatal("Cell knows a cell nobody planned or finished")
 	}
 }

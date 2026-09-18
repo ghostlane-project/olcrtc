@@ -1,6 +1,7 @@
 package gate
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -64,12 +65,13 @@ type Report struct {
 }
 
 // Recorder holds every planned cell to an outcome. It is safe for concurrent
-// use, and what it hands out is a copy.
+// use, and what it hands out is a copy with no secret of the run in it.
 type Recorder struct {
 	mu      sync.Mutex
 	meta    Report
 	started time.Time
 	cells   map[string]Cell
+	secrets []string
 }
 
 // NewRecorder starts a report with the run's metadata filled in. Counts and
@@ -134,6 +136,28 @@ func (r *Recorder) Finish(
 	r.cells[id] = c
 }
 
+// Withhold adds secrets of the run the report must not carry: every failure
+// string leaves the recorder scrubbed of them (see Scrub), however long before
+// they were withheld it was recorded, because the report is published with a
+// release (amendment A9). Empty ones are ignored.
+func (r *Recorder) Withhold(secrets ...string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.secrets = append(r.secrets, secrets...)
+}
+
+// Cell returns one cell as the report will show it, a cell not finished yet
+// still planned, and whether the plan or a Finish made it known.
+func (r *Recorder) Cell(id string) (Cell, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	c, ok := r.cells[id]
+	if !ok {
+		return Cell{}, false
+	}
+	return r.shown(c), true
+}
+
 // Report builds the report: every cell by ID, a cell still planned as a
 // failure that did not run, and the counts. Planned counts every cell, one
 // finished without a plan included, so it is always Passed plus Failed;
@@ -146,7 +170,7 @@ func (r *Recorder) Report() Report {
 	rep.Planned, rep.Executed, rep.Passed, rep.Failed = len(r.cells), 0, 0, 0
 	rep.Cells = make([]Cell, 0, len(r.cells))
 	for _, id := range slices.Sorted(maps.Keys(r.cells)) {
-		c := snapshot(r.cells[id])
+		c := r.shown(r.cells[id])
 		switch c.Status {
 		case StatusPass:
 			rep.Executed++
@@ -164,13 +188,17 @@ func (r *Recorder) Report() Report {
 	return rep
 }
 
-// Write stores the report as indented JSON.
+// Write stores the report as indented JSON. A scrubbed failure reads <room>
+// and <key> there as it does in a log, not HTML-escaped.
 func (r *Recorder) Write(path string) error {
-	raw, err := json.MarshalIndent(r.Report(), "", "  ")
-	if err != nil {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(r.Report()); err != nil {
 		return fmt.Errorf("marshal report: %w", err)
 	}
-	if err := os.WriteFile(path, append(raw, '\n'), 0o644); err != nil { //nolint:gosec // a report, not a secret
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil { //nolint:gosec // a report, not a secret
 		return fmt.Errorf("write report: %w", err)
 	}
 	return nil
@@ -189,6 +217,16 @@ func finiteOnly(kind string, m map[string]float64) (map[string]float64, []string
 		out[k] = m[k]
 	}
 	return out, dropped
+}
+
+// shown is a cell as it leaves the recorder: a snapshot with every failure
+// scrubbed of the withheld secrets. The caller holds the lock.
+func (r *Recorder) shown(c Cell) Cell {
+	out := snapshot(c)
+	for i, f := range out.Failures {
+		out.Failures[i] = Scrub(f, r.secrets...)
+	}
+	return out
 }
 
 // snapshot copies a cell's maps and list, never nil, so a report shares no
