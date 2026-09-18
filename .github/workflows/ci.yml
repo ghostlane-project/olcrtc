@@ -219,19 +219,18 @@ jobs:
           done < <(entries "$GATE_JITSI_HOSTS")
           while IFS= read -r e; do mask "$e"; done < <(entries "$GATE_WBSTREAM_TOKEN")
 
-          # A missing required secret fails the job by name: the cells that
-          # need it could only fail, and a skip is never a pass.
-          missing=0
+          # A missing required secret is named here, and every cell that needs
+          # it fails in the report with the same reason, so the job still fails:
+          # a skip is never a pass. The other providers run meanwhile, so one
+          # missing secret does not hide the rest of the gate.
           require() {
             if [ -z "$(entries "${!1}")" ]; then
               echo "::error title=Gate secret not set::$1 is not set. Add it under Settings > Secrets and variables > Actions: $2."
-              missing=1
             fi
           }
           require GATE_TELEMOST_ROOMS "a comma-separated pool of Telemost room ids or URLs"
           require GATE_WBSTREAM_ROOMS "a comma-separated pool of WB Stream room ids or URLs"
           require GATE_WBSTREAM_TOKEN "the WB Stream account token the local server joins with (WB refuses a guest as the first participant of an idle room)"
-          exit "$missing"
 
       - uses: actions/checkout@v4
         with:
