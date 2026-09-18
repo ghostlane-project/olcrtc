@@ -11,13 +11,15 @@ import (
 )
 
 // ai-generated: whole file, the gate's docs pair (docs/gate.md and
-// docs/gate.ru.md) held to what the gate reads: a flag, a variable, a CI
-// secret, a threshold or a scenario added without a word in both languages
-// fails here.
+// docs/gate.ru.md) held to what the gate reads: a flag, a CI secret, a
+// threshold or a scenario added without a word in both languages fails
+// here, and so does a variable of the list in gateVocabulary.
 
-// gateVocabulary is every name a reader of the doc needs: each flag of the
-// entry, each variable it reads, each secret the CI hands it, each threshold
-// a report shows, each scenario and the prefix a bare Telemost id joins by.
+// gateVocabulary is every name a reader of the doc needs. The flags of the
+// entry, the secrets the CI hands it, the thresholds a report shows and the
+// scenarios are read from the code. The variables the entry reads and the
+// prefix a bare Telemost id joins by are listed by hand: a variable the
+// entry starts reading goes into the list too.
 func gateVocabulary(t *testing.T, root string) []string {
 	t.Helper()
 	var names []string
@@ -27,7 +29,7 @@ func gateVocabulary(t *testing.T, root string) []string {
 		}
 	})
 	names = append(names, envLink, envTelemostRooms, envWBStreamRooms, envJitsiHosts, EnvWBStreamToken,
-		envEngineCommit, envEngineRef, envAppVersion, envRunNumber, telemostJoinPrefix)
+		envEngineCommit, envEngineRef, envAppVersion, envRunNumber, envRunnerOS, envImageOS, telemostJoinPrefix)
 	ci, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "ci.yml"))
 	if err != nil {
 		t.Fatal(err)
