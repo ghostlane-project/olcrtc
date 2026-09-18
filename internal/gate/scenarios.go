@@ -48,11 +48,13 @@ const (
 
 // Engine log lines S4 counts, each written in one place (a test pins them).
 // A reconnect logs its reason once and then a line per attempt, so the
-// reason line is the one that counts reconnects.
+// reason line is the one that counts reconnects; attempts alone are one that
+// began before the cell (see reconnects).
 const (
-	logMissedPong    = "control missed pong"
-	logReconnect     = "client reconnect reason="
-	logConferenceEnd = "Client link reported conference end"
+	logMissedPong       = "control missed pong"
+	logReconnect        = "client reconnect reason="
+	logReconnectAttempt = "client reconnect attempt="
+	logConferenceEnd    = "Client link reported conference end"
 )
 
 func init() { //nolint:gochecknoinits // the registry is filled at load
@@ -188,7 +190,7 @@ func runS4(ctx context.Context, env *Env) (Metrics, error) {
 	env.Sampler.Mark(markQuietEnd)
 	m := Metrics{
 		MetricMissedPong: float64(env.Log.Count(logMissedPong)),
-		MetricReconnects: float64(env.Log.Count(logReconnect)),
+		MetricReconnects: float64(reconnects(env.Log)),
 		MetricAlive:      1,
 	}
 	if env.Log.Count(logConferenceEnd) > 0 {
@@ -197,6 +199,14 @@ func runS4(ctx context.Context, env *Env) (Metrics, error) {
 	_, err := Pull(ctx, env.HTTP, env.Load.Small, smallBytes)
 	m[MetricFinalPullOK] = step(env, "S4 final pull", err)
 	return m, nil
+}
+
+// reconnects is how many reconnects l holds: one per reason line, or one
+// for attempts with no reason line, a reconnect that began in the cell
+// before and ran on into this one. A death at the end of the load logs its
+// reason in S3's cell, and the liveness fallback's attempts come 30 s later.
+func reconnects(l *CellLog) int {
+	return max(l.Count(logReconnect), min(1, l.Count(logReconnectAttempt)))
 }
 
 // runS5 is the resolver burst (the stream path, aac553b8): resolverBurst
