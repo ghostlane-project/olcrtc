@@ -17,6 +17,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/openlibrecommunity/olcrtc/internal/gate"
 )
@@ -74,10 +76,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 }
 
 // dispatch runs the subcommand args name and returns its output and whether a
-// regression fails the run.
+// regression fails the run. render takes no flag, so a dash argument such as
+// -h is a usage error there, as it is for compare.
 func dispatch(args []string, stderr io.Writer) (string, bool, error) {
 	switch {
-	case len(args) == 2 && args[0] == cmdRender:
+	case len(args) == 2 && args[0] == cmdRender && !strings.HasPrefix(args[1], "-"):
 		r, err := load(args[1])
 		if err != nil {
 			return "", false, err
@@ -132,7 +135,9 @@ func parseAnywhere(fs *flag.FlagSet, args []string) ([]string, error) {
 // load reads a report of the schema this command knows. Any other file would
 // render as an empty table or compare as nothing in common, and pass.
 func load(path string) (gate.Report, error) {
-	raw, err := os.ReadFile(path) //nolint:gosec // a report named on the command line
+	// Any report the command line names may be read. Clean is the check
+	// gosec's G703 accepts; a nolint instead goes unused on the runs G703 skips.
+	raw, err := os.ReadFile(filepath.Clean(path))
 	if err != nil {
 		return gate.Report{}, fmt.Errorf("read report: %w", err)
 	}

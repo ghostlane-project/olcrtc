@@ -1,6 +1,7 @@
 package main
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -118,6 +119,30 @@ func TestCompareSkipsACellOnOneSideOnly(t *testing.T) {
 		if len(got) != 1 || got[0].Cell != cellS2 || got[0].Regression {
 			t.Fatalf("deltas = %+v, want one for %s and no regression", got, cellS2)
 		}
+	}
+}
+
+func TestCompareOrdersByCellThenMetric(t *testing.T) {
+	// The current report holds its cells out of order, and a cell yields its
+	// status before its metrics: the deltas still go by cell id, then metric.
+	const cellS3 = "engine-linux/jitsi/datachannel/mobile/S3"
+	m := map[string]float64{gate.MetricThroughputDownBps: 4_000_000, gate.MetricHeapPeakBytes: 8 << 20}
+	prev := gate.Report{Cells: []gate.Cell{
+		{ID: cellS2, Status: "pass", Metrics: m}, {ID: cellS3, Status: "pass", Metrics: m},
+	}}
+	cur := gate.Report{Cells: []gate.Cell{
+		{ID: cellS3, Status: "fail", Metrics: m}, {ID: cellS2, Status: "pass", Metrics: m},
+	}}
+	got := make([]string, 0, 5)
+	for _, d := range Compare(prev, cur) {
+		got = append(got, d.Cell+" "+d.Metric)
+	}
+	want := []string{
+		cellS2 + " heap_peak_bytes", cellS2 + " throughput_down_bps",
+		cellS3 + " heap_peak_bytes", cellS3 + " status", cellS3 + " throughput_down_bps",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("deltas go\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 }
 

@@ -63,7 +63,8 @@ func cellText(s string) string {
 }
 
 // keyMetrics are the numbers a person reads first, in a fixed order, each in
-// its unit and only when the cell measured it.
+// its unit and only when the cell measured it. S6's 0, a client that never got
+// ready, reads as the verdict words it and not as 0 ms.
 func keyMetrics(c gate.Cell) string {
 	const mbit, mib = 1e-6, 1.0 / (1 << 20)
 	figures := []struct {
@@ -83,11 +84,21 @@ func keyMetrics(c gate.Cell) string {
 		{gate.MetricReady3sMs, "ready %.0f ms (bridge 3 s late)", 1},
 		{gate.MetricReady8sMs, "ready %.0f ms (bridge 8 s late)", 1},
 	}
+	never := map[string]string{
+		gate.MetricReady3sMs: "never ready (bridge 3 s late)",
+		gate.MetricReady8sMs: "never ready (bridge 8 s late)",
+	}
 	parts := make([]string, 0, len(figures))
 	for _, f := range figures {
-		if v, ok := c.Metrics[f.key]; ok {
-			parts = append(parts, fmt.Sprintf(f.format, v*f.scale))
+		v, ok := c.Metrics[f.key]
+		if !ok {
+			continue
 		}
+		if text, zeroIsNever := never[f.key]; zeroIsNever && v <= 0 {
+			parts = append(parts, text)
+			continue
+		}
+		parts = append(parts, fmt.Sprintf(f.format, v*f.scale))
 	}
 	return strings.Join(parts, ", ")
 }

@@ -50,24 +50,28 @@ func TestRenderGolden(t *testing.T) {
 	}
 }
 
-func TestRenderSummaryLine(t *testing.T) {
+func TestRenderHeadingAndSummary(t *testing.T) {
 	all := sampleReport()
 	all.Cells[1].Status, all.Cells[1].Failures = "pass", []string{}
 	all.Passed, all.Failed = 2, 0
-	empty := gate.Report{Schema: 1, EngineCommit: "850aa5f9", Target: "local"}
+	empty := gate.Report{Schema: 1, Target: "local"}
 	for _, tc := range []struct {
 		name  string
 		r     gate.Report
 		want  string
 		never string
 	}{
-		{"every cell passed", all, "all 2 cells passed", "❌"},
-		{"a report with no cells is no pass", empty, "no cells were planned", "passed"},
+		{"every cell passed", all,
+			"### Gate: local target, engine 850aa5f9, app 1.0.431\n\nall 2 cells passed · Linux/ubuntu24 · 612 s\n\n", "❌"},
+		// No cells is no pass, and a commit, app or runner the report lacks
+		// leaves no gap in either line.
+		{"a report with no cells and no metadata", empty,
+			"### Gate: local target, engine unknown\n\nno cells were planned · 0 s\n\n", "passed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			md := Render(tc.r)
-			if !strings.Contains(md, tc.want) || strings.Contains(md, tc.never) {
-				t.Fatalf("render wants %q and never %q:\n%s", tc.want, tc.never, md)
+			if !strings.HasPrefix(md, tc.want) || strings.Contains(md, tc.never) {
+				t.Fatalf("render wants to start with %q and never hold %q:\n%s", tc.want, tc.never, md)
 			}
 		})
 	}
@@ -97,5 +101,15 @@ func TestRenderKeyMetricsInUnits(t *testing.T) {
 		"ready 9100 ms (bridge 8 s late)"
 	if got := keyMetrics(c); got != want {
 		t.Fatalf("key metrics =\n%s\nwant\n%s", got, want)
+	}
+}
+
+func TestRenderKeyMetricsNeverReady(t *testing.T) {
+	// S6 records 0 for a client that never got ready; the verdict takes
+	// anything not above 0 so.
+	c := gate.Cell{Metrics: map[string]float64{gate.MetricReady3sMs: 0, gate.MetricReady8sMs: -1}}
+	want := "never ready (bridge 3 s late), never ready (bridge 8 s late)"
+	if got := keyMetrics(c); got != want {
+		t.Fatalf("key metrics = %q, want %q", got, want)
 	}
 }
