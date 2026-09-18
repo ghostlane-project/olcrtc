@@ -51,7 +51,7 @@ go test -count=1 -tags olcrtc_lean -timeout 45m ./internal/gate -run '^TestGate$
 | `-olcrtc.gate-telemost-rooms` | empty | Telemost pool; else `OLCRTC_GATE_TELEMOST_ROOMS` |
 | `-olcrtc.gate-wbstream-rooms` | empty | WB Stream pool; else `OLCRTC_GATE_WBSTREAM_ROOMS` |
 | `-olcrtc.gate-jitsi-hosts` | empty | Jitsi hosts used instead of the instance list; else `OLCRTC_GATE_JITSI_HOSTS` |
-| `-olcrtc.gate-jitsi-instances` | `docs/jitsi.instances.yaml` | the Jitsi instance list |
+| `-olcrtc.gate-jitsi-instances` | `docs/jitsi.instances.yaml` | the Jitsi instance list; a relative path is taken from the module root |
 | `-olcrtc.gate-run-number` | `GITHUB_RUN_NUMBER`, else 0 | the number that picks a pool room |
 | `-olcrtc.gate-big-mb` | `10` | size of the big pull, MiB |
 | `-olcrtc.gate-link` | empty | the link of the link target; else `OLCRTC_GATE_LINK` |
