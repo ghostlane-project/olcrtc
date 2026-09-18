@@ -25,8 +25,6 @@ const (
 	// mobile.Runtime takes.
 	startBudgetMillis = int(startBudget / time.Millisecond)
 	stopBudgetMillis  = int(stopBudget / time.Millisecond)
-	// mobileFlavour is the mobile flavour's element of a cell id.
-	mobileFlavour = "mobile"
 )
 
 type mobileClient struct{}

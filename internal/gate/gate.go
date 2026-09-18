@@ -123,6 +123,11 @@ type Env struct {
 	// Delayed opens a fresh server for the pair with the given options and
 	// returns its endpoint; nil for targets that cannot (Link). S6 uses it.
 	Delayed func(ctx context.Context, opt OpenOptions) (Endpoint, func(), error)
+	// handshake is how long the client's Start took to hand over a listening
+	// SOCKS port, the relay join and the handshake included. The runner times
+	// it; S0 records it, and records none while it is zero, so a run that
+	// never timed the start fails S0 rather than passing it at 0 ms.
+	handshake time.Duration
 }
 
 // Scenario is one named cell body.

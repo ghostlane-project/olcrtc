@@ -69,7 +69,7 @@ func TestScenariosAreSortedByID(t *testing.T) {
 
 func TestRegisterRefusesAnEmptyOrRepeatedID(t *testing.T) {
 	resetRegistryForTest(t)
-	Register(Scenario{ID: "S0", Name: "connect"})
+	Register(Scenario{ID: "S0", Name: "kept"})
 	for _, s := range []Scenario{{Name: "no id"}, {ID: "S0", Name: "again"}} {
 		func() {
 			defer func() {
@@ -80,7 +80,7 @@ func TestRegisterRefusesAnEmptyOrRepeatedID(t *testing.T) {
 			Register(s)
 		}()
 	}
-	if got := Scenarios(); len(got) != 1 || got[0].Name != "connect" {
+	if got := Scenarios(); len(got) != 1 || got[0].Name != "kept" {
 		t.Fatalf("registry = %+v", got)
 	}
 }
