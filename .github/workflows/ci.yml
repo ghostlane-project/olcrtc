@@ -170,6 +170,10 @@ jobs:
     needs: gate-plan
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
+    # The job holds the secrets: its token only reads the repository, and
+    # checkout leaves no credential in .git/config for the test's children.
+    permissions:
+      contents: read
     # The two flavours run one after the other (amendment A8), so a pool
     # room never holds two servers: 25 and 45 minutes of go test, plus the
     # builds and the upload.
@@ -225,6 +229,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          persist-credentials: false
 
       - name: Set up Go
         id: go
