@@ -79,18 +79,22 @@ type roundTrip func(req *http.Request) (*http.Response, error)
 
 func (f roundTrip) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
+// smallAnswer is the origin's answer for the small resource, for a roundTrip.
+func smallAnswer(req *http.Request) *http.Response {
+	return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", ContentLength: smallBytes,
+		Body: io.NopCloser(bytes.NewReader(make([]byte, smallBytes))), Request: req}
+}
+
 // TestConnectBurstP95CoversEveryConnect has three of 24 concurrent connects
 // answer slowly and the 24 sequential ones at once: 3 of 48 is more than
 // 5 %, so the p95 of the burst is a slow connect.
 func TestConnectBurstP95CoversEveryConnect(t *testing.T) {
 	var seen atomic.Int32
-	small := make([]byte, smallBytes)
 	hc := &http.Client{Transport: roundTrip(func(req *http.Request) (*http.Response, error) {
 		if seen.Add(1) <= 3 {
 			time.Sleep(300 * time.Millisecond)
 		}
-		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", ContentLength: smallBytes,
-			Body: io.NopCloser(bytes.NewReader(small)), Request: req}, nil
+		return smallAnswer(req), nil
 	})}
 	out := ConnectBurst(context.Background(), hc, "http://origin.invalid/kb", 24, 24)
 	if out.OK != 48 || out.Total != 48 {
@@ -142,6 +146,46 @@ func TestOnTopConnectsAtOnce(t *testing.T) {
 	stop := OnTop(context.Background(), HTTPClient(dial, 10*time.Second), o.URLs.Small, time.Hour)
 	if out := stop(); out.Total != 1 || out.OK != 1 {
 		t.Fatalf("OnTop stopped at once = %+v, want the one connect it opens with", out)
+	}
+}
+
+// TestOnTopStartsNoFetchOnceEnded ends the loop, by stop and by its context,
+// while a fetch slower than the interval is in flight: an on-top connect
+// slower than onTopEvery, the degraded tunnel S2 and S3 are there to catch.
+// When that fetch returns a tick is waiting too, and select picks among
+// ready cases at random. A fetch started then runs after the load, counts in
+// its connects and holds up stop for as long as it takes. Each way runs 32
+// times, so a loop that lets the tick win half the time passes once in 2^32.
+func TestOnTopStartsNoFetchOnceEnded(t *testing.T) {
+	for _, c := range []struct {
+		way string
+		end func(stop chan struct{}, cancel context.CancelFunc)
+	}{
+		{"stop", func(stop chan struct{}, _ context.CancelFunc) { close(stop) }},
+		{"context", func(_ chan struct{}, cancel context.CancelFunc) { cancel() }},
+	} {
+		t.Run(c.way, func(t *testing.T) {
+			for trial := range 32 {
+				ctx, cancel := context.WithCancel(context.Background())
+				stop := make(chan struct{})
+				var fetches atomic.Int32
+				hc := &http.Client{Transport: roundTrip(func(req *http.Request) (*http.Response, error) {
+					if fetches.Add(1) == 1 {
+						c.end(stop, cancel)
+					}
+					time.Sleep(3 * time.Millisecond) // outlasts the interval: a tick is due when it returns
+					return smallAnswer(req), nil
+				})}
+				var out Outcome
+				within(t, 5*time.Second, "onTop ended by its "+c.way, func() {
+					out = onTop(ctx, hc, "http://origin.invalid/kb", time.Millisecond, stop)
+				})
+				cancel()
+				if n := fetches.Load(); n != 1 || out.Total != 1 {
+					t.Fatalf("trial %d: %d fetches, onTop = %+v; want only the one in flight", trial, n, out)
+				}
+			}
+		})
 	}
 }
 
