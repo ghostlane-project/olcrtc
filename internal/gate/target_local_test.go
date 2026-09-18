@@ -147,6 +147,10 @@ func TestLocalTargetPairsFollowTheSupportTable(t *testing.T) {
 
 func TestLocalTargetRefusesAPlanItCannotRun(t *testing.T) {
 	hosts := []string{"meet.example.invalid"}
+	noHosts := filepath.Join(t.TempDir(), "instances.yaml")
+	if err := os.WriteFile(noHosts, []byte("instances: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	for name, opts := range map[string]LocalOptions{
 		"only an unsupported pair":   {Providers: []string{"telemost"}, Transports: []string{"datachannel"}},
 		"a provider left with none":  {Providers: []string{"jitsi", "telemost"}, Transports: []string{"datachannel"}},
@@ -162,11 +166,14 @@ func TestLocalTargetRefusesAPlanItCannotRun(t *testing.T) {
 		if name != "no work directory" {
 			opts.WorkDir = t.TempDir()
 		}
-		if name != "no jitsi host" {
+		want := ErrLocalOptions
+		if name == "no jitsi host" { // a blank override and a list that names none
+			opts.Instances, want = noHosts, ErrNoJitsiHost
+		} else {
 			opts.JitsiHosts = hosts
 		}
-		if _, err := NewLocalTarget(opts); err == nil {
-			t.Fatalf("%s: accepted", name)
+		if _, err := NewLocalTarget(opts); !errors.Is(err, want) {
+			t.Fatalf("%s: err = %v, want %v", name, err, want)
 		}
 	}
 }
@@ -203,6 +210,36 @@ func TestLocalTargetRoomsFollowTheProvider(t *testing.T) {
 	lt.opts.TelemostRooms = nil
 	if _, err := lt.room(ctx, "telemost"); !errors.Is(err, ErrPoolRoom) {
 		t.Fatalf("an empty pool: err = %v", err)
+	}
+}
+
+// TestLocalTargetEndpointsAreFreshPerPair asks twice for each pair: every
+// endpoint carries its own key and channel (spec section 2, A4), so a server
+// left over from an earlier pair or run can never handshake. A Jitsi pair
+// gets a fresh room too; a pool room is the run's, the same each time.
+func TestLocalTargetEndpointsAreFreshPerPair(t *testing.T) {
+	lt, err := NewLocalTarget(LocalOptions{
+		WorkDir: t.TempDir(), Providers: []string{"jitsi", "telemost", "wbstream"}, Transports: []string{"vp8channel"},
+		JitsiHosts: []string{"up.example.invalid"}, TelemostRooms: []string{"fake-telemost-1"},
+		WBStreamRooms: []string{"fake-wb-room-1"}, WBStreamToken: "fake-wb-token",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lt.probe = func(context.Context, string) bool { return true }
+	for _, p := range []Pair{{"jitsi", "vp8channel"}, {"telemost", "vp8channel"}, {"wbstream", "vp8channel"}} {
+		first, err1 := lt.endpoint(context.Background(), p)
+		second, err2 := lt.endpoint(context.Background(), p)
+		if err1 != nil || err2 != nil {
+			t.Fatalf("%s: %v, %v", p, err1, err2)
+		}
+		if first.Key == second.Key || first.Channel == second.Channel {
+			t.Fatalf("%s: same key %t, same channel %t, want both fresh per pair", p,
+				first.Key == second.Key, first.Channel == second.Channel)
+		}
+		if fresh := first.Room != second.Room; fresh != (p.Provider == "jitsi") {
+			t.Fatalf("%s: fresh room %t, want a fresh one on jitsi alone", p, fresh)
+		}
 	}
 }
 
@@ -244,16 +281,19 @@ func readTargetFile(t *testing.T, path string) string {
 
 func TestLocalTargetRunsTheServerAndLeavesOnlyAScrubbedLog(t *testing.T) {
 	work, dir := t.TempDir(), t.TempDir()
+	// The fake's loop ends by itself after about 30 s, so a test binary that
+	// dies before its cleanups run leaves nothing looping behind.
 	lt := fakeLocal(t, work, LocalOptions{
 		Providers: []string{"wbstream"}, Transports: []string{"vp8channel"},
 		WBStreamRooms: []string{"https://stream.wb.ru/room/fake-wb-room-1"}, WBStreamToken: "fake-wb-token-0001",
 	}, `trap 'echo "leaving fake-wb-room-1"; exit 0' TERM
 echo "bridge delay $OLCRTC_TEST_BRIDGE_DELAY"; echo "joining fake-wb-room-1"; echo "Link connected"
-while :; do sleep 0.05; done`)
+i=0; while [ "$i" -lt 600 ]; do sleep 0.05; i=$((i+1)); done`)
 	ep, stop, err := lt.Open(context.Background(), Pair{"wbstream", "vp8channel"}, dir, OpenOptions{BridgeDelay: 1500 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(stop) // a check that fails before the stop below still stops the server
 	if ep.Room != "fake-wb-room-1" || len(ep.Key) != 64 || !strings.HasPrefix(ep.Channel, "gate-") ||
 		ep.DNS != "8.8.8.8:53" || ep.VP8FPS != 60 || ep.VP8Batch != 64 {
 		t.Fatalf("endpoint = %+v channel %q", ep, ep.Channel)
@@ -317,19 +357,43 @@ func TestLocalTargetStopsAServerThatNeverLinks(t *testing.T) {
 	dir := t.TempDir()
 	lt := fakeLocal(t, t.TempDir(), LocalOptions{
 		Providers: []string{"jitsi"}, Transports: []string{"datachannel"}, JitsiHosts: []string{"up.example.invalid"},
-	}, `echo "jitsi: joining MUC"; exec sleep 30`)
+	}, `echo "jitsi: joining MUC up.example.invalid/x"; exec sleep 30`)
 	lt.probe = func(context.Context, string) bool { return true }
 	lt.linkWait = 300 * time.Millisecond
 	start := time.Now()
-	_, _, err := lt.Open(context.Background(), Pair{"jitsi", "datachannel"}, dir, OpenOptions{})
-	if !errors.Is(err, ErrLineNotSeen) || !strings.Contains(err.Error(), "jitsi: joining MUC") {
+	_, stop, err := lt.Open(context.Background(), Pair{"jitsi", "datachannel"}, dir, OpenOptions{})
+	if stop != nil {
+		t.Cleanup(stop)
+	}
+	// The host of an override comes from a secret (GATE_JITSI_HOSTS): the
+	// line the error quotes and the log keep it only as <room>.
+	if !errors.Is(err, ErrLineNotSeen) || !strings.Contains(err.Error(), "jitsi: joining MUC <room>/x") ||
+		strings.Contains(err.Error(), "up.example.invalid") {
 		t.Fatalf("err = %v", err)
 	}
 	if took := time.Since(start); took > 10*time.Second {
 		t.Fatalf("a server that never links held Open for %s", took)
 	}
-	if log := readTargetFile(t, filepath.Join(dir, "srv.log")); strings.Contains(log, "gate-") {
-		t.Fatalf("scrubbed log keeps the room or the channel:\n%s", log)
+	if log := readTargetFile(t, filepath.Join(dir, "srv.log")); strings.Contains(log, "gate-") ||
+		strings.Contains(log, "up.example.invalid") {
+		t.Fatalf("scrubbed log keeps the room, the channel or the host:\n%s", log)
+	}
+}
+
+func TestLocalTargetNamesACancelledRunNotADeadServer(t *testing.T) {
+	lt := fakeLocal(t, t.TempDir(), LocalOptions{
+		Providers: []string{"telemost"}, Transports: []string{"vp8channel"}, TelemostRooms: []string{"fake-telemost-1"},
+	}, `echo "telemost: joining"; exec sleep 30`)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	time.AfterFunc(300*time.Millisecond, cancel)
+	start := time.Now()
+	_, stop, err := lt.Open(ctx, Pair{"telemost", "vp8channel"}, t.TempDir(), OpenOptions{})
+	if stop != nil {
+		t.Cleanup(stop)
+	}
+	if !errors.Is(err, context.Canceled) || time.Since(start) > 10*time.Second {
+		t.Fatalf("err = %v after %s, want the cancellation", err, time.Since(start))
 	}
 }
 
