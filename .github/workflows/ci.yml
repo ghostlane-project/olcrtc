@@ -185,9 +185,13 @@ jobs:
     # leaves its server there until the job ends; A4's per-pair channels
     # keep the two apart.
     timeout-minutes: 85
+    # One gate at a time across the whole repository, not per branch: every
+    # run takes the same pool rooms, and two servers in one room (two branches
+    # pushed together, or the same WB account twice) knock each other out.
+    # Queued, never cancelled: a newer push waits instead of killing a run.
     concurrency:
-      group: gate-${{ github.ref }}
-      cancel-in-progress: true
+      group: gate-rooms
+      cancel-in-progress: false
     defaults:
       run:
         shell: bash
