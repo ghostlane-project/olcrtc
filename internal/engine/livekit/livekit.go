@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -41,6 +42,20 @@ const (
 	// It covers a full reconnect cycle (connect + republish) with margin.
 	roomReadyTimeout = 60 * time.Second
 	roomReadyPoll    = 50 * time.Millisecond
+
+	// ai-generated: connectTimeout and the reasoning for it (ghostlane#38).
+	// connectTimeout bounds one join in the SDK: the signalling socket, the
+	// JoinResponse and the peer connection reaching connected all run on
+	// this one clock, and the SDK bounds its own resumes and its wait for
+	// the publisher on a publish with it too. Left unset it is 5 s, which a
+	// phone on cellular spends before ICE is done: an iPhone on MegaFon and
+	// Yota LTE failed WB Stream with "could not connect after timeout" while
+	// Wi-Fi worked, and a cellular start against Telemost has been measured
+	// at 21 s to ready. The iOS extension waits 35 s for ready; 25 s leaves
+	// 10 of them for WB auth (three HTTPS calls) before the join and the
+	// olcRTC hello/welcome after it. Android waits 25 s in all, so there the
+	// app gives up first and its Stop ends the join (see joinRoom).
+	connectTimeout = 25 * time.Second
 )
 
 var (
@@ -189,6 +204,9 @@ type Session struct {
 	reconnecting   atomic.Bool
 	done           chan struct{}
 	queuedBytes    atomic.Int64
+	// joinTimeout overrides connectTimeout. Zero means the default; only
+	// tests set it. ai-generated: this field.
+	joinTimeout time.Duration
 	// roomReady overrides roomReadyTimeout. Zero means the default; only
 	// tests set it.
 	roomReady      time.Duration
@@ -262,7 +280,7 @@ func (s *Session) Connect(ctx context.Context) error {
 	return nil
 }
 
-func (s *Session) connectSession(_ context.Context) error {
+func (s *Session) connectSession(ctx context.Context) error {
 	roomCB := &lksdk.RoomCallback{
 		ParticipantCallback: lksdk.ParticipantCallback{
 			OnDataPacket: s.handleDataPacket,
@@ -286,13 +304,59 @@ func (s *Session) connectSession(_ context.Context) error {
 		},
 	}
 
-	room, err := s.connectRoom(s.url, s.token, roomCB, s.connectOpts...)
+	// ai-generated: the join budget and the wait through joinRoom.
+	budget := connectTimeout
+	if s.joinTimeout > 0 {
+		budget = s.joinTimeout
+	}
+	url, token := s.url, s.token
+	opts := append(slices.Clip(s.connectOpts), lksdk.WithConnectTimeout(budget))
+	room, err := s.joinRoom(ctx, func() (roomHandle, error) {
+		return s.connectRoom(url, token, roomCB, opts...)
+	})
 	if err != nil {
 		return fmt.Errorf("connect to room: %w", err)
 	}
 
 	s.setRoom(room)
 	return s.publishPendingTracks()
+}
+
+// joinRoom runs join and waits for it, for ctx or for the session to close.
+//
+// The SDK's join could take ctx, but only its signalling socket would watch
+// it: the wait for the peer connection after that is a bare timer, so a
+// caller that gave up would sit out the rest of connectTimeout. The join is
+// waited on here instead. One that ends after its caller left fails on its
+// own budget or, if it did connect, is disconnected straight away instead of
+// staying in the room.
+//
+// ai-generated: joinRoom.
+func (s *Session) joinRoom(ctx context.Context, join func() (roomHandle, error)) (roomHandle, error) {
+	type joinResult struct {
+		room roomHandle
+		err  error
+	}
+	joined := make(chan joinResult, 1)
+	go func() {
+		room, err := join()
+		joined <- joinResult{room: room, err: err}
+	}()
+	var err error
+	select {
+	case res := <-joined:
+		return res.room, res.err
+	case <-ctx.Done():
+		err = fmt.Errorf("join abandoned: %w", ctx.Err())
+	case <-s.done:
+		err = ErrSessionClosed
+	}
+	go func() {
+		if res := <-joined; res.err == nil {
+			res.room.disconnect()
+		}
+	}()
+	return nil, err
 }
 
 // handleDataPacket routes a received user packet by topic: the datagram topic
