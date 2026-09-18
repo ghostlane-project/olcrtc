@@ -1,9 +1,14 @@
 package gate
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
+	"math"
 	"os"
 	"path/filepath"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 )
@@ -64,5 +69,106 @@ func TestWriteProducesSchemaOne(t *testing.T) {
 	}
 	if back.Schema != 1 || back.EngineCommit != "abc" || back.Passed != 1 || len(back.Cells) != 1 {
 		t.Fatalf("written report = %+v", back)
+	}
+}
+
+func TestRecorderKeepsAnEarlierFailureWhenACellFinishesTwice(t *testing.T) {
+	r := NewRecorder(Report{})
+	r.Plan([]Cell{{ID: "p/a/b/cli/S0"}})
+	r.Finish("p/a/b/cli/S0", nil, nil, []string{"pull_ok 0 < 1"}, "", time.Second)
+	r.Finish("p/a/b/cli/S0", Metrics{"pull_ok": 1}, nil, nil, "", time.Second)
+	rep := r.Report()
+	c := rep.Cells[0]
+	if c.Status != "fail" || !slices.Equal(c.Failures, []string{"cell finished twice", "pull_ok 0 < 1"}) {
+		t.Fatalf("twice-finished cell = %+v", c)
+	}
+	if rep.Planned != 1 || rep.Executed != 1 || rep.Failed != 1 {
+		t.Fatalf("counts = planned %d executed %d failed %d", rep.Planned, rep.Executed, rep.Failed)
+	}
+}
+
+func TestPlanNeitherPassesNorResetsACell(t *testing.T) {
+	r := NewRecorder(Report{})
+	r.Plan([]Cell{{ID: "p/a/b/cli/S0", Status: "pass", Metrics: map[string]float64{"pull_ok": 1}}, {ID: "p/a/b/cli/S1"}})
+	r.Finish("p/a/b/cli/S1", Metrics{"pull_ok": 1}, nil, nil, "", time.Second)
+	r.Plan([]Cell{{ID: "p/a/b/cli/S1"}})
+	rep := r.Report()
+	s0, s1 := rep.Cells[0], rep.Cells[1]
+	if s0.Status != "fail" || s0.Failures[0] != "did not run" || len(s0.Metrics) != 0 {
+		t.Fatalf("a cell planned as passed = %+v", s0)
+	}
+	if s1.Status != "pass" || rep.Passed != 1 || rep.Failed != 1 {
+		t.Fatalf("a re-planned finished cell = %+v (passed %d failed %d)", s1, rep.Passed, rep.Failed)
+	}
+}
+
+func TestANonFiniteMetricFailsItsCellAndTheReportStillWrites(t *testing.T) {
+	r := NewRecorder(Report{})
+	r.Plan([]Cell{{ID: "p/a/b/cli/S2"}})
+	r.Finish("p/a/b/cli/S2", Metrics{"throughput_down_bps": math.Inf(1), "on_top_p95_ms": math.NaN(), "pull_ok": 6},
+		map[string]float64{"throughput_down_bps": 2e6, "on_top_p95_ms": math.Inf(1)}, nil, "", time.Second)
+	c := r.Report().Cells[0]
+	want := []string{
+		"metric on_top_p95_ms is NaN, not a finite number",
+		"metric throughput_down_bps is +Inf, not a finite number",
+		"threshold on_top_p95_ms is +Inf, not a finite number",
+	}
+	if c.Status != "fail" || !slices.Equal(c.Failures, want) {
+		t.Fatalf("failures = %q, want %q", c.Failures, want)
+	}
+	if len(c.Metrics) != 1 || c.Metrics["pull_ok"] != 6 || len(c.Thresholds) != 1 {
+		t.Fatalf("kept metrics %v thresholds %v", c.Metrics, c.Thresholds)
+	}
+	if err := r.Write(filepath.Join(t.TempDir(), "gate-report.json")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+}
+
+func TestReportSharesNothingWithTheCaller(t *testing.T) {
+	r := NewRecorder(Report{})
+	r.Plan([]Cell{{ID: "p/a/b/cli/S0"}})
+	m, th, failures := Metrics{"pull_ok": 0}, map[string]float64{"handshake_ms": 15000}, []string{"pull_ok 0 < 1"}
+	r.Finish("p/a/b/cli/S0", m, th, failures, "", time.Second)
+	m["pull_ok"], th["handshake_ms"], failures[0] = 1, 1, "edited by the caller"
+	first := r.Report().Cells[0]
+	first.Metrics["pull_ok"], first.Thresholds["handshake_ms"], first.Failures[0] = 2, 2, "edited by a reader"
+	again := r.Report().Cells[0]
+	if again.Metrics["pull_ok"] != 0 || again.Thresholds["handshake_ms"] != 15000 || again.Failures[0] != "pull_ok 0 < 1" {
+		t.Fatalf("recorded cell changed from outside: %+v", again)
+	}
+}
+
+func TestReportJSONHasNoNull(t *testing.T) {
+	r := NewRecorder(Report{})
+	r.Plan([]Cell{{ID: "p/a/b/cli/S0"}, {ID: "p/a/b/cli/S1"}})
+	r.Finish("p/a/b/cli/S1", nil, nil, nil, "", time.Second)
+	path := filepath.Join(t.TempDir(), "gate-report.json")
+	if err := r.Write(path); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte("null")) {
+		t.Fatalf("report carries null:\n%s", raw)
+	}
+}
+
+func TestRecorderTakesConcurrentFinishes(t *testing.T) {
+	r := NewRecorder(Report{})
+	cells := make([]Cell, 32)
+	for i := range cells {
+		cells[i] = Cell{ID: fmt.Sprintf("p/a/b/cli/S%02d", i)}
+	}
+	r.Plan(cells)
+	var wg sync.WaitGroup
+	for _, c := range cells {
+		wg.Go(func() { r.Finish(c.ID, Metrics{"pull_ok": 1}, nil, nil, "", time.Millisecond) })
+		wg.Go(func() { _ = r.Report() })
+	}
+	wg.Wait()
+	if rep := r.Report(); rep.Passed != len(cells) || rep.Failed != 0 {
+		t.Fatalf("passed %d failed %d of %d", rep.Passed, rep.Failed, len(cells))
 	}
 }
