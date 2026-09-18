@@ -59,9 +59,21 @@ jobs:
           args: --timeout=5m
 
   test:
-    name: Test (-race, coverage)
+    # ai-generated: the default/lean matrix. The lean leg compiles what the
+    # olcrtc_lean tag selects for the mobile bind, which the default run never
+    # builds; it would have caught the lean build losing the livekit engine
+    # that wbstream needs (olcbox#22).
+    name: Test (-race, ${{ matrix.name }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: default
+            tags: ""
+          - name: lean
+            tags: "olcrtc_lean"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -73,7 +85,7 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
 
       - name: Run tests
-        run: go test -count=1 -race -timeout 15m -coverprofile=coverage.out ./...
+        run: go test -count=1 -race -timeout 15m -tags "${{ matrix.tags }}" -coverprofile=coverage.out ./...
 
       - name: Coverage summary
         run: go tool cover -func=coverage.out | tail -1
@@ -81,7 +93,7 @@ jobs:
       - name: Upload coverage
         uses: actions/upload-artifact@v4
         with:
-          name: coverage
+          name: coverage-${{ matrix.name }}
           path: coverage.out
 
   real-e2e:
