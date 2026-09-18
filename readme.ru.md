@@ -96,6 +96,7 @@ curl -fsSL https://raw.githubusercontent.com/romanpodpriatov/olcrtc/proofkit/ins
 - [settings.md](docs/settings.ru.md) - матрица совместимости
 - [uri.md](docs/uri.ru.md) - формат URI клиента
 - [sub.md](docs/sub.ru.md) - формат подписки
+- [gate.md](docs/gate.ru.md) - release gate: туннель под нагрузкой на настоящих relay и его отчёт
 
 ## Сборка
 

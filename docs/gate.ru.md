@@ -1,0 +1,194 @@
+<div align="center">
+
+<img src="https://github.com/openlibrecommunity/material/blob/master/olcrtc.png" width="250" height="250">
+
+![License](https://img.shields.io/badge/license-WTFPL-0D1117?style=flat-square&logo=open-source-initiative&logoColor=green&labelColor=0D1117)
+![Golang](https://img.shields.io/badge/-Golang-0D1117?style=flat-square&logo=go&logoColor=00A7D0)
+
+**RU** / [EN](gate.md)
+
+</div>
+
+
+# Release gate
+
+`internal/gate` гоняет клиент движка через настоящий relay против настоящего сервера под теми профилями нагрузки, которые ломали туннель, оценивает каждую ячейку по порогам и пишет `gate-report.json`. Это набор `go test`: `TestGate`, включается флагом `-olcrtc.gate`. Без флага `go test ./internal/gate` запускает только unit-тесты.
+
+Каждая запланированная ячейка заканчивается `pass` или `fail`. Ячейка, которая не выполнилась (её сервер или клиент не поднялся, её отсёк фильтр `-run`, раньше наступил дедлайн), проваливается с причиной. Пропусков нет.
+
+## Локальный запуск
+
+Вариант клиента `cli`, обычная сборка:
+
+```bash
+go test -count=1 -timeout 25m ./internal/gate -run '^TestGate$' -v \
+  -olcrtc.gate -olcrtc.gate-providers=jitsi -olcrtc.gate-dir=/tmp/gate-cli
+```
+
+Вариант `mobile`, lean-сборка, которую получают телефоны:
+
+```bash
+go test -count=1 -tags olcrtc_lean -timeout 45m ./internal/gate -run '^TestGate$' -v \
+  -olcrtc.gate -olcrtc.gate-providers=jitsi -olcrtc.gate-dir=/tmp/gate-mobile
+```
+
+- `-olcrtc.gate-dry` печатает план, по id ячейки на строку, и ничего не запускает. Ему не нужны ни комнаты, ни токен.
+- Для Jitsi секреты не нужны. Для Telemost и WB Stream нужны заранее созданные комнаты, для WB Stream ещё и токен аккаунта: см. [Комнаты и секреты](#комнаты-и-секреты). Передавайте их через окружение, например из файла вне репозитория (`set -a; . ~/gate.env; set +a`), а не в командной строке.
+- Локальная цель собирает `cmd/olcrtc` с `-tags olcrtc_testhooks`, поэтому `go` должен быть в `PATH`.
+- Прогон заканчивается за 90 с до дедлайна `go test`, чтобы отчёт записался и тогда, когда время вышло; ячейки, до которых он не дошёл, проваливаются как не выполненные. Давайте `-timeout` с большим запасом: стандартные 10 м обрезают почти любой прогон. `-timeout`, после которого остаётся не больше 90 с, отклоняется.
+- Против ноды флота: `-olcrtc.gate-target=link` и ссылка `olcrtc://` в `OLCRTC_GATE_LINK`. Сервер там свой у ноды; нагрузка идёт на публичные URL (`-olcrtc.gate-link-small`, `-olcrtc.gate-link-big`, `-olcrtc.gate-link-sink`), а логи прогон не пишет.
+
+## Флаги
+
+| Флаг | По умолчанию | Что задаёт |
+|---|---|---|
+| `-olcrtc.gate` | выключен | запуск гейта |
+| `-olcrtc.gate-target` | `local` | `local`: дочерний сервер на каждую пару; `link`: сервер за ссылкой `olcrtc://` |
+| `-olcrtc.gate-dir` | `gate-artifacts` | куда пишутся отчёт и очищенные логи; относительный путь считается от корня модуля |
+| `-olcrtc.gate-providers` | `jitsi,telemost,wbstream` | провайдеры локальной цели, по очереди |
+| `-olcrtc.gate-transports` | `datachannel,videochannel,seichannel,vp8channel` | транспорты локальной цели, см. [Пары](#пары) |
+| `-olcrtc.gate-clients` | свой для сборки | `cli` в обычной сборке, `mobile` в сборке `olcrtc_lean`, один вариант на процесс |
+| `-olcrtc.gate-telemost-rooms` | пусто | пул Telemost; иначе `OLCRTC_GATE_TELEMOST_ROOMS` |
+| `-olcrtc.gate-wbstream-rooms` | пусто | пул WB Stream; иначе `OLCRTC_GATE_WBSTREAM_ROOMS` |
+| `-olcrtc.gate-jitsi-hosts` | пусто | хосты Jitsi вместо списка инстансов; иначе `OLCRTC_GATE_JITSI_HOSTS` |
+| `-olcrtc.gate-jitsi-instances` | `docs/jitsi.instances.yaml` | список инстансов Jitsi |
+| `-olcrtc.gate-run-number` | `GITHUB_RUN_NUMBER`, иначе 0 | номер, по которому выбирается комната из пула |
+| `-olcrtc.gate-big-mb` | `10` | размер большой загрузки, MiB |
+| `-olcrtc.gate-link` | пусто | ссылка для цели link; иначе `OLCRTC_GATE_LINK` |
+| `-olcrtc.gate-link-small` | `https://proofkit.org/gate/kb` | ресурс на 1 KB, доступный ноде |
+| `-olcrtc.gate-link-big` | `https://proofkit.org/gate/10mb.bin` | ресурс на `-olcrtc.gate-big-mb` MiB, доступный ноде |
+| `-olcrtc.gate-link-sink` | `https://speed.cloudflare.com/__up` | приёмник выгрузки, доступный ноде |
+| `-olcrtc.gate-dry` | выключен | напечатать план и ничего не запускать |
+
+Окружение:
+
+| Переменная | Что задаёт |
+|---|---|
+| `OLCRTC_GATE_TELEMOST_ROOMS` | пул Telemost, если его флаг пуст |
+| `OLCRTC_GATE_WBSTREAM_ROOMS` | пул WB Stream, если его флаг пуст |
+| `OLCRTC_GATE_WBSTREAM_TOKEN` | токен аккаунта WB Stream для локального сервера; флага у него нет |
+| `OLCRTC_GATE_JITSI_HOSTS` | хосты Jitsi, если их флаг пуст |
+| `OLCRTC_GATE_LINK` | ссылка, если её флаг пуст |
+| `OLCRTC_GATE_ENGINE_COMMIT`, `OLCRTC_GATE_ENGINE_REF`, `OLCRTC_GATE_APP_VERSION` | что, по словам отчёта, проверялось; коммит по умолчанию - `HEAD` репозитория |
+| `GITHUB_RUN_NUMBER` | номер прогона, если его флаг не задан |
+
+Флаг виден в списке процессов и в истории shell, поэтому комнаты, токен и ссылка передаются через окружение.
+
+## Комнаты и секреты
+
+- **Jitsi.** Каждая пара получает новую комнату, `https://<host>/gate-<12 hex>`, на первом хосте, который ответил на один HTTPS-запрос за 5 с. Хосты берутся из списка инстансов или из переопределения, если в нём есть хоть один хост. Запись переопределения - голый хост или URL; используется только хост.
+- **Telemost и WB Stream.** Здесь ни один провайдер не создаёт комнаты, поэтому у каждого есть пул заранее созданных. Записи разделяются запятыми или переводами строки, обрезаются по краям, пустые отбрасываются. Прогон берёт запись `run_number mod len(pool)`, так что прогоны подряд берут комнаты по очереди.
+- **Токен WB Stream.** WB не пускает гостя первым участником пустой комнаты (`403 guests cannot create rooms`), поэтому локальный сервер входит с токеном аккаунта из `OLCRTC_GATE_WBSTREAM_TOKEN`. Клиент остаётся гостем, как и приложение. Без токена каждая ячейка wbstream проваливается с причиной, в которой названа эта переменная.
+- **На каждую пару.** Новый ключ из 64 hex и новый id канала `gate-<12 hex>`, так что два прогона в одной комнате пула не читают кадры друг друга.
+- **Закрытое.** YAML сервера (комната, ключ, токен) и его сырой лог лежат во временном каталоге. В `-olcrtc.gate-dir` попадают только очищенные копии.
+
+Записи пула:
+
+| Пул | Запись | Куда входит сервер |
+|---|---|---|
+| Telemost | `<id>` | `https://telemost.yandex.ru/j/<id>` |
+| Telemost | `https://telemost.yandex.ru/j/<id>` | URL как есть |
+| Telemost | URL с `http://` или URL без схемы | тот же URL с `https://` |
+| WB Stream | `<id>` | `<id>` |
+| WB Stream | `https://stream.wb.ru/room/<id>`, со схемой или без | `<id>`, последний сегмент пути; query и fragment отбрасываются |
+
+Провайдер WB экранирует всё, что получил, в один сегмент пути, и целый URL привёл бы в несуществующую комнату, поэтому гейт обрезает его до id.
+
+Секреты репозитория движка (Settings > Secrets and variables > Actions) для джобы `gate-local`:
+
+| Секрет | Обязателен | Доходит до `go test` как | Значение |
+|---|---|---|---|
+| `GATE_TELEMOST_ROOMS` | да | `OLCRTC_GATE_TELEMOST_ROOMS` | пул Telemost: id или URL комнат |
+| `GATE_WBSTREAM_ROOMS` | да | `OLCRTC_GATE_WBSTREAM_ROOMS` | пул WB Stream: id или URL комнат |
+| `GATE_WBSTREAM_TOKEN` | да | `OLCRTC_GATE_WBSTREAM_TOKEN` | access token аккаунта WB Stream |
+| `GATE_JITSI_HOSTS` | нет | `OLCRTC_GATE_JITSI_HOSTS` | хосты Jitsi; пусто - список инстансов |
+
+Первый шаг джобы маскирует каждую запись, id комнаты, которым заканчивается URL записи, каждый хост Jitsi как есть и голым, и токен; затем проваливается, называя каждый обязательный секрет, который не задан. Секреты доходят до `go test` только через `env` шага, никогда через argv или текст скрипта. Задавайте секрет со стандартного ввода (`gh secret set GATE_WBSTREAM_TOKEN`), а не в командной строке, и никогда не коммитьте комнату, ссылку, ключ или токен.
+
+## Пары
+
+Локальная цель перемножает провайдеры на транспорты в заданном порядке и оставляет то, что провайдер несёт:
+
+| Провайдер | Транспорты |
+|---|---|
+| `jitsi` | `datachannel`, `videochannel`, `seichannel`, `vp8channel` |
+| `telemost` | `vp8channel`, `videochannel` (Telemost режет SCTP, а seichannel там не работает по устройству) |
+| `wbstream` | `vp8channel`, `videochannel`, `seichannel` (гости WB не могут публиковать data) |
+
+По умолчанию `-olcrtc.gate-transports` оставляет транспорты, которые слинкованы в эту сборку (в lean-сборке нет `videochannel`) и которые несёт хоть один провайдер. Список, заданный в командной строке, берётся как есть: неизвестное имя, транспорт, которого нет в сборке или который не несёт ни один провайдер, и провайдер, оставшийся без транспортов, - ошибки плана. У цели link одна пара - пара ссылки.
+
+## Что такое ячейка
+
+`platform/provider/transport/client/scenario`, например `engine-linux/jitsi/datachannel/mobile/S2`. Id ячейки никогда не называет комнату.
+
+Варианты клиента, по одному на процесс:
+
+- `cli`: `pkg/olcrtc/client`, то, что `cmd/olcrtc` запускает в режиме `cnc`. Обычная сборка.
+- `mobile`: `mobile.Runtime` так, как его запускают приложения: VP8 с настройками приложения, 60 fps и batch 64, процесс под `mobile.SetMemoryLimit` в 40 MiB и GC percent 10. Сборка с `-tags olcrtc_lean`.
+
+`-olcrtc.gate-clients` с вариантом другой сборки - ошибка плана, так что лимиты памяти телефона никогда не давят на ячейку cli.
+
+| ID | Имя | Что делает | Pass | Где |
+|---|---|---|---|---|
+| S0 | connect | старт клиента, одна большая загрузка, одна выгрузка на 5 MiB | `handshake_ms` в пределах бюджета handshake, обе передачи завершились | каждая пара, оба варианта |
+| S1 | idle burst | 24 одновременных connect за 1 KB, затем 24 подряд | все успешны, p95 в пределах `connect_p95_ms` | нагрузочные пары, `mobile` |
+| S2 | download saturation | 6 параллельных больших загрузок, поверх них connect за 1 KB каждые 5 с (olcbox#23) | все загрузки, `throughput_down_bps`, все connect поверх, их p95 в пределах `connect_p95_ms` | нагрузочные пары, `mobile` |
+| S3 | upload saturation | 4 параллельные выгрузки по 5 MiB, connect поверх как в S2 (olcbox#15) | как S2, с `throughput_up_bps` | нагрузочные пары, `mobile` |
+| S4 | quiet after load | 60 с простоя после S3 (olcbox#25) | ни одного missed pong, ни одного reconnect, конференция жива, затем загрузка 1 KB | нагрузочные пары, `mobile` |
+| S5 | resolver burst | 64 одновременных DNS-запроса к 8.8.8.8 через SOCKS UDP associate, дважды | `resolver_answered` из 64 за 5 с, оба раза | нагрузочные пары, `mobile` |
+| S6 | late server bridge | новый сервер, у которого bridge Jitsi открывается на 3 с позже, затем такой же с опозданием на 8 с (olcbox#22) | клиент готов в пределах задержки плюс бюджет handshake | локальная цель, `jitsi/datachannel`, оба варианта |
+| S7 | phone memory | пик heap и RSS от начала S2 до конца S4; горутины до S1 и в конце S4 | `heap_peak_bytes`, `rss_peak_bytes`, `goroutine_growth` | нагрузочные пары, `mobile` |
+
+Нагрузочные пары - `jitsi/datachannel`, `telemost/vp8channel` и `wbstream/vp8channel` у локальной цели, пара ссылки у цели link. Большая загрузка - `-olcrtc.gate-big-mb` MiB. Сценарии одного клиента идут по порядку в одном туннеле. S6 задерживает bridge через `OLCRTC_TEST_BRIDGE_DELAY`, который читает только сервер, собранный с `olcrtc_testhooks`; в релизной сборке такого хука нет.
+
+У ячейки 5 мин, у S2 и S3 - 10. Сервер, который не поднялся, получает ещё одну попытку через 30 с (без токена или без комнаты в пуле повтора нет), затем его ячейки проваливаются с причиной и последней строкой лога сервера, обычно ответом провайдера; ячейки клиента, который не поднялся, тоже проваливаются. Ячейки не перезапускаются: сбой под нагрузкой - это находка.
+
+## Пороги
+
+Все числа, которыми пользуется вердикт, лежат в `internal/gate/thresholds.go`: `Local` для локальной цели, `Link` для ноды флота и бюджет handshake для S0 и S6. Каждая ячейка отчёта несёт пороги, по которым её судили:
+
+| Порог | Ограничивает |
+|---|---|
+| `connect_p95_ms` | p95 одного connect: пачка S1, connect поверх нагрузки в S2 и S3 |
+| `throughput_down_bps` | суммарная скорость загрузки в S2, снизу |
+| `throughput_up_bps` | суммарная скорость выгрузки в S3, снизу |
+| `heap_peak_bytes` | пик живого heap в S7 |
+| `rss_peak_bytes` | пик RSS в S7 |
+| `goroutine_growth` | S7: на сколько горутин в конце S4 больше, чем до S1 |
+| `resolver_answered` | S5: сколько из 64 запросов каждой пачки должны получить ответ |
+
+Остальные правила без чисел: каждая передача и каждый connect должны пройти, в S4 не допускается ни missed pong, ни reconnect. Провал называет метрику и измеренное значение, например `connect_ok 23 of connect_total 24`.
+
+## Артефакты
+
+```text
+<gate-dir>/
+  gate-report.json
+  jitsi-datachannel/        каталог на каждую пару
+    srv.log                 сервер пары
+    mobile-start.log        старт клиента
+    mobile-S2.log           лог на каждую ячейку
+    mobile-samples.csv      после S7: t_ms,heap_inuse,rss,goroutines
+    delay-3s/srv.log        поздние серверы S6
+    delay-8s/srv.log
+```
+
+Каждый лог очищается перед записью: комнаты прогона, id комнат, id каналов, хосты из переопределения и токен WB превращаются в `<room>`, ключи - в `<key>`. Провалы в отчёте очищаются так же. Цель link логов не пишет: комнаты флота не для показа.
+
+`TestMain` пишет отчёт при выходе тестового бинарника, так что прогон с проваленными ячейками или обрезанный дедлайном всё равно оставляет отчёт. Бинарник, убитый по `-timeout`, не оставляет ничего.
+
+## Чтение отчёта
+
+```bash
+go run ./cmd/gate-report render gate-artifacts/gate-report.json
+go run ./cmd/gate-report compare -severity fail previous.json current.json
+```
+
+`render` печатает таблицу Markdown: строка на ячейку с вердиктом, ключевыми метриками и временем. `compare` сопоставляет ячейки двух отчётов по id и печатает дельты: падение throughput или рост пиковой памяти больше чем на 25 %, или pass, ставший провалом, - регрессия. Код выхода 2 при регрессии с `-severity fail`, 0 с `warn` (по умолчанию), 1 при нечитаемом отчёте и 64 при неверной командной строке. Ячейка, которая есть только в одном из отчётов, не сравнивается.
+
+## CI
+
+Две джобы в `.github/workflows/ci.yml`:
+
+- `gate-plan` делает dry run обеих сборок, секреты ей не нужны, поэтому она идёт и для pull request из форка, и кладёт оба плана в summary джобы. Проваливается, если сборка не запланировала ни одной ячейки или запланировала ячейку другого варианта.
+- `gate-local` ждёт `gate-plan` и гоняет гейт на локальной цели: вариант `cli` (`-timeout 25m`), затем вариант `mobile` (`-tags olcrtc_lean`, `-timeout 45m`) при любом исходе первого. Рендерит оба отчёта в summary джобы и выгружает артефакт `gate-local`: отчёты, очищенные логи и сэмплы. Один прогон на ref за раз (`concurrency: gate-<ref>`). Pull request из форка не получает секретов, поэтому для него джоба не запускается; гейт прогонит push, который его вмёржит.

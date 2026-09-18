@@ -1,0 +1,194 @@
+<div align="center">
+
+<img src="https://github.com/openlibrecommunity/material/blob/master/olcrtc.png" width="250" height="250">
+
+![License](https://img.shields.io/badge/license-WTFPL-0D1117?style=flat-square&logo=open-source-initiative&logoColor=green&labelColor=0D1117)
+![Golang](https://img.shields.io/badge/-Golang-0D1117?style=flat-square&logo=go&logoColor=00A7D0)
+
+[RU](gate.ru.md) / **EN**
+
+</div>
+
+
+# Release gate
+
+`internal/gate` runs the engine's client against a real relay and a real server with the load shapes that broke the tunnel, judges each cell against thresholds and writes `gate-report.json`. It is a `go test` suite: `TestGate`, switched on by `-olcrtc.gate`. Without the flag `go test ./internal/gate` runs only the unit tests.
+
+Every planned cell ends `pass` or `fail`. A cell that did not run (its server or client never came up, a `-run` filter left it out, the deadline came first) fails with the reason. Nothing is skipped.
+
+## Run it locally
+
+The `cli` flavour, default build:
+
+```bash
+go test -count=1 -timeout 25m ./internal/gate -run '^TestGate$' -v \
+  -olcrtc.gate -olcrtc.gate-providers=jitsi -olcrtc.gate-dir=/tmp/gate-cli
+```
+
+The `mobile` flavour, the lean build the phones ship:
+
+```bash
+go test -count=1 -tags olcrtc_lean -timeout 45m ./internal/gate -run '^TestGate$' -v \
+  -olcrtc.gate -olcrtc.gate-providers=jitsi -olcrtc.gate-dir=/tmp/gate-mobile
+```
+
+- `-olcrtc.gate-dry` prints the plan, one cell id per line, and runs nothing. It needs no room and no token.
+- Jitsi needs no secret. Telemost and WB Stream need pre-made rooms, WB Stream also an account token: see [Rooms and secrets](#rooms-and-secrets). Put them in the environment, for example from a file outside the repository (`set -a; . ~/gate.env; set +a`), not on the command line.
+- The local target builds `cmd/olcrtc` with `-tags olcrtc_testhooks`, so `go` must be on `PATH`.
+- The run ends 90 s before the `go test` deadline, so the report is written even when time runs out; cells it did not reach fail as not run. Give `-timeout` well above the run: the default 10 m cuts most runs short. A `-timeout` that leaves no more than 90 s is refused.
+- Against a fleet node: `-olcrtc.gate-target=link` with the `olcrtc://` link in `OLCRTC_GATE_LINK`. The server is the node's; the load goes to public URLs (`-olcrtc.gate-link-small`, `-olcrtc.gate-link-big`, `-olcrtc.gate-link-sink`), and the run writes no logs.
+
+## Flags
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `-olcrtc.gate` | off | run the gate |
+| `-olcrtc.gate-target` | `local` | `local`: a child server per pair; `link`: the server behind an `olcrtc://` link |
+| `-olcrtc.gate-dir` | `gate-artifacts` | where the report and the scrubbed logs go; a relative path is taken from the module root |
+| `-olcrtc.gate-providers` | `jitsi,telemost,wbstream` | providers of the local target, run one after another |
+| `-olcrtc.gate-transports` | `datachannel,videochannel,seichannel,vp8channel` | transports of the local target, see [Pairs](#pairs) |
+| `-olcrtc.gate-clients` | the build's own | `cli` in a default build, `mobile` in an `olcrtc_lean` one, one flavour per process |
+| `-olcrtc.gate-telemost-rooms` | empty | Telemost pool; else `OLCRTC_GATE_TELEMOST_ROOMS` |
+| `-olcrtc.gate-wbstream-rooms` | empty | WB Stream pool; else `OLCRTC_GATE_WBSTREAM_ROOMS` |
+| `-olcrtc.gate-jitsi-hosts` | empty | Jitsi hosts used instead of the instance list; else `OLCRTC_GATE_JITSI_HOSTS` |
+| `-olcrtc.gate-jitsi-instances` | `docs/jitsi.instances.yaml` | the Jitsi instance list |
+| `-olcrtc.gate-run-number` | `GITHUB_RUN_NUMBER`, else 0 | the number that picks a pool room |
+| `-olcrtc.gate-big-mb` | `10` | size of the big pull, MiB |
+| `-olcrtc.gate-link` | empty | the link of the link target; else `OLCRTC_GATE_LINK` |
+| `-olcrtc.gate-link-small` | `https://proofkit.org/gate/kb` | 1 KB resource the node reaches |
+| `-olcrtc.gate-link-big` | `https://proofkit.org/gate/10mb.bin` | resource of `-olcrtc.gate-big-mb` MiB the node reaches |
+| `-olcrtc.gate-link-sink` | `https://speed.cloudflare.com/__up` | upload sink the node reaches |
+| `-olcrtc.gate-dry` | off | print the plan and run nothing |
+
+The environment:
+
+| Variable | Meaning |
+|---|---|
+| `OLCRTC_GATE_TELEMOST_ROOMS` | Telemost pool, when its flag is empty |
+| `OLCRTC_GATE_WBSTREAM_ROOMS` | WB Stream pool, when its flag is empty |
+| `OLCRTC_GATE_WBSTREAM_TOKEN` | WB Stream account token of the local server; it has no flag |
+| `OLCRTC_GATE_JITSI_HOSTS` | Jitsi hosts, when their flag is empty |
+| `OLCRTC_GATE_LINK` | the link, when its flag is empty |
+| `OLCRTC_GATE_ENGINE_COMMIT`, `OLCRTC_GATE_ENGINE_REF`, `OLCRTC_GATE_APP_VERSION` | what the report says it tested; the commit defaults to the repository's `HEAD` |
+| `GITHUB_RUN_NUMBER` | the run number, when its flag is not given |
+
+A flag shows in the process list and the shell history, so rooms, the token and the link go in the environment.
+
+## Rooms and secrets
+
+- **Jitsi.** Each pair gets a fresh room, `https://<host>/gate-<12 hex>`, on the first host that answers one HTTPS request within 5 s. The hosts come from the instance list, or from the override when it names any. An override entry is a bare host or a URL; only its host is used.
+- **Telemost and WB Stream.** No provider here creates rooms, so each has a pool of pre-made ones. Entries are separated by commas or line breaks, trimmed, and blank ones dropped. A run takes entry `run_number mod len(pool)`, so runs in sequence take turns.
+- **WB Stream token.** WB refuses a guest as the first participant of an idle room (`403 guests cannot create rooms`), so the local server signs in with the account token from `OLCRTC_GATE_WBSTREAM_TOKEN`. The client stays a guest, as the app is. Without the token every wbstream cell fails with a reason that names the variable.
+- **Per pair.** A fresh 64-hex key and a fresh channel id `gate-<12 hex>`, so two runs in one pool room never read each other's frames.
+- **Kept private.** The server's YAML (room, key, token) and its raw log stay in a temporary directory. `-olcrtc.gate-dir` gets scrubbed copies only.
+
+Pool entries:
+
+| Pool | Entry | The server joins |
+|---|---|---|
+| Telemost | `<id>` | `https://telemost.yandex.ru/j/<id>` |
+| Telemost | `https://telemost.yandex.ru/j/<id>` | the URL as given |
+| Telemost | an `http://` URL, or a URL without a scheme | the same URL with `https://` |
+| WB Stream | `<id>` | `<id>` |
+| WB Stream | `https://stream.wb.ru/room/<id>`, with or without the scheme | `<id>`, the last path segment; a query or fragment is dropped |
+
+The WB provider escapes whatever it gets into one path segment, so a whole URL would join a room that does not exist: the gate cuts it to the id.
+
+Secrets of the engine repository (Settings > Secrets and variables > Actions) for the `gate-local` job:
+
+| Secret | Required | Reaches `go test` as | Value |
+|---|---|---|---|
+| `GATE_TELEMOST_ROOMS` | yes | `OLCRTC_GATE_TELEMOST_ROOMS` | Telemost pool: ids or room URLs |
+| `GATE_WBSTREAM_ROOMS` | yes | `OLCRTC_GATE_WBSTREAM_ROOMS` | WB Stream pool: ids or room URLs |
+| `GATE_WBSTREAM_TOKEN` | yes | `OLCRTC_GATE_WBSTREAM_TOKEN` | WB Stream account access token |
+| `GATE_JITSI_HOSTS` | no | `OLCRTC_GATE_JITSI_HOSTS` | Jitsi hosts; empty means the instance list |
+
+The job's first step masks every entry, the room id an entry's URL ends in, each Jitsi host as given and bare, and the token; then it fails naming each required secret that is not set. The secrets reach `go test` through step `env` only, never argv or script text. Set a secret from standard input (`gh secret set GATE_WBSTREAM_TOKEN`), never on the command line, and never commit a room, a link, a key or a token.
+
+## Pairs
+
+The local target crosses the providers with the transports in the order given and keeps what each provider carries:
+
+| Provider | Transports |
+|---|---|
+| `jitsi` | `datachannel`, `videochannel`, `seichannel`, `vp8channel` |
+| `telemost` | `vp8channel`, `videochannel` (Telemost drops SCTP, and seichannel fails there by design) |
+| `wbstream` | `vp8channel`, `videochannel`, `seichannel` (WB guests cannot publish data) |
+
+Left at its default, `-olcrtc.gate-transports` keeps the transports this build links (the lean build has no `videochannel`) and some provider carries. A list given on the command line is taken as it is: an unknown name, a transport this build does not link or no provider carries, and a provider left with none are plan errors. The link target has one pair, the link's.
+
+## What a cell is
+
+`platform/provider/transport/client/scenario`, for example `engine-linux/jitsi/datachannel/mobile/S2`. A cell id never names a room.
+
+The client flavours, one per process:
+
+- `cli`: `pkg/olcrtc/client`, what `cmd/olcrtc` runs in mode `cnc`. Default build.
+- `mobile`: `mobile.Runtime` the way the apps run it, VP8 at the app's 60 fps and batch 64, the process under `mobile.SetMemoryLimit` of 40 MiB and GC percent 10. Build with `-tags olcrtc_lean`.
+
+`-olcrtc.gate-clients` naming the other build's flavour is a plan error, so the phone's memory settings never weigh a cli cell.
+
+| ID | Name | What it does | Pass | Runs on |
+|---|---|---|---|---|
+| S0 | connect | start the client, one big pull, one 5 MiB push | `handshake_ms` within the handshake budget, both transfers complete | every pair, both flavours |
+| S1 | idle burst | 24 concurrent connects fetching 1 KB, then 24 one after another | all succeed, p95 within `connect_p95_ms` | load pairs, `mobile` |
+| S2 | download saturation | 6 parallel big pulls, a 1 KB connect on top every 5 s (olcbox#23) | every pull, `throughput_down_bps`, every connect on top, their p95 within `connect_p95_ms` | load pairs, `mobile` |
+| S3 | upload saturation | 4 parallel 5 MiB pushes, connects on top as in S2 (olcbox#15) | as S2, with `throughput_up_bps` | load pairs, `mobile` |
+| S4 | quiet after load | 60 s idle after S3 (olcbox#25) | no missed pong, no reconnect, the conference alive, then a 1 KB pull | load pairs, `mobile` |
+| S5 | resolver burst | 64 concurrent DNS queries to 8.8.8.8 through a SOCKS UDP associate, twice | `resolver_answered` of the 64 within 5 s, both times | load pairs, `mobile` |
+| S6 | late server bridge | a fresh server whose Jitsi bridge opens 3 s late, then one 8 s late (olcbox#22) | the client ready within the delay plus the handshake budget | local target, `jitsi/datachannel`, both flavours |
+| S7 | phone memory | peak heap and RSS from S2's start to S4's end; goroutines before S1 and at S4's end | `heap_peak_bytes`, `rss_peak_bytes`, `goroutine_growth` | load pairs, `mobile` |
+
+Load pairs are `jitsi/datachannel`, `telemost/vp8channel` and `wbstream/vp8channel` on the local target, the link's pair on the link target. The big pull is `-olcrtc.gate-big-mb` MiB. The scenarios of a client run in order on one tunnel. S6 delays the bridge through `OLCRTC_TEST_BRIDGE_DELAY`, which only a server built with `olcrtc_testhooks` reads; a release build has no such hook.
+
+A cell has 5 min, S2 and S3 have 10. A server that did not come up gets one more try 30 s later (a missing token or pool room gets none), then its cells fail with the reason and the server's last log line, usually the provider's answer; a client that did not come up fails its cells too. Cells are not retried: a flake under load is a finding.
+
+## Thresholds
+
+Every number a verdict uses is in `internal/gate/thresholds.go`: `Local` for the local target, `Link` for a fleet node, and the handshake budget of S0 and S6. Each cell of a report carries the thresholds it was judged by:
+
+| Threshold | Bounds |
+|---|---|
+| `connect_p95_ms` | p95 of a connect: S1's burst, the connects on top in S2 and S3 |
+| `throughput_down_bps` | S2's aggregate download rate, a floor |
+| `throughput_up_bps` | S3's aggregate upload rate, a floor |
+| `heap_peak_bytes` | S7's peak live heap |
+| `rss_peak_bytes` | S7's peak RSS |
+| `goroutine_growth` | S7: how many more goroutines run at S4's end than before S1 |
+| `resolver_answered` | S5: how many of the 64 queries each burst must get answered |
+
+The other rules take no number: every transfer and connect must succeed, S4 allows no missed pong and no reconnect. A failure names the metric and what it measured, for example `connect_ok 23 of connect_total 24`.
+
+## Artifacts
+
+```text
+<gate-dir>/
+  gate-report.json
+  jitsi-datachannel/        a directory per pair
+    srv.log                 the pair's server
+    mobile-start.log        the client's start
+    mobile-S2.log           a log per cell
+    mobile-samples.csv      after S7: t_ms,heap_inuse,rss,goroutines
+    delay-3s/srv.log        S6's late servers
+    delay-8s/srv.log
+```
+
+Every log is scrubbed before it is written: the run's rooms, room ids, channel ids, override hosts and WB token read `<room>`, keys read `<key>`. The failures in the report are scrubbed the same way. The link target writes no logs: the fleet's rooms are not the run's to show.
+
+`TestMain` writes the report when the test binary exits, so a run with failed cells or one its deadline cut short still leaves one. A binary that `-timeout` kills leaves none.
+
+## Reading a report
+
+```bash
+go run ./cmd/gate-report render gate-artifacts/gate-report.json
+go run ./cmd/gate-report compare -severity fail previous.json current.json
+```
+
+`render` prints the Markdown table: a row per cell with its verdict, key metrics and time. `compare` pairs the cells of two reports by id and prints the deltas: throughput down or peak memory up by more than 25 %, or a pass that became a failure, is a regression. It exits 2 on a regression with `-severity fail`, 0 with `warn` (the default), 1 on a report it cannot read and 64 on a wrong command line. A cell in only one of the reports is not compared.
+
+## CI
+
+Two jobs in `.github/workflows/ci.yml`:
+
+- `gate-plan` runs the dry run of both builds, needs no secret and so runs for a pull request from a fork too, and puts both plans in the job summary. It fails when a build plans no cell or a cell of the other flavour.
+- `gate-local` needs `gate-plan` and runs the gate on the local target: the `cli` flavour (`-timeout 25m`), then the `mobile` flavour (`-tags olcrtc_lean`, `-timeout 45m`) whatever the first run did. It renders both reports into the job summary and uploads the `gate-local` artifact: the reports, the scrubbed logs and the samples. One run per ref at a time (`concurrency: gate-<ref>`). A pull request from a fork gets no secrets, so the job does not run for it; the push that merges it runs the gate.
