@@ -49,7 +49,8 @@ func ratedFrame(size int) *packetBuffer {
 
 func TestWriterHoldsBulkDataOverTheCeiling(t *testing.T) {
 	tr, written := ratedTransport(10_000, 1000)
-	w := &writerState{p: tr, keepaliveEvery: 3, forceKeepaliveEvery: 60}
+	w := newWriterState(tr)
+	w.keepaliveEvery, w.forceKeepaliveEvery = 3, 60
 
 	for range 4 {
 		tr.data.out <- ratedFrame(600 - epochHdrLen)
@@ -61,7 +62,7 @@ func TestWriterHoldsBulkDataOverTheCeiling(t *testing.T) {
 	if got := len(written()); got != 1 {
 		t.Fatalf("wrote %d samples on an empty bucket, want 1", got)
 	}
-	if w.pendingData == nil {
+	if w.data.pending == nil {
 		t.Fatal("the frame that did not fit was dropped instead of held")
 	}
 
@@ -74,7 +75,8 @@ func TestWriterHoldsBulkDataOverTheCeiling(t *testing.T) {
 
 func TestWriterKeepsControlFramesFlowingWhileBulkWaits(t *testing.T) {
 	tr, written := ratedTransport(10_000, 1000)
-	w := &writerState{p: tr, keepaliveEvery: 3, forceKeepaliveEvery: 60}
+	w := newWriterState(tr)
+	w.keepaliveEvery, w.forceKeepaliveEvery = 3, 60
 
 	// A control frame larger than the whole bucket still goes out at once,
 	// and leaves the bulk path waiting out its debt.
@@ -91,7 +93,7 @@ func TestWriterKeepsControlFramesFlowingWhileBulkWaits(t *testing.T) {
 	if got := len(written()); got != 1 {
 		t.Fatalf("wrote %d samples, want the bulk frame to wait out the debt", got)
 	}
-	if w.pendingData == nil {
+	if w.data.pending == nil {
 		t.Fatal("the bulk frame was dropped instead of held")
 	}
 }
@@ -99,7 +101,8 @@ func TestWriterKeepsControlFramesFlowingWhileBulkWaits(t *testing.T) {
 func TestWriterHoldsDatagramsOverTheCeiling(t *testing.T) {
 	tr, written := ratedTransport(10_000, 1000)
 	tr.datagram = make(chan []byte, 4)
-	w := &writerState{p: tr, keepaliveEvery: 3, forceKeepaliveEvery: 60}
+	w := newWriterState(tr)
+	w.keepaliveEvery, w.forceKeepaliveEvery = 3, 60
 
 	for range 3 {
 		tr.datagram <- ratedFrame(600 - epochHdrLen).data
@@ -140,7 +143,7 @@ func TestPeerPumpStaysUnderTheCeiling(t *testing.T) {
 	}
 	done := make(chan struct{})
 	start := time.Now()
-	go tr.peerWriterPump(out, done)
+	go tr.peerWriterPump(dataLane{out: out, conn: func() *kcpConn { return nil }, name: "rated peer"}, done)
 	time.Sleep(400 * time.Millisecond)
 	close(tr.closeCh)
 	close(done)
