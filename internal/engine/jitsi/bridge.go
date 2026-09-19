@@ -270,8 +270,13 @@ func (s *Session) sendBridgeFrame(to string, data []byte) {
 	if send == nil {
 		return
 	}
-	// ai-generated: the relay window wait and count (olcrtc#15).
-	if !s.waitBridgeRoom() || !s.waitRelayRoom(to, data) || !s.outboundFrameCurrent(data) {
+	// ai-generated: the relay window wait and count (olcrtc#15). Only a
+	// single-peer session waits for its window here. drainPeerQueues let a
+	// peer's frame through already; an echo that has turned the window on
+	// since must not hold the one loop that serves every other peer. A
+	// broadcast in peer mode has no window to wait for: an echo moves only
+	// the window of the endpoint it came from.
+	if !s.waitBridgeRoom() || (s.onPeerData == nil && !s.waitRelayRoom(to, data)) || !s.outboundFrameCurrent(data) {
 		return
 	}
 	if err := send(to, data); err != nil {
