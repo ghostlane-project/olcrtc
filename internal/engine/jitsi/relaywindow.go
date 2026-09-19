@@ -70,8 +70,8 @@ const (
 	// without echoing is gone (liveness tears a session down in 15 s), and
 	// its window is turned off so what waits for it drains as it used to.
 	relayDeadAfter = 30 * time.Second
-	// relayRetry is how often sendLoop revisits a peer its window holds,
-	// for probes and the dead check; an echo wakes it at once anyway.
+	// relayRetry is how often a sender its window holds looks again, for
+	// probes and the dead check; an echo or a reset wakes it at once anyway.
 	relayRetry = relayProbeAfter / 4
 
 	windowMark byte = 1
@@ -128,6 +128,7 @@ type relayState struct {
 type relayTiming struct {
 	probe time.Duration
 	dead  time.Duration
+	retry time.Duration
 }
 
 func (t relayTiming) probeAfter() time.Duration {
@@ -142,6 +143,13 @@ func (t relayTiming) deadAfter() time.Duration {
 		return t.dead
 	}
 	return relayDeadAfter
+}
+
+func (t relayTiming) retryAfter() time.Duration {
+	if t.retry > 0 {
+		return t.retry
+	}
+	return relayRetry
 }
 
 // relayKey names the window a frame to peerID counts against: that peer's
@@ -190,15 +198,17 @@ func (s *Session) relayReady(peerID string) bool {
 	return ok
 }
 
-// waitRelayRoom holds the sender while the window toward peerID is full.
-// Returns false when the session closes or a reconnect makes the frame stale
-// meanwhile.
+// waitRelayRoom holds the sender while the window toward peerID is full. It
+// looks again when an echo or a reset wakes it, and once a retry interval
+// otherwise, for the probe and the dead check. Returns false when the session
+// closes or a reconnect makes the frame stale meanwhile.
 func (s *Session) waitRelayRoom(peerID string, frame []byte) bool {
 	for !s.relayReady(peerID) {
 		select {
 		case <-s.done:
 			return false
-		case <-time.After(bridgeBacklogPoll):
+		case <-s.relayWake:
+		case <-time.After(s.relayTiming.retryAfter()):
 		}
 		if !s.outboundFrameCurrent(frame) {
 			return false
@@ -303,7 +313,7 @@ func (s *Session) applyEcho(from string, f windowFrame) {
 	if turnedOn {
 		logger.Debugf("jitsi bridge: %q echoes marks - relay window on", from)
 	}
-	s.wakePeerSender()
+	s.wakeRelaySenders()
 }
 
 // echoerEpoch is the epoch an echo from endpoint from must carry: the one
@@ -322,11 +332,23 @@ func (s *Session) echoerEpoch(from string) uint32 {
 	return s.peerEpochs[from]
 }
 
+// wakeRelaySenders wakes whatever a window may be holding: sendLoop for the
+// peer queues, and a sender waiting in waitRelayRoom.
+func (s *Session) wakeRelaySenders() {
+	s.wakePeerSender()
+	select {
+	case s.relayWake <- struct{}{}:
+	default:
+	}
+}
+
 // resetRelayWindows forgets every window: this session or its peer starts
 // over, and a count from before means nothing to the frames after. The
-// session's count goes on, see relaySent.
+// session's count goes on, see relaySent. A sender held by a window that is
+// gone now is woken.
 func (s *Session) resetRelayWindows() {
 	s.relayMu.Lock()
 	clear(s.relayWin)
 	s.relayMu.Unlock()
+	s.wakeRelaySenders()
 }
