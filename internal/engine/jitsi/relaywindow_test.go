@@ -643,6 +643,49 @@ func TestALateEchoDoesNotHoldTheServerForAnother(t *testing.T) {
 	}
 }
 
+// A server whose echoes from one client are lost probes that client on its
+// own: once the client's queue is full nothing else wakes sendLoop for it,
+// so the retry drainPeerQueues asks for is what sends the probe.
+func TestAServerProbesAClientWhoseEchoesWereLost(t *testing.T) {
+	m := newRelayModel(t)
+	var lose atomic.Bool
+	m.dropWindow = func(from string, _ []byte) bool { return lose.Load() && from == "endpoint-b1" }
+	var got1, got2 seqLog
+	srv, _, _ := joinServerTwoClients(t, m, &got1, &got2, relayTiming{probe: 20 * time.Millisecond, dead: time.Minute})
+	to := func(frame []byte) error { return srv.SendTo("endpoint-b1", frame) }
+	sendFrames(t, to, 0, 1)
+	waitUntil(t, 2*time.Second, "the first frame never arrived", func() bool { return got1.count() == 1 })
+	waitUntil(t, 2*time.Second, "the window never turned on", func() bool { return relayActive(srv, "endpoint-b1") })
+
+	lose.Store(true)
+	sent := make(chan struct{})
+	go func() {
+		defer close(sent)
+		sendFrames(t, to, 1, relayTestLoad+1)
+	}()
+	time.Sleep(150 * time.Millisecond)
+	if n := got1.count(); n > relayWindow/relayTestFrame+2 {
+		t.Fatalf("%d frames arrived with every echo lost; the window lets %d through", n, relayWindow/relayTestFrame)
+	}
+	lose.Store(false)
+	closedWithin(t, sent, 5*time.Second, "the server stayed held after echoes came back")
+	waitUntil(t, 5*time.Second, "b1 never caught up", func() bool { return got1.count() == relayTestLoad+1 })
+}
+
+// fillWindow puts 2 MiB in flight toward to after a first frame, and has
+// endpoint from echo the first frame's mark under epoch: the window toward
+// to is on and full.
+func fillWindow(t *testing.T, js *Session, out *relayFrames, to, from string, epoch uint32) {
+	t.Helper()
+	js.relaySent(to, relayTestFrame)
+	first := out.last(t)
+	js.relaySent(to, 2*relayWindow)
+	echoFrom(t, js, from, epoch, first.counter)
+	if !relayHeld(js, js.relayKey(to)) {
+		t.Fatal("the window is not on and full")
+	}
+}
+
 // ResetPeer and a confirm of the same peer start its window over. An echo
 // of a mark from before, late on its way, names the same epochs; it must not
 // move the new window. The counts go on across the reset, so its count is
@@ -709,6 +752,93 @@ func TestOnlyThePeersEndpointMovesTheWindow(t *testing.T) {
 	echoFrom(t, js, "server-endpoint", 0xB0B0B0B0, mark.counter)
 	if !relayActive(js, "") {
 		t.Fatal("the peer's own echo did not turn the window on")
+	}
+}
+
+// A peer that comes back under a new epoch is another instance, maybe an
+// older build that never echoes: its first frame starts the window over, so
+// the sender is not held for echoes the old instance owed.
+func TestAPeerUnderANewEpochStartsTheWindowOver(t *testing.T) {
+	js := newSilentSession(t)
+	var out relayFrames
+	js.sendHook = out.hook
+	js.localEpoch.Store(0xA0A0A0A0)
+	js.peerEpoch.Store(0xB0B0B0B0)
+	announce(t, js, "peer", 0xB0B0B0B0)
+	fillWindow(t, js, &out, "", "peer", 0xB0B0B0B0)
+	announce(t, js, "peer", 0xB1B1B1B1)
+	if ok, _, _ := js.relayRoom("", time.Now()); !ok {
+		t.Fatal("a window kept for the peer's old epoch holds the sender to its new one")
+	}
+}
+
+// ResetPeer forgets every peer, and the windows kept for them: a server
+// that starts over is not held by a window toward a client it has forgotten.
+func TestResetPeerStartsEveryWindowOver(t *testing.T) {
+	js := newSilentSession(t)
+	js.onPeerData = func(string, []byte) {}
+	var out relayFrames
+	js.sendHook = out.hook
+	js.localEpoch.Store(0xA0A0A0A0)
+	announce(t, js, "endpoint-b1", 0xB1B1B1B1)
+	fillWindow(t, js, &out, "endpoint-b1", "endpoint-b1", 0xB1B1B1B1)
+	js.ResetPeer()
+	if ok, _, _ := js.relayRoom("endpoint-b1", time.Now()); !ok {
+		t.Fatal("a window kept for a peer ResetPeer forgot holds the sender")
+	}
+}
+
+// A peer queue nobody has used for peerQueueIdle is dropped, and the peer's
+// window with it: peer IDs are endpoints, and on a server that runs for days
+// the windows would otherwise only grow.
+func TestAnIdlePeersWindowGoesWithItsQueue(t *testing.T) {
+	js := newQueuedSession(t)
+	js.onPeerData = func(string, []byte) {}
+	if err := js.SendTo("peer-a", []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	<-js.peerQueues["peer-a"].ch
+	js.relaySent("peer-a", relayTestFrame)
+	js.peerQueueMu.Lock()
+	js.peerQueues["peer-a"].lastUsed = time.Now().Add(-2 * peerQueueIdle)
+	js.peerQueueMu.Unlock()
+	js.reapPeerQueues()
+	js.relayMu.Lock()
+	_, kept := js.relayWin["peer-a"]
+	js.relayMu.Unlock()
+	if kept {
+		t.Fatal("an idle peer's window outlived its queue")
+	}
+}
+
+// A destination that holds the sender for relayDeadAfter without an echo is
+// let go. One that echoes is alive, even when its echo does not open the
+// window: every echo starts the clock over.
+func TestAnEchoStartsTheDeadClockOver(t *testing.T) {
+	js := newSilentSession(t)
+	var out relayFrames
+	js.sendHook = out.hook
+	js.relayTiming = relayTiming{probe: time.Hour, dead: time.Minute}
+	js.localEpoch.Store(0xA0A0A0A0)
+	js.peerEpoch.Store(0xB0B0B0B0)
+	announce(t, js, "peer", 0xB0B0B0B0)
+	js.relaySent("", relayTestFrame)
+	first := out.last(t)
+	js.relaySent("", relayMarkEvery)
+	second := out.last(t)
+	js.relaySent("", 2*relayWindow)
+	echoFrom(t, js, "peer", 0xB0B0B0B0, first.counter)
+
+	t0 := time.Now()
+	if ok, _, _ := js.relayRoom("", t0); ok {
+		t.Fatal("the window is not on and full")
+	}
+	echoFrom(t, js, "peer", 0xB0B0B0B0, second.counter)
+	if ok, _, _ := js.relayRoom("", t0.Add(2*time.Minute)); ok {
+		t.Fatal("a destination that echoed was let go as dead: its echo did not start the clock over")
+	}
+	if ok, _, _ := js.relayRoom("", t0.Add(4*time.Minute)); !ok {
+		t.Fatal("a destination silent for twice the dead period still holds the sender")
 	}
 }
 
