@@ -1,17 +1,22 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/xtaci/smux"
 
+	cryptopkg "github.com/openlibrecommunity/olcrtc/internal/crypto"
 	"github.com/openlibrecommunity/olcrtc/internal/handshake"
+	"github.com/openlibrecommunity/olcrtc/internal/muxconn"
+	"github.com/openlibrecommunity/olcrtc/internal/transport"
 )
 
 // A relay may lose the client's first CLIENT_HELLO: the Jitsi videobridge
@@ -364,5 +369,109 @@ func TestOpenControlStreamStopsOnContextCancelBeforeItsPathOpens(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("the cancel did not end a wait for a path that never opened")
+	}
+}
+
+// ai-generated: pathLink, newBatchingPair and the test below (olcrtc#11's
+// write batching must still hold the first SYN until this side's path is
+// open, or the window of olcrtc#10 counts from the join again).
+
+// pathLink is one side of a transport that sends only once its path is open,
+// and asks muxconn to batch small frames the way the datachannel transport
+// does. What it sends is pushed into the other side's conn.
+type pathLink struct {
+	transport.Transport
+	open <-chan struct{}
+	peer atomic.Pointer[muxconn.Conn]
+}
+
+func (l *pathLink) CanSend() bool {
+	select {
+	case <-l.open:
+		return true
+	default:
+		return false
+	}
+}
+
+func (l *pathLink) Send(data []byte) error {
+	if peer := l.peer.Load(); peer != nil {
+		peer.Push(bytes.Clone(data))
+	}
+	return nil
+}
+
+func (*pathLink) Features() transport.Features {
+	return transport.Features{MaxPayloadSize: 12 * 1024, WriteInterval: 5 * time.Millisecond}
+}
+
+// newBatchingPair is newLatePair through muxconn: the client's link can send
+// once open closes, the server's at once, and both conns batch.
+func newBatchingPair(t *testing.T, open <-chan struct{}) (*smux.Session, *smux.Session) {
+	t.Helper()
+	psk := []byte("01234567890123456789012345678901")
+	clientKeys, err := cryptopkg.NewKeySet(psk, cryptopkg.Client)
+	if err != nil {
+		t.Fatalf("NewKeySet(client) error = %v", err)
+	}
+	serverKeys, err := cryptopkg.NewKeySet(psk, cryptopkg.Server)
+	if err != nil {
+		t.Fatalf("NewKeySet(server) error = %v", err)
+	}
+	always := make(chan struct{})
+	close(always)
+	clientLink, serverLink := &pathLink{open: open}, &pathLink{open: always}
+	clientConn, serverConn := muxconn.New(clientLink, clientKeys), muxconn.New(serverLink, serverKeys)
+	clientLink.peer.Store(serverConn)
+	serverLink.peer.Store(clientConn)
+	serverSess, err := smux.Server(serverConn, testSmuxCfg())
+	if err != nil {
+		t.Fatalf("smux.Server() error = %v", err)
+	}
+	clientSess, err := smux.Client(clientConn, testSmuxCfg())
+	if err != nil {
+		t.Fatalf("smux.Client() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = clientSess.Close()
+		_ = serverSess.Close()
+		_ = clientConn.Close()
+		_ = serverConn.Close()
+	})
+	return serverSess, clientSess
+}
+
+// The S6 leg of TestOpenControlStreamWindowStartsWhenItsPathOpens with the
+// conns the client really runs: batching may defer a frame by an interval,
+// but the SYN's Write must still wait for the path, or OpenStream returns at
+// once and the window runs out before the late server is up.
+func TestOpenControlStreamWindowStartsWhenABatchingPathOpens(t *testing.T) {
+	const (
+		timeout = 3 * time.Second
+		ownPath = 1500 * time.Millisecond
+		peerUp  = 3300 * time.Millisecond
+	)
+	setHelloResend(t, 500*time.Millisecond)
+	open := make(chan struct{})
+	serverSess, clientSess := newBatchingPair(t, open)
+	start := time.Now()
+	opener := time.AfterFunc(ownPath, func() { close(open) })
+	t.Cleanup(func() { opener.Stop() })
+	served := make(chan error, 1)
+	go serveLatePeer(serverSess, start.Add(peerUp), served)
+
+	stream, sessionID, peerID, err := openControlStreamTimeout(
+		context.Background(), clientSess, "dev", nil, timeout,
+	)
+	if err != nil {
+		t.Fatalf("openControlStreamTimeout() error = %v after %v; the peer came up %v after the path opened",
+			err, time.Since(start).Round(time.Millisecond), peerUp-ownPath)
+	}
+	defer func() { _ = stream.Close() }()
+	if sessionID != "sess-1" || peerID != "peer-1" {
+		t.Fatalf("openControlStreamTimeout() = (%q, %q), want (sess-1, peer-1)", sessionID, peerID)
+	}
+	if err := <-served; err != nil {
+		t.Fatalf("server handshake error = %v", err)
 	}
 }

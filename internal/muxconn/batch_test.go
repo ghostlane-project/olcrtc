@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -239,13 +240,14 @@ func TestBatchingReportsAFailedSendOnALaterWrite(t *testing.T) {
 func TestBatchingCloseReleasesAWriterWaitingForRoom(t *testing.T) {
 	clientKeys, _ := newTestKeyPair(t)
 	link := newTimedLink(time.Millisecond)
-	link.canSend = false // the flusher waits for the link with the first record
+	link.hold = make(chan struct{}) // the flusher's send waits here
 	link.features.MaxPayloadSize = cryptopkg.WireOverhead + 64
 	conn := New(link, clientKeys)
+	t.Cleanup(func() { close(link.hold) })
 
 	small := smuxFrame(2, 3, make([]byte, 16)) // 24 bytes: under half of 64
 	mustWrite(t, conn, small)
-	waitTaken(t, conn, 1)     // the flusher holds it and waits for the link
+	waitTaken(t, conn, 1)     // the flusher is sending it and waits
 	mustWrite(t, conn, small) // the next batch
 	done := make(chan error, 1)
 	go func() {
@@ -337,5 +339,102 @@ func TestPayloadBytesCountsEveryFrameOfARecord(t *testing.T) {
 	}
 	if _, err := io.ReadFull(conn, make([]byte, len(record))); err != nil {
 		t.Fatalf("ReadFull() error = %v", err)
+	}
+}
+
+// Batching must not change what a Write promises: it returns only once the
+// link can send and the peer's key is known, as it always did. The client's
+// handshake counts its reply window from the moment the first SYN's Write
+// returns, which must be when this side's path is open (olcrtc#10); a batched
+// Write that returned at once counted it from the join again.
+func TestBatchedWriteWaitsUntilTheLinkCanSend(t *testing.T) {
+	clientKeys, serverKeys := newTestKeyPair(t)
+	var ready atomic.Bool
+	link := newTimedLink(5 * time.Millisecond)
+	link.canSendFn = ready.Load
+	conn := New(link, clientKeys)
+	defer func() { _ = conn.Close() }()
+
+	frame := smuxFrame(0, 3, nil)
+	done := make(chan error, 1)
+	go func() {
+		_, err := conn.Write(frame)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("Write() returned %v while the link could not send", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	ready.Store(true)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Write() = %v once the link could send, want nil", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Write() did not return once the link could send")
+	}
+	sent, _ := link.waitSent(t, 1, time.Second)
+	if got := openRecord(t, serverKeys, sent[0]); !bytes.Equal(got, frame) {
+		t.Fatalf("record = %x, want %x", got, frame)
+	}
+}
+
+// A batched Write that waits out the send deadline leaves the same mark an
+// unbatched one does, and the next Write that gets through clears it.
+func TestBatchedWriteMarksAndClearsAStall(t *testing.T) {
+	clientKeys, _ := newTestKeyPair(t)
+	var ready atomic.Bool
+	link := newTimedLink(5 * time.Millisecond)
+	link.canSendFn = ready.Load
+	conn := New(link, clientKeys)
+	conn.writeTimeout = 20 * time.Millisecond
+	defer func() { _ = conn.Close() }()
+
+	if _, err := conn.Write(smuxFrame(0, 3, nil)); !errors.Is(err, ErrWriteTimeout) {
+		t.Fatalf("Write() error = %v, want %v", err, ErrWriteTimeout)
+	}
+	if !conn.SendStalled() {
+		t.Fatal("a Write that waited out the deadline must leave the conn stalled")
+	}
+	ready.Store(true)
+	if _, err := conn.Write(smuxFrame(0, 5, nil)); err != nil {
+		t.Fatalf("Write() after the link recovered: %v", err)
+	}
+	if conn.SendStalled() {
+		t.Fatal("a Write that got through must clear the stall")
+	}
+	link.waitSent(t, 1, time.Second)
+}
+
+func TestBatchedWriteWaitsForThePin(t *testing.T) {
+	link := newTimedLink(5 * time.Millisecond)
+	conn := NewGrouped(link, NewPinGroup(ringOf(t, pskA, pskB)))
+	defer func() { _ = conn.Close() }()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := conn.Write([]byte("from server"))
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("Write returned %v before the group was pinned", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	clientB := keysFor(t, pskB, cryptopkg.Client)
+	conn.Push(sealedBy(t, clientB, "hi"))
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Write = %v after the pin", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Write did not resume after the pin")
+	}
+	sent, _ := link.waitSent(t, 1, time.Second)
+	if pt, err := clientB.Open(sent[0], []byte(dataRecordAAD)); err != nil || string(pt) != "from server" {
+		t.Fatalf("the client's key set did not open the server's record: %q, %v", pt, err)
 	}
 }
