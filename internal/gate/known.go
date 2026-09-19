@@ -30,7 +30,6 @@ type KnownFailure struct{ Cell, Issue, Why string }
 // cell that never ran is never known, so configuration stays blocking.
 var knownFailures = []KnownFailure{ //nolint:gochecknoglobals // edited by hand as issues open and close; tests swap it
 	{"engine-linux/jitsi/seichannel/*/S0", issues + "9", "a 10 MiB pull through Jitsi kills the tunnel"},
-	{"engine-linux/jitsi/datachannel/*/S6", issues + "10", "a bridge 8 s late overruns the 15 s handshake window"},
 	{"engine-linux/jitsi/datachannel/mobile/S5", issues + "11", "a DNS burst holds some first bytes 2 s"},
 	{"engine-linux/jitsi/vp8channel/*/S0", issues + "12", "a transfer stalls while control lives"},
 	{"engine-linux/jitsi/datachannel/mobile/S2", issues + "15", "six parallel pulls collapse into SCTP retransmissions"},
