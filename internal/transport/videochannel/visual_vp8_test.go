@@ -64,6 +64,34 @@ func TestFullFragmentSurvivesVP8(t *testing.T) {
 	}
 }
 
+// TestFullFragmentFrameIsSmall bounds what a whole fragment costs on the
+// wire at the default 1920x1080: about a dozen RTP packets. Drawn at the
+// largest aligned side it was 31 KB, and every packet of it is one more a
+// single loss takes the frame down with.
+func TestFullFragmentFrameIsSmall(t *testing.T) {
+	const maxFrame = 16 << 10
+	vis, err := newVisualCodec(defaultWidth, defaultHeight, "qrcode", "low", defaultTileModule, defaultTileRS)
+	if err != nil {
+		t.Fatalf("newVisualCodec() error = %v", err)
+	}
+	fragment := fixture(1, defaultFragmentSize)
+	frame := common.EncodeData(common.RoleServer, 0x5eed, 1, crc32.ChecksumIEEE(fragment),
+		len(fragment), 0, 1, fragment)
+	raw, err := vis.render(frame)
+	if err != nil {
+		t.Fatalf("render() error = %v", err)
+	}
+	enc := newGoEncoder(defaultWidth, defaultHeight, defaultFPS)
+	defer enc.Close()
+	sample, err := enc.EncodeFrame(raw)
+	if err != nil {
+		t.Fatalf("EncodeFrame() error = %v", err)
+	}
+	if len(sample) > maxFrame {
+		t.Fatalf("a whole fragment encodes to %d bytes, want at most %d", len(sample), maxFrame)
+	}
+}
+
 // TestEveryQRVersionSurvivesVP8 walks the symbol versions a frame of each
 // size carries a transport frame in, one payload per version, up to a few
 // fragments' worth. Drawn to fill the frame, four versions failed at
@@ -111,9 +139,9 @@ func qrModules(t *testing.T, codec *grqr.Codec, n int) int {
 	return len(grid)
 }
 
-// TestQRPlacementIsOnTheBlockGrid holds every symbol version to modules and a
-// corner on the transform-block grid, at the largest such side the frame
-// holds, centred and inside the frame.
+// TestQRPlacementIsOnTheBlockGrid holds every symbol version to one transform
+// block a module and a corner on the block grid, centred and inside the frame,
+// and a symbol too dense for that to the largest side that fits.
 func TestQRPlacementIsOnTheBlockGrid(t *testing.T) {
 	sizes := [][2]int{{1920, 1080}, {1280, 720}, {640, 480}, {320, 240}, {1080, 1920}, {101, 97}}
 	for _, size := range sizes {
@@ -127,13 +155,8 @@ func TestQRPlacementIsOnTheBlockGrid(t *testing.T) {
 					t.Errorf("%dx%d, %d modules: side %d, want 0 (does not fit)", w, h, modules, scale)
 				}
 				continue
-			case fits < qrBlock:
-				if scale != fits {
-					t.Errorf("%dx%d, %d modules: side %d, want %d", w, h, modules, scale, fits)
-				}
-			case scale%qrBlock != 0 || scale > fits || fits-scale >= qrBlock:
-				t.Errorf("%dx%d, %d modules: side %d, want the largest multiple of %d up to %d",
-					w, h, modules, scale, qrBlock, fits)
+			case scale != min(qrBlock, fits):
+				t.Errorf("%dx%d, %d modules: side %d, want %d", w, h, modules, scale, min(qrBlock, fits))
 			}
 			side := modules * scale
 			if left%qrBlock != 0 || top%qrBlock != 0 {
