@@ -92,6 +92,9 @@ type Session struct {
 	backlogGauge func() int
 	// sendHook stands in for the bridge in tests: every frame the session
 	// puts on the bridge goes to it instead. nil means the live bridge.
+	//
+	// ai-generated: the seam the relay window's tests drive sessions
+	// through (olcrtc#15).
 	sendHook func(to string, frame []byte) error
 	// relayWin holds the end-to-end window toward each destination, see
 	// relaywindow.go. relayCount is every byte counted against a window

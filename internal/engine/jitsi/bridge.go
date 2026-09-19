@@ -405,6 +405,10 @@ func trySendEndpointRaw(jSess *j.Session, to string, data []byte) error {
 	return nil
 }
 
+// newEndpointMessage wraps data as the JVB relays it to endpoint to.
+//
+// ai-generated: split out of sendEndpointRaw so that trySendEndpointRaw
+// sends the same shape (olcrtc#15).
 func newEndpointMessage(to string, data []byte) endpointMessage {
 	return endpointMessage{
 		ColibriClass: colibriClassEndpointMessage,
@@ -540,6 +544,10 @@ func (s *Session) deliverBridgeMessageGen(gen uint64, msg j.BridgeMessage, ok bo
 	return true
 }
 
+// bridgePayload returns a decoded payload that carries the data magic.
+//
+// ai-generated: it takes the payload deliverBridgeMessageGen decoded once
+// for the relay window's frames, not the message (olcrtc#15).
 func bridgePayload(payload []byte) ([]byte, bool) {
 	if payload == nil {
 		return nil, false
