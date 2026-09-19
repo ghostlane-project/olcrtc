@@ -606,33 +606,29 @@ func (c *Conn) recycleIfDrained() {
 // Write encrypts p and ships it to the link as a single message. Blocks while
 // the link signals back-pressure, up to writeReadyTimeout, and until the
 // group knows which key the peer holds. On a link that asks for a write
-// interval, p joins the batch instead and Write blocks only while the batch
-// has no room for it; a failed send is reported by the Write after it.
+// interval, p then joins the batch instead, which may hold it for up to an
+// interval (see batcher); a failed send is reported by the Write after it.
 func (c *Conn) Write(p []byte) (int, error) {
-	if c.batch != nil {
-		return c.batch.add(p, c.closeCh)
+	if c.batch == nil {
+		return c.writeRecord(p)
 	}
-	return c.writeRecord(p)
+	// ai-generated: the wait before a frame joins the batch (olcrtc#11). The
+	// wait is what a Write promises, batched or not: the client's handshake
+	// counts its reply window from the moment the first SYN's Write returns,
+	// which must be when this side's path is open (olcrtc#10); a batched
+	// Write that returned at once counted it from the join again. The flusher
+	// waits once more before it sends, in writeRecord, for a link that went
+	// away in between; on a link that can send, that wait is a single check.
+	if err := c.awaitLink(); err != nil {
+		return 0, err
+	}
+	return c.batch.add(p, c.closeCh)
 }
 
 // writeRecord seals p as one record and sends it.
 func (c *Conn) writeRecord(p []byte) (int, error) {
-	if err := c.waitSendReady(); err != nil {
-		if errors.Is(err, ErrWriteTimeout) {
-			c.writeStalls.Add(1)
-		}
+	if err := c.awaitLink(); err != nil {
 		return 0, err
-	}
-	c.writeStalls.Store(0)
-	// Sealing under a guessed key would hand the peer a frame it silently
-	// drops and desynchronise the smux stream, so wait for the pin. A
-	// pre-pinned group makes this free; an unpinned one is released by the
-	// peer's first record or by Close (smux closes the conn when its
-	// keepalive times out, so a peer that never speaks cannot park us).
-	select {
-	case <-c.group.PinWait():
-	case <-c.closeCh:
-		return 0, ErrClosed
 	}
 	enc, err := c.group.Pinned().Keys.SealInto(nil, p, c.aad)
 	if err != nil {
@@ -642,6 +638,33 @@ func (c *Conn) writeRecord(p []byte) (int, error) {
 		return 0, fmt.Errorf("send: %w", err)
 	}
 	return len(p), nil
+}
+
+// awaitLink blocks until a record may go: the link accepts data and the
+// group knows which key the peer holds. A wait on the link that runs out
+// marks the conn stalled (see SendStalled), and one that does not clears it.
+//
+// ai-generated: moved out of writeRecord as it was, for the batched Write
+// (olcrtc#11).
+func (c *Conn) awaitLink() error {
+	if err := c.waitSendReady(); err != nil {
+		if errors.Is(err, ErrWriteTimeout) {
+			c.writeStalls.Add(1)
+		}
+		return err
+	}
+	c.writeStalls.Store(0)
+	// Sealing under a guessed key would hand the peer a frame it silently
+	// drops and desynchronise the smux stream, so wait for the pin. A
+	// pre-pinned group makes this free; an unpinned one is released by the
+	// peer's first record or by Close (smux closes the conn when its
+	// keepalive times out, so a peer that never speaks cannot park us).
+	select {
+	case <-c.group.PinWait():
+		return nil
+	case <-c.closeCh:
+		return ErrClosed
+	}
 }
 
 // waitSendReady blocks until the link accepts data, the conn closes, or

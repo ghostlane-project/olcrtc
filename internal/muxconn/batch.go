@@ -21,13 +21,15 @@ import (
 // dozens of streams at once. smux reads records as one byte stream, so a
 // record that carries several whole frames needs nothing new from the peer.
 //
-// A frame never waits when the last record left an interval ago. A batch
-// that reaches half a record leaves at once, and the Write that made it so
-// returns only once it has gone to the link, as every Write did before: bulk
-// data is not held here in front of the link's own queue, and a stream
-// behind it keeps its place in smux's round robin. Only small frames that
-// follow each other closely share a record, which then leaves one interval
-// after the last.
+// A frame joins only once the link can send and the peer's key is known,
+// the wait every Write makes (Conn.Write), so a batched Write returns no
+// sooner than an unbatched one could have sent. A frame never waits in the
+// batch when the last record left an interval ago. A batch that reaches half
+// a record leaves at once, and the Write that made it so returns only once
+// it has gone to the link, as every Write did before: bulk data is not held
+// here in front of the link's own queue, and a stream behind it keeps its
+// place in smux's round robin. Only small frames that follow each other
+// closely share a record, which then leaves one interval after the last.
 type batcher struct {
 	interval time.Duration
 	limit    int // the plaintext one record may carry
