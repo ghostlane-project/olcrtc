@@ -94,11 +94,14 @@ type Session struct {
 	// puts on the bridge goes to it instead. nil means the live bridge.
 	sendHook func(to string, frame []byte) error
 	// relayWin holds the end-to-end window toward each destination, see
-	// relaywindow.go; relayTiming shortens its timers in tests.
+	// relaywindow.go. relayCount is every byte counted against a window
+	// since the session began, where a new window's count starts.
+	// relayTiming shortens the window's timers in tests.
 	//
 	// ai-generated: the relay window's state (olcrtc#15).
 	relayMu     sync.Mutex
 	relayWin    map[string]*relayState
+	relayCount  uint64
 	relayTiming relayTiming
 	// peerQueues holds one bounded queue per addressed peer, so a client that
 	// cannot drain its share does not hold the room's other clients behind

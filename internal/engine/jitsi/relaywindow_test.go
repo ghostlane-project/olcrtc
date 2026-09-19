@@ -281,13 +281,22 @@ func TestAStalledReceiverLosesNothingAtTheRelay(t *testing.T) {
 }
 
 // openPair opens a receiver b and a sender a that has confirmed b, as a
-// client has confirmed its server, and passes one frame over the open leg
-// first, the handshake a tunnel does before any load.
+// client has confirmed its server. b's epoch announce reaches a first and
+// latches b's endpoint, as a server's reply does, and then one frame passes
+// over the open leg, the handshake a tunnel does before any load.
 func openPair(t *testing.T, m *relayModel, got *seqLog, timing ...relayTiming) (*Session, *Session) {
 	t.Helper()
 	b := m.join("endpoint-b", 0xB0B0B0B0, got.onData, nil)
 	a := m.join("endpoint-a", 0xA0A0A0A0, func([]byte) {}, nil, timing...)
 	a.peerEpoch.Store(b.localEpoch.Load())
+	b.peerEpoch.Store(a.localEpoch.Load())
+	if err := b.Send(nil); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, 2*time.Second, "the sender never latched the receiver's endpoint", func() bool {
+		ep := a.peerEndpoint.Load()
+		return ep != nil && *ep == "endpoint-b"
+	})
 	sendFrames(t, a.Send, 0, 1)
 	waitUntil(t, 2*time.Second, "the first frame never arrived", func() bool { return got.count() == 1 })
 	return a, b
@@ -467,11 +476,32 @@ func (r *relayFrames) hook(to string, frame []byte) error {
 	return nil
 }
 
+// last is the last window frame the session put on the bridge.
+func (r *relayFrames) last(t *testing.T) windowFrame {
+	t.Helper()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.frames) == 0 {
+		t.Fatal("no window frame went on the bridge")
+	}
+	return r.frames[len(r.frames)-1]
+}
+
 func windowMessage(t *testing.T, from string, f windowFrame) j.BridgeMessage {
 	t.Helper()
 	return makeBridgeMessageFrom(from, map[string]any{
 		"msgPayload": map[string]any{"raw": encodeForTest(t, f.encode())},
 	})
+}
+
+// announce delivers an empty frame from endpoint from under epoch, as a
+// peer's epoch announce arrives: a single-peer session latches the endpoint,
+// a session in peer mode learns the endpoint's epoch.
+func announce(t *testing.T, js *Session, from string, epoch uint32) {
+	t.Helper()
+	js.deliverBridgeMessage(makeBridgeMessageFrom(from, map[string]any{
+		"msgPayload": map[string]any{"raw": makeBridgeFrameForEpoch(t, epoch, js.localEpoch.Load(), nil)},
+	}), true)
 }
 
 // echoFrom delivers an echo of counter from endpoint from under epoch.
@@ -494,6 +524,7 @@ func TestWindowFramesStayBetweenTheTwoEnds(t *testing.T) {
 	js.bridgeReady.Store(true)
 	js.localEpoch.Store(0xA0A0A0A0)
 	js.peerEpoch.Store(0xB0B0B0B0)
+	announce(t, js, "peer", 0xB0B0B0B0)
 
 	mark := windowFrame{kind: windowMark, senderEpoch: 0xB0B0B0B0, receiverEpoch: 0xA0A0A0A0, counter: 4096}
 	js.deliverBridgeMessage(windowMessage(t, "peer", mark), true)
@@ -536,6 +567,7 @@ func TestConfirmingAnotherPeerStartsTheWindowOver(t *testing.T) {
 	if err := js.ConfirmPeer("b0b0b0b0"); err != nil {
 		t.Fatal(err)
 	}
+	announce(t, js, "peer", 0xB0B0B0B0)
 	js.relaySent("", 2*relayWindow)
 	echo := windowFrame{kind: windowEcho, senderEpoch: 0xB0B0B0B0, receiverEpoch: 0xA0A0A0A0, counter: 1}
 	js.deliverBridgeMessage(windowMessage(t, "peer", echo), true)
@@ -608,6 +640,75 @@ func TestALateEchoDoesNotHoldTheServerForAnother(t *testing.T) {
 	waitUntil(t, 10*time.Second, "b2 never got its frames", func() bool { return got2.count() == 4 })
 	if d := time.Since(start); d > time.Second {
 		t.Fatalf("b2's 4 frames took %v: the stalled b1 held the server's sendLoop", d.Round(time.Millisecond))
+	}
+}
+
+// ResetPeer and a confirm of the same peer start its window over. An echo
+// of a mark from before, late on its way, names the same epochs; it must not
+// move the new window. The counts go on across the reset, so its count is
+// behind where the new window starts.
+func TestAnEchoFromBeforeAResetMovesNoWindow(t *testing.T) {
+	js := newSilentSession(t)
+	var out relayFrames
+	js.sendHook = out.hook
+	js.localEpoch.Store(0xA0A0A0A0)
+	confirm := func() {
+		t.Helper()
+		if err := js.ConfirmPeer("b0b0b0b0"); err != nil {
+			t.Fatal(err)
+		}
+		announce(t, js, "peer", 0xB0B0B0B0)
+	}
+	confirm()
+	js.relaySent("", relayWindow/2)
+	stale := out.last(t)
+	js.ResetPeer()
+	confirm()
+
+	js.relaySent("", relayTestFrame)
+	fresh := out.last(t)
+	js.relaySent("", 2*relayWindow)
+	echoFrom(t, js, "peer", 0xB0B0B0B0, stale.counter)
+	if relayActive(js, "") {
+		t.Fatal("an echo from before the reset turned the new window on")
+	}
+	echoFrom(t, js, "peer", 0xB0B0B0B0, fresh.counter)
+	js.relayMu.Lock()
+	st := js.relayWin[""]
+	on, inFlight := st.active, st.sent-st.echoed
+	js.relayMu.Unlock()
+	if !on || inFlight != 2*relayWindow {
+		t.Fatalf("after the new window's own echo: on %v with %d in flight, want on with %d", on, inFlight, 2*relayWindow)
+	}
+}
+
+// Anyone in the room can learn both epochs: a client's marks go to every
+// endpoint, and a server announces its own. An echo that names them from any
+// endpoint but the peer's moves nothing, so another participant can neither
+// turn a client's window on toward a server that never echoes nor confirm
+// bytes the server has not taken.
+func TestOnlyThePeersEndpointMovesTheWindow(t *testing.T) {
+	js := newSilentSession(t)
+	var out relayFrames
+	js.sendHook = out.hook
+	js.localEpoch.Store(0xA0A0A0A0)
+	if err := js.ConfirmPeer("b0b0b0b0"); err != nil {
+		t.Fatal(err)
+	}
+	js.relaySent("", 2*relayWindow)
+	mark := out.last(t)
+	echoFrom(t, js, "server-endpoint", 0xB0B0B0B0, mark.counter)
+	if relayActive(js, "") {
+		t.Fatal("an echo turned the window on before any frame of the peer's named its endpoint")
+	}
+	announce(t, js, "server-endpoint", 0xB0B0B0B0)
+	echoFrom(t, js, "some-other-participant", 0xB0B0B0B0, mark.counter)
+	if relayActive(js, "") {
+		t.Fatal("an echo from an endpoint other than the peer's turned the window on")
+	}
+	echoFrom(t, js, "server-endpoint", 0xB0B0B0B0, mark.counter)
+	if !relayActive(js, "") {
+		t.Fatal("the peer's own echo did not turn the window on")
 	}
 }
 

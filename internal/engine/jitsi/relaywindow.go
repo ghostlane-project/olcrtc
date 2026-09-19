@@ -42,6 +42,14 @@ import (
 // Marks and echoes travel under their own magic, which a build without the
 // window drops unread. The window therefore only holds a sender back once an
 // echo has come from that destination: an older peer is sent to as before.
+//
+// An echo moves a window only when it can answer one of that window's marks:
+// it comes from the endpoint the window is kept for, under the epoch its
+// frames go to, with a count past the last echo and within what was sent.
+// Anyone in the room can learn both epochs, but not send under another
+// endpoint's name: the JVB fills in the sender. Counts never start over: a
+// window opened after a reset or a reap starts at the session's count, past
+// every mark sent before, so a late echo of one is out of its range.
 
 const (
 	// relayWindow is 1 MiB of frames, ~1.4 MB of EndpointMessage JSON at
@@ -208,10 +216,14 @@ func (s *Session) relaySent(peerID string, n int) {
 	key := s.relayKey(peerID)
 	st := s.relayWin[key]
 	if st == nil {
-		st = &relayState{}
+		// A new window starts at the session's count, which no mark sent
+		// before it is past: no echo of one can move this window.
+		st = &relayState{sent: s.relayCount, marked: s.relayCount, echoed: s.relayCount}
 		s.relayWin[key] = st
 	}
-	st.sent += uint64(n) //nolint:gosec // n is a frame length
+	add := uint64(n) //nolint:gosec // n is a frame length
+	st.sent += add
+	s.relayCount += add
 	due := st.sent-st.marked >= relayMarkEvery || (!st.active && now.Sub(st.markedAt) >= s.relayTiming.probeAfter())
 	if due {
 		st.marked, st.markedAt = st.sent, now
@@ -267,23 +279,27 @@ func (s *Session) handleWindowFrame(from string, payload []byte) bool {
 }
 
 // applyEcho moves the window toward from on and wakes a sender it held. An
-// echo counts only from the epoch this session sends that peer's frames to,
-// and never past what was sent.
+// echo counts only from the endpoint and the epoch this session sends that
+// peer's frames to, and only for a count past the last echo and within what
+// was sent: one from before a reset or a reap, or behind a later echo, moves
+// nothing.
 func (s *Session) applyEcho(from string, f windowFrame) {
 	if f.senderEpoch != s.echoerEpoch(from) {
 		return
 	}
 	s.relayMu.Lock()
 	st := s.relayWin[s.relayKey(from)]
+	moved := st != nil && f.counter > st.echoed && f.counter <= st.sent
 	turnedOn := false
-	if st != nil && f.counter <= st.sent {
+	if moved {
 		turnedOn, st.active = !st.active, true
-		if f.counter > st.echoed {
-			st.echoed = f.counter
-			st.heldSince = time.Time{}
-		}
+		st.echoed = f.counter
+		st.heldSince = time.Time{}
 	}
 	s.relayMu.Unlock()
+	if !moved {
+		return
+	}
 	if turnedOn {
 		logger.Debugf("jitsi bridge: %q echoes marks - relay window on", from)
 	}
@@ -291,9 +307,14 @@ func (s *Session) applyEcho(from string, f windowFrame) {
 }
 
 // echoerEpoch is the epoch an echo from endpoint from must carry: the one
-// that peer's frames come under in peer mode, the confirmed peer's otherwise.
+// that peer's frames come under in peer mode. Otherwise it is the confirmed
+// peer's, and only from the endpoint latched for that peer: an echo from
+// anyone else carries no epoch that counts.
 func (s *Session) echoerEpoch(from string) uint32 {
 	if s.onPeerData == nil {
+		if ep := s.peerEndpoint.Load(); ep == nil || *ep != from {
+			return 0
+		}
 		return s.peerEpoch.Load()
 	}
 	s.peerEpochMu.Lock()
@@ -302,7 +323,8 @@ func (s *Session) echoerEpoch(from string) uint32 {
 }
 
 // resetRelayWindows forgets every window: this session or its peer starts
-// over, and a count from before means nothing to the frames after.
+// over, and a count from before means nothing to the frames after. The
+// session's count goes on, see relaySent.
 func (s *Session) resetRelayWindows() {
 	s.relayMu.Lock()
 	clear(s.relayWin)
