@@ -95,13 +95,15 @@ type Session struct {
 	sendHook func(to string, frame []byte) error
 	// relayWin holds the end-to-end window toward each destination, see
 	// relaywindow.go. relayCount is every byte counted against a window
-	// since the session began, where a new window's count starts.
-	// relayTiming shortens the window's timers in tests.
+	// since the session began, where a new window's count starts. relayWake
+	// (buffered 1) wakes a sender waitRelayRoom holds. relayTiming shortens
+	// the window's timers in tests.
 	//
 	// ai-generated: the relay window's state (olcrtc#15).
 	relayMu     sync.Mutex
 	relayWin    map[string]*relayState
 	relayCount  uint64
+	relayWake   chan struct{}
 	relayTiming relayTiming
 	// peerQueues holds one bounded queue per addressed peer, so a client that
 	// cannot drain its share does not hold the room's other clients behind
@@ -174,6 +176,7 @@ func New(_ context.Context, cfg engine.Config) (engine.Session, error) {
 		sendQueue:           make(chan []byte, defaultSendQueueSize),
 		peerQueues:          make(map[string]*peerQueue),
 		relayWin:            make(map[string]*relayState),
+		relayWake:           make(chan struct{}, 1),
 		peerWake:            make(chan struct{}, 1),
 		peerEpochs:          make(map[string]uint32),
 		jSessReady:          make(chan struct{}),

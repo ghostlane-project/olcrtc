@@ -196,7 +196,7 @@ func (s *Session) drainPeerQueuesRetry() <-chan time.Time {
 	if !s.drainPeerQueues() {
 		return nil
 	}
-	return time.After(relayRetry)
+	return time.After(s.relayTiming.retryAfter())
 }
 
 // drainPeerQueues sends one frame per peer per pass, round-robin, until

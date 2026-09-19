@@ -712,6 +712,50 @@ func TestOnlyThePeersEndpointMovesTheWindow(t *testing.T) {
 	}
 }
 
+// A sender its window holds is woken by the echo that makes room: with the
+// retry an hour away, the load still goes through once the receiver reads.
+func TestAnEchoWakesAHeldSender(t *testing.T) {
+	m := newRelayModel(t)
+	var got seqLog
+	a, _ := joinPair(t, m, &got, relayTiming{retry: time.Hour})
+	m.stall("endpoint-b", true)
+	sent := make(chan struct{})
+	go func() {
+		defer close(sent)
+		sendFrames(t, a.Send, 1, relayTestLoad+1)
+	}()
+	waitUntil(t, 5*time.Second, "the sender was never held", func() bool { return relayHeld(a, "") })
+	m.stall("endpoint-b", false)
+	closedWithin(t, sent, 5*time.Second, "the held sender slept through the echoes")
+	waitUntil(t, 5*time.Second, "the receiver never caught up", func() bool { return got.count() == relayTestLoad+1 })
+}
+
+// A reconnect makes the frame a held sender waits with stale. The reset of
+// the windows that comes with it wakes the sender to drop the frame at once,
+// with the retry an hour away.
+func TestAReconnectReleasesAHeldSender(t *testing.T) {
+	m := newRelayModel(t)
+	var got seqLog
+	a, _ := joinPair(t, m, &got, relayTiming{retry: time.Hour})
+	m.stall("endpoint-b", true)
+	sent := make(chan struct{})
+	go func() {
+		defer close(sent)
+		for seq := uint64(1); seq < relayTestLoad+1; seq++ {
+			if a.Send(relayFrame(seq)) != nil {
+				return
+			}
+		}
+	}()
+	waitUntil(t, 5*time.Second, "the sender was never held", func() bool { return relayHeld(a, "") })
+	// What reconnect does to the session before it rejoins.
+	a.localEpoch.Store(0xA1A1A1A1)
+	a.peerEpoch.Store(0)
+	a.resetPeerEpochs()
+	a.drainSendQueue()
+	closedWithin(t, sent, 5*time.Second, "a reconnect did not release the held sender")
+}
+
 // sessionConn carries a byte stream over a session the way muxconn carries
 // smux: a Write is one frame, a frame received is one read's worth.
 type sessionConn struct {
