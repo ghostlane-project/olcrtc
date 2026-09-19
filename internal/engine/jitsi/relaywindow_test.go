@@ -299,6 +299,15 @@ func joinPair(t *testing.T, m *relayModel, got *seqLog, timing ...relayTiming) (
 	return a, b
 }
 
+// relayHeld reports whether the window toward key is on and full, without
+// the side effects of relayRoom.
+func relayHeld(s *Session, key string) bool {
+	s.relayMu.Lock()
+	defer s.relayMu.Unlock()
+	st := s.relayWin[key]
+	return st != nil && st.active && st.sent-st.echoed >= relayWindow
+}
+
 func closedWithin(t *testing.T, ch <-chan struct{}, within time.Duration, what string) {
 	t.Helper()
 	select {
@@ -373,18 +382,7 @@ func TestAPeerThatStopsEchoingIsLetGo(t *testing.T) {
 func TestAStalledPeerDoesNotHoldAnother(t *testing.T) {
 	m := newRelayModel(t)
 	var got1, got2 seqLog
-	srv := m.join("endpoint-srv", 0xA0A0A0A0, nil, func(string, []byte) {})
-	b1 := m.join("endpoint-b1", 0xB1B1B1B1, got1.onData, nil)
-	b2 := m.join("endpoint-b2", 0xB2B2B2B2, got2.onData, nil)
-	for _, b := range []*Session{b1, b2} {
-		b.peerEpoch.Store(srv.localEpoch.Load())
-		if err := b.Send([]byte("hello")); err != nil {
-			t.Fatal(err)
-		}
-	}
-	waitUntil(t, 2*time.Second, "the server never learned its clients", func() bool {
-		return srv.echoerEpoch("endpoint-b1") != 0 && srv.echoerEpoch("endpoint-b2") != 0
-	})
+	srv, _, _ := joinServerTwoClients(t, m, &got1, &got2)
 	to := func(peer string) func([]byte) error {
 		return func(frame []byte) error { return srv.SendTo(peer, frame) }
 	}
@@ -414,6 +412,27 @@ func TestAStalledPeerDoesNotHoldAnother(t *testing.T) {
 	}
 }
 
+// joinServerTwoClients opens a server in peer mode and two clients that
+// have said hello to it, so the server knows both clients' epochs.
+func joinServerTwoClients(
+	t *testing.T, m *relayModel, got1, got2 *seqLog, timing ...relayTiming,
+) (*Session, *Session, *Session) {
+	t.Helper()
+	srv := m.join("endpoint-srv", 0xA0A0A0A0, nil, func(string, []byte) {}, timing...)
+	b1 := m.join("endpoint-b1", 0xB1B1B1B1, got1.onData, nil)
+	b2 := m.join("endpoint-b2", 0xB2B2B2B2, got2.onData, nil)
+	for _, b := range []*Session{b1, b2} {
+		b.peerEpoch.Store(srv.localEpoch.Load())
+		if err := b.Send([]byte("hello")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waitUntil(t, 2*time.Second, "the server never learned its clients", func() bool {
+		return srv.echoerEpoch("endpoint-b1") != 0 && srv.echoerEpoch("endpoint-b2") != 0
+	})
+	return srv, b1, b2
+}
+
 // relayFrames records what a session puts on the bridge.
 type relayFrames struct {
 	mu     sync.Mutex
@@ -438,6 +457,14 @@ func windowMessage(t *testing.T, from string, f windowFrame) j.BridgeMessage {
 	return makeBridgeMessageFrom(from, map[string]any{
 		"msgPayload": map[string]any{"raw": encodeForTest(t, f.encode())},
 	})
+}
+
+// echoFrom delivers an echo of counter from endpoint from under epoch.
+func echoFrom(t *testing.T, js *Session, from string, epoch uint32, counter uint64) {
+	t.Helper()
+	js.deliverBridgeMessage(windowMessage(t, from, windowFrame{
+		kind: windowEcho, senderEpoch: epoch, receiverEpoch: js.localEpoch.Load(), counter: counter,
+	}), true)
 }
 
 // Marks and echoes are the window's alone: none reaches onData, a mark is
@@ -508,6 +535,64 @@ func TestConfirmingAnotherPeerStartsTheWindowOver(t *testing.T) {
 	}
 	if ok, _, _ := js.relayRoom("", time.Now()); !ok {
 		t.Fatal("a window kept for the old peer holds the sender to a new one")
+	}
+}
+
+// A late echo can turn a client's window on after drainPeerQueues let a
+// frame to that client through and while sendLoop still waits to put it on
+// the bridge, here behind a backlog. The frame goes out as it was let
+// through: waiting for the window again would hold the server's only
+// sendLoop, and every other client with it, until the stalled client's
+// window is let go as dead.
+func TestALateEchoDoesNotHoldTheServerForAnother(t *testing.T) {
+	m := newRelayModel(t)
+	var lose atomic.Bool
+	lose.Store(true)
+	var firstMark atomic.Uint64
+	m.dropWindow = func(from string, frame []byte) bool {
+		if f, ok := parseWindowFrame(frame); ok && from == "endpoint-srv" && f.kind == windowMark {
+			firstMark.CompareAndSwap(0, f.counter)
+		}
+		return from == "endpoint-b1" && lose.Load()
+	}
+	var got1, got2 seqLog
+	srv, _, _ := joinServerTwoClients(t, m, &got1, &got2, relayTiming{probe: 20 * time.Millisecond, dead: 3 * time.Second})
+	to := func(peer string) func([]byte) error {
+		return func(frame []byte) error { return srv.SendTo(peer, frame) }
+	}
+	// Just over 1 MiB past the first frame to b1 while its echoes are lost:
+	// its window stays off, and the relay holds all of it whether b1 reads
+	// it in time or not.
+	const n = relayWindow/relayTestFrame + 4
+	sendFrames(t, to("endpoint-b1"), 0, n)
+	waitUntil(t, 5*time.Second, "b1 never got its frames", func() bool { return got1.count() == n })
+
+	// sendLoop takes b1's next frame and waits behind a backlog with it.
+	var backlog, waiting atomic.Bool
+	backlog.Store(true)
+	srv.backlogGauge = func() int {
+		if backlog.Load() {
+			waiting.Store(true)
+			return 1 << 30
+		}
+		return 0
+	}
+	go sendFrames(t, to("endpoint-b1"), n, n+1)
+	waitUntil(t, 2*time.Second, "sendLoop never waited behind the backlog", waiting.Load)
+	// b1's leg stalls, and a late echo of the first mark turns its window
+	// on with over 1 MiB in flight.
+	m.stall("endpoint-b1", true)
+	echoFrom(t, srv, "endpoint-b1", 0xB1B1B1B1, firstMark.Load())
+	if !relayHeld(srv, "endpoint-b1") {
+		t.Fatal("the late echo did not turn b1's window on full")
+	}
+	backlog.Store(false)
+
+	start := time.Now()
+	go sendFrames(t, to("endpoint-b2"), 0, 4)
+	waitUntil(t, 10*time.Second, "b2 never got its frames", func() bool { return got2.count() == 4 })
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("b2's 4 frames took %v: the stalled b1 held the server's sendLoop", d.Round(time.Millisecond))
 	}
 }
 
