@@ -398,6 +398,62 @@ func TestAPeerThatStopsEchoingIsLetGo(t *testing.T) {
 	closedWithin(t, sent, 5*time.Second, "the sender stayed held by a peer that never answers again")
 }
 
+// Both directions windowed at once, both legs stalled together, then both
+// resumed: nothing is lost and neither side wedges. Traffic goes both ways
+// until both windows are on, as a session's handshake does: a side's first
+// echo may reach it before the other side's first frame has named its
+// endpoint and then counts for nothing, and a later mark turns it on.
+func TestBothLegsStallAtOnce(t *testing.T) {
+	m := newRelayModel(t)
+	var gotA, gotB seqLog
+	timing := relayTiming{probe: 10 * time.Millisecond}
+	a := m.join("endpoint-a", 0xA0A0A0A0, gotA.onData, nil, timing)
+	b := m.join("endpoint-b", 0xB0B0B0B0, gotB.onData, nil, timing)
+	a.peerEpoch.Store(b.localEpoch.Load())
+	b.peerEpoch.Store(a.localEpoch.Load())
+	warm := uint64(0)
+	for deadline := time.Now().Add(5 * time.Second); !relayActive(a, "") || !relayActive(b, ""); warm++ {
+		if time.Now().After(deadline) {
+			t.Fatal("the windows never turned on")
+		}
+		sendFrames(t, a.Send, warm, warm+1)
+		sendFrames(t, b.Send, warm, warm+1)
+		time.Sleep(20 * time.Millisecond)
+	}
+	waitUntil(t, 2*time.Second, "the warm-up frames never arrived", func() bool {
+		return gotA.count() == int(warm) && gotB.count() == int(warm) //nolint:gosec // a few frames
+	})
+
+	m.stall("endpoint-a", true)
+	m.stall("endpoint-b", true)
+	doneA, doneB := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(doneA)
+		sendFrames(t, a.Send, warm, warm+relayTestLoad)
+	}()
+	go func() {
+		defer close(doneB)
+		sendFrames(t, b.Send, warm, warm+relayTestLoad)
+	}()
+	time.Sleep(300 * time.Millisecond)
+	m.stall("endpoint-a", false)
+	m.stall("endpoint-b", false)
+	closedWithin(t, doneA, 10*time.Second, "a wedged")
+	closedWithin(t, doneB, 10*time.Second, "b wedged")
+	total := int(warm) + relayTestLoad //nolint:gosec // a few frames
+	waitUntil(t, 10*time.Second, "the receivers never caught up", func() bool {
+		return gotA.count()+int(m.dropped.Load()) >= total && gotB.count()+int(m.dropped.Load()) >= total
+	})
+	if n := m.dropped.Load(); n != 0 {
+		t.Fatalf("the relay dropped %d frames", n)
+	}
+	for i, got := range []*seqLog{&gotA, &gotB} {
+		if at, ok := got.inOrder(0, total); !ok {
+			t.Fatalf("side %d: frames depart from the order sent at %d", i+1, at)
+		}
+	}
+}
+
 // A server holds one window per client: a client whose leg stalls holds
 // its own frames back and nobody else's.
 func TestAStalledPeerDoesNotHoldAnother(t *testing.T) {
