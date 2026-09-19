@@ -22,11 +22,21 @@ func (l observedLink) PeerSeen() bool    { return l.seen }
 func (l observedLink) Send([]byte) error { return nil }
 func (l observedLink) CanSend() bool     { return true }
 
+// Features is read when a conn is built over the link (olcrtc#11).
+//
+// ai-generated: this method.
+func (observedLink) Features() transport.Features { return transport.Features{} }
+
 // plainLink has no PeerObserver at all.
 type plainLink struct{ transport.Transport }
 
 func (plainLink) Send([]byte) error { return nil }
 func (plainLink) CanSend() bool     { return true }
+
+// Features is read when a conn is built over the link (olcrtc#11).
+//
+// ai-generated: this method.
+func (plainLink) Features() transport.Features { return transport.Features{} }
 
 func newClassifyClient(t *testing.T, seen, withObserver bool) (*Client, *muxconn.Conn) {
 	t.Helper()

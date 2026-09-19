@@ -26,6 +26,7 @@ type stubLink struct {
 	sent      [][]byte
 	peerSent  map[string][][]byte
 	canSendFn func() bool
+	features  transport.Features
 }
 
 func (s *stubLink) Connect(context.Context) error   { return nil }
@@ -35,7 +36,7 @@ func (s *stubLink) SetShouldReconnect(func() bool)  {}
 func (s *stubLink) SetEndedCallback(func(string))   {}
 func (s *stubLink) WatchConnection(context.Context) {}
 func (s *stubLink) Reconnect(string)                {}
-func (s *stubLink) Features() transport.Features    { return transport.Features{} }
+func (s *stubLink) Features() transport.Features    { return s.features }
 func (s *stubLink) Send(data []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
