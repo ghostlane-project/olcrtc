@@ -249,13 +249,7 @@ func waitUntil(t *testing.T, within time.Duration, what string, cond func() bool
 func TestAStalledReceiverLosesNothingAtTheRelay(t *testing.T) {
 	m := newRelayModel(t)
 	var got seqLog
-	b := m.join("endpoint-b", 0xB0B0B0B0, got.onData, nil)
-	a := m.join("endpoint-a", 0xA0A0A0A0, func([]byte) {}, nil)
-	a.peerEpoch.Store(b.localEpoch.Load())
-
-	// The handshake a tunnel does before any load, over a leg that is up.
-	sendFrames(t, a.Send, 0, 1)
-	waitUntil(t, 2*time.Second, "the first frame never arrived", func() bool { return got.count() == 1 })
+	a, _ := joinPair(t, m, &got)
 
 	m.stall("endpoint-b", true)
 	sent := make(chan struct{})
@@ -286,10 +280,10 @@ func TestAStalledReceiverLosesNothingAtTheRelay(t *testing.T) {
 	}
 }
 
-// joinPair opens a receiver b and a sender a that has confirmed b, as a
+// openPair opens a receiver b and a sender a that has confirmed b, as a
 // client has confirmed its server, and passes one frame over the open leg
 // first, the handshake a tunnel does before any load.
-func joinPair(t *testing.T, m *relayModel, got *seqLog, timing ...relayTiming) (*Session, *Session) {
+func openPair(t *testing.T, m *relayModel, got *seqLog, timing ...relayTiming) (*Session, *Session) {
 	t.Helper()
 	b := m.join("endpoint-b", 0xB0B0B0B0, got.onData, nil)
 	a := m.join("endpoint-a", 0xA0A0A0A0, func([]byte) {}, nil, timing...)
@@ -297,6 +291,24 @@ func joinPair(t *testing.T, m *relayModel, got *seqLog, timing ...relayTiming) (
 	sendFrames(t, a.Send, 0, 1)
 	waitUntil(t, 2*time.Second, "the first frame never arrived", func() bool { return got.count() == 1 })
 	return a, b
+}
+
+// joinPair is openPair that returns once the sender's window is on. The
+// first frame arriving is not enough: the echo that turns the window on is
+// still on its way then, and a test that stalls the receiver or loses its
+// echoes before it lands has a sender no window holds.
+func joinPair(t *testing.T, m *relayModel, got *seqLog, timing ...relayTiming) (*Session, *Session) {
+	t.Helper()
+	a, b := openPair(t, m, got, timing...)
+	waitUntil(t, 2*time.Second, "the sender's window never turned on", func() bool { return relayActive(a, "") })
+	return a, b
+}
+
+func relayActive(s *Session, key string) bool {
+	s.relayMu.Lock()
+	defer s.relayMu.Unlock()
+	st := s.relayWin[key]
+	return st != nil && st.active
 }
 
 // relayHeld reports whether the window toward key is on and full, without
@@ -324,7 +336,7 @@ func TestAPeerThatNeverEchoesIsSentToAsBefore(t *testing.T) {
 	m := newRelayModel(t)
 	m.dropWindow = func(string, []byte) bool { return true }
 	var got seqLog
-	a, _ := joinPair(t, m, &got)
+	a, _ := openPair(t, m, &got)
 	m.stall("endpoint-b", true)
 	sent := make(chan struct{})
 	go func() {
@@ -390,6 +402,9 @@ func TestAStalledPeerDoesNotHoldAnother(t *testing.T) {
 	sendFrames(t, to("endpoint-b2"), 0, 1)
 	waitUntil(t, 2*time.Second, "the first frames never arrived", func() bool {
 		return got1.count() == 1 && got2.count() == 1
+	})
+	waitUntil(t, 2*time.Second, "the server's windows never turned on", func() bool {
+		return relayActive(srv, "endpoint-b1") && relayActive(srv, "endpoint-b2")
 	})
 
 	m.stall("endpoint-b1", true)
@@ -739,6 +754,7 @@ func TestSixPullsThroughAStallingRelayArriveWhole(t *testing.T) {
 	if err := readPull(warm); err != nil {
 		t.Fatalf("the first pull, before any stall: %v", err)
 	}
+	waitUntil(t, 2*time.Second, "the server's window never turned on", func() bool { return relayActive(srv, "") })
 
 	m.stall("endpoint-cli", true)
 	errs := make(chan error, 6)
