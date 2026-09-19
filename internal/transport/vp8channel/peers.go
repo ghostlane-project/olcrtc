@@ -68,7 +68,11 @@ type peerSession struct {
 	lastSeen int64
 
 	// retired is set when the server's session on this epoch has ended and
-	// cleared by the next send, which means a new one owns it.
+	// cleared by the next control-plane send, which only a server session
+	// talking to the peer makes: its welcome, then its liveness pings. A
+	// data-plane send proves nothing: a late data frame rebuilds a server
+	// session that waits for a handshake that never comes, and its smux
+	// keepalive writes all the same.
 	// ai-generated: the field and its comment.
 	retired atomic.Bool
 }
@@ -91,7 +95,8 @@ func (s *peerSession) touch(now time.Time) {
 	s.lastSeen = now.UnixNano()
 }
 
-// claim marks the epoch as owned by a server session again.
+// claim marks the epoch as owned by a server session again. Only the control
+// send path calls it; see retired.
 // ai-generated: the whole method.
 func (s *peerSession) claim() {
 	if s.retired.Load() {

@@ -108,19 +108,30 @@ func TestRetirePeerKeepsAnEpochStillHeard(t *testing.T) {
 	}
 }
 
-// ai-generated: a send from a new server session claims an ended epoch back, so
-// only the idle TTL applies to it again.
-func TestSendClaimsAnEndedEpoch(t *testing.T) {
+// ai-generated: a control send (a new session's welcome or ping) claims an ended
+// epoch back, so only the idle TTL applies to it again; a data send, which a
+// session rebuilt from a late frame makes with its smux keepalive, does not.
+func TestOnlyAControlSendClaimsAnEndedEpoch(t *testing.T) {
 	p := releaseTestTransport(t)
 	p.peerSessionFor(2)
+	p.peerControlFor(2)
+	p.peerSessionFor(3)
 	p.RetirePeer(formatPeerID(2))
-	if err := p.SendTo(formatPeerID(2), []byte("welcome")); err != nil {
+	p.RetirePeer(formatPeerID(3))
+	if err := p.ControlSendTo(formatPeerID(2), []byte("welcome")); err != nil {
+		t.Fatalf("ControlSendTo: %v", err)
+	}
+	if err := p.SendTo(formatPeerID(3), []byte("keepalive")); err != nil {
 		t.Fatalf("SendTo: %v", err)
 	}
 	silence(p, 2, 2*retiredPeerIdle)
+	silence(p, 3, 2*retiredPeerIdle)
 	p.peers.sweep(peerIdleTTL, retiredPeerIdle)
 	if p.peers.lookup(2) == nil {
-		t.Fatal("a claimed epoch was released on the ended-session timeout")
+		t.Fatal("an epoch claimed by a control send was released on the ended-session timeout")
+	}
+	if p.peers.lookup(3) != nil {
+		t.Fatal("a data send claimed an ended epoch")
 	}
 }
 
