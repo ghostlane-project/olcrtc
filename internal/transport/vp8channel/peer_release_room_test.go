@@ -293,14 +293,18 @@ func TestServerReleasesDepartedClientEpochs(t *testing.T) {
 	}
 	srv := room.server.Load()
 	// Released on the spot when the epoch was already silent, else by the
-	// sweep once it is.
-	deadline := time.Now().Add(peerSweepInterval + retiredPeerIdle + 5*time.Second)
+	// sweep once it is. A client whose CLOSE reached the server leaves a late
+	// data frame behind often enough, and the session that frame rebuilds
+	// waits 60 s for a handshake: the bound stays well under that.
+	start := time.Now()
+	deadline := start.Add(peerSweepInterval + retiredPeerIdle + 15*time.Second)
 	for srv.peers.len() > 0 {
 		if time.Now().After(deadline) {
 			t.Fatalf("the transport still holds %d departed epochs", srv.peers.len())
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+	t.Logf("departed epochs released %s after the last session closed", time.Since(start).Round(100*time.Millisecond))
 }
 
 // TestClientRetryOnTheSameEpochRecovers: after a provider rebuild the client
