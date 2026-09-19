@@ -24,8 +24,8 @@ var (
 // gozxing's pure-barcode search takes it for the symbol's corner and finds no
 // code. Drawn to fill a 1920x1080 frame, the symbol of every whole fragment
 // had 15 px modules and not one of those frames decoded (olcrtc#13). With the
-// edges on the block grid every block is flat, the encoder codes it exactly,
-// and the frame is a third of the size.
+// edges on the block grid every block is flat and the encoder codes it
+// exactly.
 //
 // ai-generated: this constant and its note.
 const qrBlock = 4
@@ -198,21 +198,21 @@ func renderQR(c *grqr.Codec, payload []byte, width, height int) ([]byte, error) 
 }
 
 // qrPlacement is where a symbol modules wide goes in a width x height frame:
-// the side of a module and the symbol's top-left corner. The side is the
-// largest multiple of qrBlock the frame holds and the corner is on the qrBlock
-// grid, so no transform block straddles a module edge; a symbol too dense for
-// that keeps the largest side that fits, and one that does not fit at a pixel
-// a module gets a side of 0.
+// the side of a module and the symbol's top-left corner, on the qrBlock grid
+// so no transform block straddles a module edge. A module is one block, the
+// smallest side the codec keeps exact: the providers forward VP8 as it was
+// sent, so the symbol only has to survive the codec, and the less of the
+// frame it covers, the fewer bytes and RTP packets the frame takes. A whole
+// fragment at 1920x1080 is 12 KB this way, 31 KB at the largest aligned side.
+// A symbol too dense for a block a module keeps the largest side that fits,
+// and one that does not fit at a pixel a module gets a side of 0.
 //
 // ai-generated: the whole function.
 func qrPlacement(modules, width, height int) (int, int, int) {
 	if modules <= 0 {
 		return 0, 0, 0
 	}
-	scale := min(width, height) / modules
-	if scale >= qrBlock {
-		scale -= scale % qrBlock
-	}
+	scale := min(qrBlock, min(width, height)/modules)
 	if scale == 0 {
 		return 0, 0, 0
 	}
