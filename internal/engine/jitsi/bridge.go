@@ -168,6 +168,8 @@ func (s *Session) wakePeerSender() {
 }
 
 func (s *Session) sendLoop() {
+	// ai-generated: the retry timer, for peers the relay window holds.
+	var retry <-chan time.Time
 	for {
 		select {
 		case <-s.done:
@@ -178,16 +180,32 @@ func (s *Session) sendLoop() {
 			}
 			s.sendBridgeFrame("", data)
 		case <-s.peerWake:
-			s.drainPeerQueues()
+			retry = s.drainPeerQueuesRetry()
+		case <-retry:
+			retry = s.drainPeerQueuesRetry()
 		}
 	}
 }
 
+// drainPeerQueuesRetry drains the peer queues and, when the relay window held
+// some back, says when to look again: probes and the dead check run on this
+// side, so a held peer needs a visit even when nothing wakes the loop.
+//
+// ai-generated: added for the relay window (olcrtc#15).
+func (s *Session) drainPeerQueuesRetry() <-chan time.Time {
+	if !s.drainPeerQueues() {
+		return nil
+	}
+	return time.After(relayRetry)
+}
+
 // drainPeerQueues sends one frame per peer per pass, round-robin, until
-// every peer queue is empty, serving the broadcast queue between peers so a
-// busy room does not starve it. Queues nobody has touched for peerQueueIdle
-// and nobody holds are dropped at the end.
-func (s *Session) drainPeerQueues() {
+// every peer queue is empty or held by its relay window, serving the
+// broadcast queue between peers so a busy room does not starve it. A peer
+// the window holds keeps its frames and is skipped, so one stalled receiver
+// does not hold the others. Queues nobody has touched for peerQueueIdle and
+// nobody holds are dropped at the end. Reports whether a window held any.
+func (s *Session) drainPeerQueues() bool {
 	for {
 		s.peerQueueMu.Lock()
 		peers := make([]string, 0, len(s.peerQueues))
@@ -198,18 +216,23 @@ func (s *Session) drainPeerQueues() {
 		}
 		s.peerQueueMu.Unlock()
 
-		progressed := false
+		progressed, held := false, false
 		for i, pq := range queues {
 			select {
 			case <-s.done:
-				return
+				return false
 			default:
 			}
-			select {
-			case data := <-pq.ch:
-				s.sendBridgeFrame(peers[i], data)
-				progressed = true
-			default:
+			// ai-generated: the relay window check (olcrtc#15).
+			if len(pq.ch) > 0 && !s.relayReady(peers[i]) {
+				held = true
+			} else {
+				select {
+				case data := <-pq.ch:
+					s.sendBridgeFrame(peers[i], data)
+					progressed = true
+				default:
+				}
 			}
 			select {
 			case data := <-s.sendQueue:
@@ -219,7 +242,7 @@ func (s *Session) drainPeerQueues() {
 		}
 		if !progressed {
 			s.reapPeerQueues()
-			return
+			return held
 		}
 	}
 }
@@ -231,6 +254,10 @@ func (s *Session) reapPeerQueues() {
 	for id, pq := range s.peerQueues {
 		if pq.refs == 0 && len(pq.ch) == 0 && pq.lastUsed.Before(cutoff) {
 			delete(s.peerQueues, id)
+			// ai-generated: the peer's relay window goes with its queue.
+			s.relayMu.Lock()
+			delete(s.relayWin, id)
+			s.relayMu.Unlock()
 		}
 	}
 }
@@ -239,19 +266,38 @@ func (s *Session) sendBridgeFrame(to string, data []byte) {
 	if !s.outboundFrameCurrent(data) {
 		return
 	}
-	jSess := s.waitJSession()
-	if jSess == nil {
+	send := s.bridgeSender()
+	if send == nil {
 		return
 	}
-	if !s.waitBridgeRoom() || !s.outboundFrameCurrent(data) {
+	// ai-generated: the relay window wait and count (olcrtc#15).
+	if !s.waitBridgeRoom() || !s.waitRelayRoom(to, data) || !s.outboundFrameCurrent(data) {
 		return
 	}
-	if err := sendEndpointRaw(jSess, to, data); err != nil {
+	if err := send(to, data); err != nil {
 		if s.closed.Load() {
 			return
 		}
 		logger.Debugf("jitsi bridge send: %v", err)
+		return
 	}
+	s.relaySent(to, len(data))
+}
+
+// bridgeSender returns what puts a frame on the bridge: the live session's,
+// once there is one (waiting for a reconnect as sendLoop may), or the test
+// hook.
+//
+// ai-generated: the seam the relay tests drive two sessions through.
+func (s *Session) bridgeSender() func(to string, frame []byte) error {
+	if s.sendHook != nil {
+		return s.sendHook
+	}
+	jSess := s.waitJSession()
+	if jSess == nil {
+		return nil
+	}
+	return func(to string, frame []byte) error { return sendEndpointRaw(jSess, to, frame) }
 }
 
 // bridgeBacklog reports the bytes queued below sendLoop: the SCTP
@@ -333,17 +379,35 @@ func sendEndpointRaw(jSess *j.Session, to string, data []byte) error {
 	if br == nil {
 		return ErrBridgeNotReady
 	}
-	msg := endpointMessage{
+	if err := br.SendJSON(newEndpointMessage(to, data)); err != nil {
+		return fmt.Errorf("send endpoint message: %w", err)
+	}
+	return nil
+}
+
+// trySendEndpointRaw is sendEndpointRaw that never waits: a websocket bridge
+// with a full queue drops the message instead.
+//
+// ai-generated: added for the relay window's marks and echoes (olcrtc#15).
+func trySendEndpointRaw(jSess *j.Session, to string, data []byte) error {
+	br := jSess.Bridge()
+	if br == nil {
+		return ErrBridgeNotReady
+	}
+	if err := br.TrySendJSON(newEndpointMessage(to, data)); err != nil {
+		return fmt.Errorf("try send endpoint message: %w", err)
+	}
+	return nil
+}
+
+func newEndpointMessage(to string, data []byte) endpointMessage {
+	return endpointMessage{
 		ColibriClass: colibriClassEndpointMessage,
 		To:           to,
 		MsgPayload: endpointRawPayload{
 			Raw: base64.StdEncoding.EncodeToString(data),
 		},
 	}
-	if err := br.SendJSON(msg); err != nil {
-		return fmt.Errorf("send endpoint message: %w", err)
-	}
-	return nil
 }
 
 // setJSession installs a session and republishes the readiness signal used by
@@ -445,7 +509,12 @@ func (s *Session) deliverBridgeMessageGen(gen uint64, msg j.BridgeMessage, ok bo
 		}
 		return false
 	}
-	payload, valid := bridgePayload(msg)
+	raw := decodeRaw(msg)
+	// ai-generated: marks and echoes of the relay window (olcrtc#15).
+	if s.handleWindowFrame(msg.From, raw) {
+		return true
+	}
+	payload, valid := bridgePayload(raw)
 	if !valid {
 		return true
 	}
@@ -466,8 +535,7 @@ func (s *Session) deliverBridgeMessageGen(gen uint64, msg j.BridgeMessage, ok bo
 	return true
 }
 
-func bridgePayload(msg j.BridgeMessage) ([]byte, bool) {
-	payload := decodeRaw(msg)
+func bridgePayload(payload []byte) ([]byte, bool) {
 	if payload == nil {
 		return nil, false
 	}
