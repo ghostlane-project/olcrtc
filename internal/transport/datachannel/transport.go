@@ -4,6 +4,7 @@ package datachannel
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/openlibrecommunity/olcrtc/internal/engine"
 	"github.com/openlibrecommunity/olcrtc/internal/transport"
@@ -11,6 +12,18 @@ import (
 )
 
 const defaultMaxPayloadSize = 12 * 1024
+
+// writeInterval is the least time between two small messages of one tunnel
+// (see transport.Features.WriteInterval). The Jitsi bridge passes every
+// message an endpoint sends through a queue of 50 and drops the oldest when
+// forwarding falls behind, which it does for a moment whenever the receiving
+// endpoint is busy; one tiny message per smux frame turned a burst of new
+// streams into hundreds of messages and lost the acks of dozens of them
+// (olcrtc#11). At one message per 5 ms the bridge can stall for a quarter of
+// a second before it drops anything.
+//
+// ai-generated: this constant.
+const writeInterval = 5 * time.Millisecond
 
 // PeerResetter is satisfied so upper layers can clear the peer binding.
 var _ transport.PeerResetter = (*streamTransport)(nil)
@@ -182,5 +195,7 @@ func (p *streamTransport) WaitForPeer(ctx context.Context) error {
 // Features describes the current datachannel transport semantics.
 func (p *streamTransport) Features() transport.Features {
 	_, datagram := p.session.(engine.DatagramSession)
-	return p.shaper.Features(transport.Features{MaxPayloadSize: defaultMaxPayloadSize, Datagram: datagram})
+	return p.shaper.Features(transport.Features{
+		MaxPayloadSize: defaultMaxPayloadSize, Datagram: datagram, WriteInterval: writeInterval,
+	})
 }

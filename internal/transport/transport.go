@@ -45,6 +45,14 @@ type Features struct {
 	// Datagram reports whether the transport carries unordered, lossy
 	// datagrams next to the byte stream (see DatagramTransport).
 	Datagram bool
+	// WriteInterval asks the layer that seals frames into messages to leave
+	// at least this long between two small messages and to carry the frames
+	// written in between together in the next one. Zero sends every frame as
+	// its own message. A relay that drops messages when a sender outruns it
+	// needs it; muxconn says how it keeps bulk transfers unpaced.
+	//
+	// ai-generated: this field (olcrtc#11).
+	WriteInterval time.Duration
 }
 
 // ErrDatagramUnsupported is returned when a transport cannot send lossy datagrams.

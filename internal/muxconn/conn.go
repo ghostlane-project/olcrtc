@@ -13,7 +13,10 @@
 //   - Letting smux's sendLoop call Write once per frame; we encrypt and hand
 //     the whole buffer to the link as a single message. Length boundaries
 //     are preserved end-to-end by the transport (KCP length-prefix framing
-//     in vp8channel, native message boundaries in datachannel).
+//     in vp8channel, native message boundaries in datachannel). A link that
+//     asks for a write interval gets the small frames written close together
+//     in one message instead (see batcher); the peer reads a byte stream and
+//     cannot tell.
 package muxconn
 
 import (
@@ -98,8 +101,9 @@ const (
 
 	// The smux frame header, as xtaci/smux lays it out: version, command,
 	// little-endian length, little-endian stream id. smux writes every frame
-	// with one Write and Write seals every call as one record, so a record
-	// opened here is one frame and starts with this header.
+	// with one Write and a record carries whole frames, one or, from a
+	// batching sender, several, so a record opened here starts with this
+	// header.
 	smuxHeaderSize = 8
 	smuxCmdPSH     = 2
 )
@@ -199,6 +203,10 @@ type Conn struct {
 	// writeTimeout overrides writeReadyTimeout. Zero means the default;
 	// only tests set it.
 	writeTimeout time.Duration
+
+	// batch gathers small frames into shared records when the link asks for
+	// a write interval; nil sends every Write as its own record.
+	batch *batcher
 }
 
 func (c *Conn) sendDeadline() time.Duration {
@@ -216,7 +224,7 @@ func New(ln transport.Transport, keys *crypto.KeySet) *Conn {
 
 // NewGrouped is New with an explicit pin group (multi-key server paths).
 func NewGrouped(ln transport.Transport, g *PinGroup) *Conn {
-	return &Conn{
+	c := &Conn{
 		ln:      ln,
 		send:    ln.Send,
 		group:   g,
@@ -224,6 +232,8 @@ func NewGrouped(ln transport.Transport, g *PinGroup) *Conn {
 		in:      make(chan *[]byte, inboundQueue),
 		closeCh: make(chan struct{}),
 	}
+	c.startBatching(ln.Features())
+	return c
 }
 
 // NewControl wires a Conn that routes through the transport's isolated
@@ -259,7 +269,7 @@ func NewPeer(ln transport.PeerTransport, keys *crypto.KeySet, peerID string) *Co
 
 // NewPeerGrouped is NewPeer with an explicit pin group.
 func NewPeerGrouped(ln transport.PeerTransport, g *PinGroup, peerID string) *Conn {
-	return &Conn{
+	c := &Conn{
 		ln: ln,
 		send: func(data []byte) error {
 			return ln.SendTo(peerID, data)
@@ -269,6 +279,8 @@ func NewPeerGrouped(ln transport.PeerTransport, g *PinGroup, peerID string) *Con
 		in:      make(chan *[]byte, inboundQueue),
 		closeCh: make(chan struct{}),
 	}
+	c.startBatching(ln.Features())
+	return c
 }
 
 // NewPeerControlUnbound wires a Conn to the per-peer control plane of a
@@ -456,22 +468,26 @@ func (c *Conn) PayloadBytes() uint64 {
 	return c.payloadBytes.Load()
 }
 
-// streamPayloadLen returns the payload a plaintext record carries for a
-// stream: the data of a PSH frame with a non-zero stream id. SYN, FIN, NOP
-// and UPD frames, and anything that is not a smux frame at all, carry none.
-func streamPayloadLen(frame []byte) uint64 {
-	if len(frame) < smuxHeaderSize {
-		return 0
+// streamPayloadLen returns the payload a plaintext record carries for
+// streams: the data of its PSH frames with a non-zero stream id. SYN, FIN,
+// NOP and UPD frames, and anything that is not a smux frame at all, carry
+// none. A record holds whole frames, several from a batching sender.
+//
+// ai-generated: the walk over several frames (olcrtc#11).
+func streamPayloadLen(record []byte) uint64 {
+	var total uint64
+	for len(record) >= smuxHeaderSize {
+		version, cmd := record[0], record[1]
+		if version != 1 && version != 2 {
+			return total
+		}
+		body := min(int(binary.LittleEndian.Uint16(record[2:4])), len(record)-smuxHeaderSize)
+		if cmd == smuxCmdPSH && binary.LittleEndian.Uint32(record[4:8]) != 0 {
+			total += uint64(body) //nolint:gosec // body is non-negative
+		}
+		record = record[smuxHeaderSize+body:]
 	}
-	version, cmd := frame[0], frame[1]
-	if (version != 1 && version != 2) || cmd != smuxCmdPSH {
-		return 0
-	}
-	if binary.LittleEndian.Uint32(frame[4:8]) == 0 {
-		return 0
-	}
-	declared := int(binary.LittleEndian.Uint16(frame[2:4]))
-	return uint64(min(declared, len(frame)-smuxHeaderSize)) //nolint:gosec // both operands are non-negative
+	return total
 }
 
 // SendStalled reports whether a Write has waited out the whole send deadline
@@ -589,8 +605,18 @@ func (c *Conn) recycleIfDrained() {
 
 // Write encrypts p and ships it to the link as a single message. Blocks while
 // the link signals back-pressure, up to writeReadyTimeout, and until the
-// group knows which key the peer holds.
+// group knows which key the peer holds. On a link that asks for a write
+// interval, p joins the batch instead and Write blocks only while the batch
+// has no room for it; a failed send is reported by the Write after it.
 func (c *Conn) Write(p []byte) (int, error) {
+	if c.batch != nil {
+		return c.batch.add(p, c.closeCh)
+	}
+	return c.writeRecord(p)
+}
+
+// writeRecord seals p as one record and sends it.
+func (c *Conn) writeRecord(p []byte) (int, error) {
 	if err := c.waitSendReady(); err != nil {
 		if errors.Is(err, ErrWriteTimeout) {
 			c.writeStalls.Add(1)

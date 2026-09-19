@@ -161,6 +161,11 @@ func TestNewAndFeatures(t *testing.T) {
 	if features.MaxPayloadSize != defaultMaxPayloadSize {
 		t.Fatalf("Features() = %+v", features)
 	}
+	// ai-generated: the bridge relays a burst of tiny messages only if they
+	// are gathered (olcrtc#11).
+	if features.WriteInterval != writeInterval {
+		t.Fatalf("Features().WriteInterval = %v, want %v", features.WriteInterval, writeInterval)
+	}
 	if err := tr.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
