@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -213,5 +214,155 @@ func TestOpenControlStreamTimesOutWhenNobodyAnswers(t *testing.T) {
 		if _, err := stream.Read(make([]byte, 1)); err == nil {
 			t.Fatal("a hello stream was left open after the timeout")
 		}
+	}
+}
+
+// ai-generated: lateConn, newLatePair, serveLatePeer and the three tests
+// below (olcrtc#10: the reply window counted from before this side's own
+// path was open).
+
+// lateConn is the client's end of the path: a write waits until the path
+// opens, the way muxconn holds smux's sender until the transport can send,
+// which on Jitsi is when this side's bridge is open after ICE on the relay.
+type lateConn struct {
+	net.Conn
+	open   <-chan struct{}
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (c *lateConn) Write(p []byte) (int, error) {
+	select {
+	case <-c.open:
+		return c.Conn.Write(p)
+	case <-c.closed:
+		return 0, net.ErrClosed
+	}
+}
+
+func (c *lateConn) Close() error {
+	c.once.Do(func() { close(c.closed) })
+	return c.Conn.Close()
+}
+
+// newLatePair is newSmuxPair with the client's writes held until open closes.
+func newLatePair(t *testing.T, open <-chan struct{}) (*smux.Session, *smux.Session) {
+	t.Helper()
+	a, b := net.Pipe()
+	serverSess, err := smux.Server(a, testSmuxCfg())
+	if err != nil {
+		t.Fatalf("smux.Server() error = %v", err)
+	}
+	clientSess, err := smux.Client(&lateConn{Conn: b, open: open, closed: make(chan struct{})}, testSmuxCfg())
+	if err != nil {
+		t.Fatalf("smux.Client() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = clientSess.Close()
+		_ = serverSess.Close()
+		_ = a.Close()
+		_ = b.Close()
+	})
+	return serverSess, clientSess
+}
+
+// serveLatePeer is a server whose own side of the path opens at up: a hello
+// that reaches it earlier is lost on the way (the videobridge drops a message
+// for an endpoint whose channel is not open yet), so it is read and never
+// answered; the first one after up is.
+func serveLatePeer(sess *smux.Session, up time.Time, served chan<- error) {
+	for {
+		stream := acceptStream(sess)
+		if stream == nil {
+			served <- errors.New("no hello after the server came up")
+			return
+		}
+		if time.Now().Before(up) {
+			go func() { _, _ = io.Copy(io.Discard, stream) }()
+			continue
+		}
+		_, _, err := handshake.Server(stream, okAuth, "peer-1")
+		served <- err
+		return
+	}
+}
+
+// S6's 8 s leg in miniature: this side's path opens at 1.5 s, the server's
+// at 3.3 s, past a window counted from the start. The time this side spends
+// on its own path is not the peer's to answer in, so the window runs from
+// when the first hello could leave, and hellos keep going until it ends: two
+// of them reach the server before it does.
+func TestOpenControlStreamWindowStartsWhenItsPathOpens(t *testing.T) {
+	const (
+		timeout = 3 * time.Second
+		ownPath = 1500 * time.Millisecond
+		peerUp  = 3300 * time.Millisecond
+	)
+	setHelloResend(t, 500*time.Millisecond)
+	open := make(chan struct{})
+	serverSess, clientSess := newLatePair(t, open)
+	start := time.Now()
+	opener := time.AfterFunc(ownPath, func() { close(open) })
+	t.Cleanup(func() { opener.Stop() })
+	served := make(chan error, 1)
+	go serveLatePeer(serverSess, start.Add(peerUp), served)
+
+	stream, sessionID, peerID, err := openControlStreamTimeout(
+		context.Background(), clientSess, "dev", nil, timeout,
+	)
+	if err != nil {
+		t.Fatalf("openControlStreamTimeout() error = %v after %v; the peer came up %v after the path opened",
+			err, time.Since(start).Round(time.Millisecond), peerUp-ownPath)
+	}
+	defer func() { _ = stream.Close() }()
+	if sessionID != "sess-1" || peerID != "peer-1" {
+		t.Fatalf("openControlStreamTimeout() = (%q, %q), want (sess-1, peer-1)", sessionID, peerID)
+	}
+	if err := <-served; err != nil {
+		t.Fatalf("server handshake error = %v", err)
+	}
+}
+
+// A path that never opens (Jitsi starts no conference in an empty room, so
+// this side's bridge never comes up) fails at the timeout, as a timeout.
+func TestOpenControlStreamGivesUpOnAPathThatNeverOpens(t *testing.T) {
+	_, clientSess := newLatePair(t, make(chan struct{}))
+	start := time.Now()
+	done := make(chan error, 1)
+	go func() {
+		_, _, _, err := openControlStreamTimeout(context.Background(), clientSess, "dev", nil, 300*time.Millisecond)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		var netErr net.Error
+		if !errors.As(err, &netErr) || !netErr.Timeout() {
+			t.Fatalf("openControlStreamTimeout() error = %v, want a timeout", err)
+		}
+		if elapsed := time.Since(start); elapsed < 250*time.Millisecond {
+			t.Fatalf("gave up after %v, before the timeout", elapsed)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("still waiting 3s for a path that never opened, with a 300ms timeout")
+	}
+}
+
+func TestOpenControlStreamStopsOnContextCancelBeforeItsPathOpens(t *testing.T) {
+	_, clientSess := newLatePair(t, make(chan struct{}))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, _, _, err := openControlStreamTimeout(ctx, clientSess, "dev", nil, time.Hour)
+		done <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("openControlStreamTimeout() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the cancel did not end a wait for a path that never opened")
 	}
 }

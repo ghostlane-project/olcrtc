@@ -28,10 +28,16 @@ const peerWaitTimeout = handshake.DefaultTimeout
 // carries its own challenge and its reply comes back on the stream that sent
 // it, so the first welcome wins and the other streams are closed; a server
 // that answered the first one sees the later streams close unused.
-var helloResendInterval = 4 * time.Second //nolint:gochecknoglobals // tests shorten it
+//
+// ai-generated: this paragraph and the value (was 4 s). The interval is also
+// how long a hello can lag a server's channel that has just opened, since the
+// next one after it is the one that gets through: a late server is ready up
+// to an interval after it could be. 2 s is still several round trips through
+// the videobridge, and halves what a late server adds to a connect (olcrtc#10).
+var helloResendInterval = 2 * time.Second //nolint:gochecknoglobals // tests shorten it
 
 // maxHelloAttempts bounds the streams one handshake may open. At the default
-// interval and timeout that is four; the cap only matters to a caller that
+// interval and timeout that is seven; the cap only matters to a caller that
 // passes a long timeout.
 const maxHelloAttempts = 8
 
@@ -41,7 +47,8 @@ func (c *Client) bringUpLink(ctx context.Context, cfg Config, cancel context.Can
 	// takes reconnectMu too, and without serializing here it can install a fresh working session via
 	// retryHandshake while this call is still in flight, then get overwritten when this call finally
 	// reaches installPairLocked with its own, by-then-stale pair. Safe to hold: every step below is
-	// bounded by handshake.DefaultTimeout/peerWaitTimeout (15s each), not unbounded.
+	// bounded by handshake.DefaultTimeout/peerWaitTimeout (15s each, twice for the handshake: this
+	// side's path, then the reply), not unbounded.
 	c.reconnectMu.Lock()
 	defer c.reconnectMu.Unlock()
 	linkCfg := tunnelcore.BuildTransportConfig(tunnelcore.LinkConfig{
@@ -159,6 +166,18 @@ func openControlStream(
 	return openControlStreamTimeout(ctx, session, deviceID, claims, handshake.DefaultTimeout)
 }
 
+// openControlStreamTimeout sends the hellos and returns the stream the first
+// welcome came back on. timeout bounds two waits in turn: this side's path
+// taking the first hello, then the reply to it, with a hello again at every
+// helloResendInterval until then.
+//
+// ai-generated: the two waits and openFirst (olcrtc#10). The first stream
+// opens only once the path takes its SYN (smux writes it before OpenStream
+// returns, and muxconn holds that write until the transport can send), which
+// on Jitsi is when this side's bridge is open after ICE on the relay: seconds
+// on a slow one. A window counted from the start lost those seconds to the
+// peer: every hello went out before a server whose bridge opened 8 s after
+// ours was up, and the client gave up seconds after it was.
 func openControlStreamTimeout(
 	ctx context.Context,
 	session *smux.Session,
@@ -168,12 +187,14 @@ func openControlStreamTimeout(
 ) (*smux.Stream, string, string, error) {
 	race := &helloRace{
 		session: session, deviceID: deviceID, claims: claims,
-		deadline: time.Now().Add(timeout),
-		replies:  make(chan helloResult, maxHelloAttempts),
+		replies: make(chan helloResult, maxHelloAttempts),
 	}
-	if err := race.send(); err != nil {
+	first, err := race.openFirst(ctx, timeout)
+	if err != nil {
 		return nil, "", "", err
 	}
+	race.deadline = time.Now().Add(timeout)
+	race.start(first)
 	resend := time.NewTicker(helloResendInterval)
 	defer resend.Stop()
 	for {
@@ -211,11 +232,44 @@ type helloRace struct {
 	pending  int
 }
 
+// openFirst opens the first hello's stream, waiting at most timeout for this
+// side's path to take its SYN, and less if ctx ends. An OpenStream still
+// blocked when it gives up is released by the session, which the caller
+// closes on the error.
+//
+// ai-generated: the whole function (olcrtc#10).
+func (h *helloRace) openFirst(ctx context.Context, timeout time.Duration) (*smux.Stream, error) {
+	opened := make(chan helloResult, 1)
+	go func() {
+		stream, err := h.session.OpenStream()
+		opened <- helloResult{stream: stream, err: err}
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case r := <-opened:
+		if r.err != nil {
+			return nil, fmt.Errorf("open control stream: %w", r.err)
+		}
+		return r.stream, nil
+	case <-ctx.Done():
+		return nil, fmt.Errorf("handshake client: %w", ctx.Err())
+	case <-timer.C:
+		return nil, fmt.Errorf("open control stream: %w", smux.ErrTimeout)
+	}
+}
+
 func (h *helloRace) send() error {
 	stream, err := h.session.OpenStream()
 	if err != nil {
 		return fmt.Errorf("open control stream: %w", err)
 	}
+	h.start(stream)
+	return nil
+}
+
+// start sends a hello on an open stream and reads its reply off the loop.
+func (h *helloRace) start(stream *smux.Stream) {
 	h.streams = append(h.streams, stream)
 	h.pending++
 	_ = stream.SetDeadline(h.deadline)
@@ -223,7 +277,6 @@ func (h *helloRace) send() error {
 		sessionID, peerID, err := handshake.Client(stream, h.deviceID, h.claims)
 		h.replies <- helloResult{stream: stream, sessionID: sessionID, peerID: peerID, err: err}
 	}()
-	return nil
 }
 
 // resend sends another hello when the cap and the deadline allow it; a hello
