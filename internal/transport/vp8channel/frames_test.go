@@ -6,6 +6,7 @@ package vp8channel
 import (
 	"context"
 	"encoding/binary"
+	"math"
 	"math/rand/v2"
 	"sync"
 	"sync/atomic"
@@ -135,7 +136,7 @@ func newLossyTestTransport(t *testing.T, cfg transport.Config, relay *lossyRelay
 func TestDeliveryTrackJudgesABucketOnceALaterOneIsAnswered(t *testing.T) {
 	var track deliveryTrack
 	const at = 10_000 // ms, bucket 41
-	bucket := uint32(at/deliveryBucketMs + 1)
+	bucket := int64(at/deliveryBucketMs + 1)
 	for i := range uint32(8) {
 		track.count(at+i, 1, 0)
 	}
@@ -256,5 +257,74 @@ func TestStampsOfReadsTheLastPushAndAck(t *testing.T) {
 	hostile = append(hostile, segment(kcp.IKCP_CMD_PUSH, 10, "")...)
 	if st := stampsOf(hostile); st.pushed || !st.acked || st.ack != 9 {
 		t.Fatalf("stampsOf read past a length longer than the packet: %+v", st)
+	}
+}
+
+// judgeCleanPath drives a frame cap over a lossless path in steps of 50 ms: each
+// step pushes 20 packets stamped now, and every packet pushed a round trip
+// ago comes back acknowledged. It returns the lowest share judged and the cap
+// at the end.
+func judgeCleanPath(start uint32, steps int) (float64, int) {
+	const (
+		stepMs = 50
+		rttMs  = 150
+		n      = 20
+	)
+	var (
+		f     frameCap
+		track deliveryTrack
+	)
+	low, sent, ts := 1.0, map[uint32]int{}, start
+	for range steps {
+		for range n {
+			f.pushed(&track, ts)
+		}
+		sent[ts] = n
+		for range sent[ts-rttMs] {
+			track.count(ts-rttMs, 0, 1)
+		}
+		delete(sent, ts-rttMs)
+		if share, changed := f.judge(&track, 64); changed || share != 0 {
+			low = min(low, share)
+		}
+		ts += stepMs
+	}
+	return low, f.limit
+}
+
+// TestFrameCapKeepsFullFramesAcrossTheKCPClockWrap runs a lossless path over
+// the instant kcp-go's millisecond clock wraps, 49.7 days into a process.
+// Read as 32-bit numbers the timestamps after it fall behind the newest one
+// acknowledged before it, every bucket is judged before its acknowledgements
+// arrive, and the lane ends up capped at its smallest frame for the rest of
+// the session.
+func TestFrameCapKeepsFullFramesAcrossTheKCPClockWrap(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		start uint32
+	}{
+		{"away from the wrap", 1_000_000},
+		{"across the wrap", math.MaxUint32 - 5000},
+	} {
+		if low, limit := judgeCleanPath(tc.start, 600); limit != 0 {
+			t.Errorf("%s: a lossless path ends capped at %d packets a frame (lowest share judged %.2f)",
+				tc.name, limit, low)
+		}
+	}
+}
+
+func TestStampClockUnwrapsAcrossTheWrap(t *testing.T) {
+	var c stampClock
+	if got := c.unwrap(math.MaxUint32 - 100); got != math.MaxUint32-100 {
+		t.Fatalf("first stamp = %d, want it as it came", got)
+	}
+	if got, want := c.unwrap(50), int64(math.MaxUint32)+51; got != want {
+		t.Fatalf("a stamp past the wrap = %d, want %d", got, want)
+	}
+	if got, want := c.unwrap(math.MaxUint32-40), int64(math.MaxUint32)-40; got != want {
+		t.Fatalf("an older stamp = %d, want %d", got, want)
+	}
+	if c.newest != int64(math.MaxUint32)+51 {
+		t.Fatalf("newest = %d, want the newest stamp seen", c.newest)
 	}
 }

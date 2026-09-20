@@ -37,6 +37,28 @@ const (
 	kcpTSOff = 8
 )
 
+// stampClock turns kcp-go's timestamps, uint32 milliseconds that wrap every
+// 49.7 days, into a count that keeps rising: each stamp is read as the signed
+// difference from the newest one seen. Without it the bucket ids of a session
+// alive at the wrap fall behind the newest one acknowledged, every bucket
+// after it is judged before its acknowledgements are in, and the lane caps
+// its frames on a path that loses nothing.
+type stampClock struct {
+	newest int64
+	seen   bool
+}
+
+// unwrap is ts on the rising count.
+func (c *stampClock) unwrap(ts uint32) int64 {
+	if !c.seen {
+		c.newest, c.seen = int64(ts), true
+		return c.newest
+	}
+	at := c.newest + int64(int32(ts-uint32(c.newest))) //nolint:gosec // the signed difference is the point
+	c.newest = max(c.newest, at)
+	return at
+}
+
 // deliveryTrack counts the packets with a push a conn sends and the packets
 // of acknowledgements that come back for them, both under the timestamp of
 // the packet's last push: an acknowledgement echoes it. A conn acknowledges
@@ -47,41 +69,44 @@ const (
 // an earlier bucket has all it is going to get, whatever the round trip.
 type deliveryTrack struct {
 	mu        sync.Mutex
+	clock     stampClock
 	buckets   [32]deliveryBucket
-	newestAck uint32 // the bucket of the newest push acknowledged, zero for none
+	newestAck int64 // the bucket of the newest push acknowledged, zero for none
 }
 
-// deliveryBucket is one bucket of the count; id is the timestamp over
-// deliveryBucketMs plus one, zero for an unused bucket.
+// deliveryBucket is one bucket of the count; id is the unwrapped timestamp
+// over deliveryBucketMs plus one, zero for an unused bucket.
 type deliveryBucket struct {
-	id           uint32
+	id           int64
 	pushes, acks int
 }
 
-// count adds pushes and acknowledgements under the push timestamp ts. An
-// acknowledgement for a bucket already judged or reused is dropped.
-func (t *deliveryTrack) count(ts uint32, pushes, acks int) {
-	id := ts/deliveryBucketMs + 1
+// count adds pushes and acknowledgements under the push timestamp ts and
+// returns its bucket. An acknowledgement for a bucket already judged or
+// reused is dropped.
+func (t *deliveryTrack) count(ts uint32, pushes, acks int) int64 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if acks > 0 && (t.newestAck == 0 || int32(id-t.newestAck) > 0) { //nolint:gosec // wrapping timestamp difference
+	id := t.clock.unwrap(ts)/deliveryBucketMs + 1
+	if acks > 0 && id > t.newestAck {
 		t.newestAck = id
 	}
-	b := &t.buckets[id%uint32(len(t.buckets))]
+	b := &t.buckets[id%int64(len(t.buckets))]
 	if b.id != id {
-		if pushes == 0 || (b.id != 0 && int32(id-b.id) < 0) { //nolint:gosec // wrapping timestamp difference
-			return
+		if pushes == 0 || id < b.id {
+			return id
 		}
 		*b = deliveryBucket{id: id}
 	}
 	b.pushes += pushes
 	b.acks += acks
+	return id
 }
 
 // take clears the buckets from before the newest acknowledged one, which
 // have all they are going to get, and returns the pushes and
 // acknowledgements of those from the bucket id from on.
-func (t *deliveryTrack) take(from uint32) (int, int) {
+func (t *deliveryTrack) take(from int64) (int, int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	pushes, acks, before := 0, 0, t.newestAck
@@ -90,10 +115,10 @@ func (t *deliveryTrack) take(from uint32) (int, int) {
 	}
 	for i := range t.buckets {
 		b := &t.buckets[i]
-		if b.id == 0 || int32(before-b.id) <= 0 { //nolint:gosec // wrapping timestamp difference
+		if b.id == 0 || b.id >= before {
 			continue
 		}
-		if int32(b.id-from) >= 0 { //nolint:gosec // wrapping timestamp difference
+		if b.id >= from {
 			pushes += b.pushes
 			acks += b.acks
 		}
@@ -113,14 +138,13 @@ type frameCap struct {
 	// went out in, and since the first bucket whose pushes went out under
 	// the current limit. pushes and acks are the evidence gathered since.
 	limit         int
-	newest, since uint32
+	newest, since int64
 	pushes, acks  int
 }
 
 // pushed counts a packet with a push that went out under timestamp ts.
 func (f *frameCap) pushed(track *deliveryTrack, ts uint32) {
-	track.count(ts, 1, 0)
-	f.newest = ts/deliveryBucketMs + 1
+	f.newest = track.count(ts, 1, 0)
 }
 
 // forget drops the evidence gathered so far, and what was pushed before now:
