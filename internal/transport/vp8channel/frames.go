@@ -28,9 +28,17 @@ const (
 	// that stopped forwarding, which the lane's dark spells deal with, not
 	// loss. What a lane pushed before it came back from a dark spell is not
 	// weighed at all (forget).
+	//
+	// What a frame of k packets carries through a path that loses one in
+	// n goes as k*q^(1.17k), whose peak sits at a delivered share of 1/e:
+	// aiming higher than that trades away more in frame size than it wins
+	// back in deliveries, and on the 1-3% paths it measured 30-45% slower
+	// than no cap at all. The lane aims a little over the peak and leaves a
+	// wide band where it does not move at all, so the share it reads, which
+	// rests on a few frames, does not walk the cap about.
 	darkShare  = 0.02
-	lossyShare = 0.5
-	aimShare   = 0.65
+	lossyShare = 0.35
+	aimShare   = 0.40
 	cleanShare = 0.85
 
 	// kcpTSOff is where the timestamp sits in a KCP segment header.
