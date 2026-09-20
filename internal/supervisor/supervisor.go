@@ -28,6 +28,19 @@ const DefaultHistoryLimit = 20
 // ai-generated: the constant (review of olcrtc#39).
 const maxTrackedProfiles = 64
 
+// profileHeldFor is how long a profile has to run to count as one that
+// worked; maxRetryDelay and maxRetryBackoff bound the wait between passes
+// that did not. See profilePace. A profile that cannot connect ends in the
+// time its provider takes to give up, and one that gives up on an empty room
+// in about a handshake; a profile serving traffic runs for hours.
+//
+// ai-generated: the three (review of olcrtc#39).
+const (
+	profileHeldFor  = time.Minute
+	maxRetryDelay   = 5 * time.Minute
+	maxRetryBackoff = 8
+)
+
 const (
 	// EventProfileStart marks a profile attempt starting.
 	EventProfileStart = "profile_start"
@@ -100,7 +113,7 @@ type Config struct {
 	// empty or errored result keeps the last known list.
 	//
 	// ai-generated: the dynamic profile list (this field, profileList,
-	// indexAfter, passComplete and the name-keyed status tracker below).
+	// nextStep and the name-keyed status tracker below).
 	Reload func() ([]Profile, error)
 
 	RetryDelay time.Duration
@@ -114,15 +127,17 @@ type Config struct {
 
 // Run starts profiles in order. When a profile exits while ctx is still active,
 // the supervisor waits RetryDelay, re-reads the list when Reload is set, and
-// advances to the profile after the one that just ran - by name, wrapping to
-// the top. Advancing by name keeps a client following a rolling window: once
-// the room it just left is gone from the list, it lands on the new head.
+// advances to the profile after the one that just ran, wrapping to the top;
+// see nextStep for how it finds it. That keeps a client following a rolling
+// window: once the room it just left is gone from the list, it lands on the
+// new head, and no pass is counted for a list it never finished.
 //
 // MaxCycles counts completed passes over the profiles on offer, judged against
 // the list as reloaded after each profile ends. A list that grows while a
 // profile runs extends the current pass instead of waiting for the next one,
 // which is what lets a host hand a running client its next room with
-// MaxCycles set to 1: try everything I have been given, once.
+// MaxCycles set to 1: try everything I have been given, once. A pass in which
+// no profile held is followed by a longer wait; see profilePace.
 func Run(ctx context.Context, cfg Config, run Runner) error {
 	// A negative delay parses fine from YAML and waitRetryDelay treats it as
 	// "no wait", which turns failover into a busy loop against a profile that
@@ -130,6 +145,7 @@ func Run(ctx context.Context, cfg Config, run Runner) error {
 	if cfg.RetryDelay <= 0 {
 		cfg.RetryDelay = DefaultRetryDelay
 	}
+	pace := &profilePace{}
 	list := &profileList{current: append([]Profile(nil), cfg.Profiles...), reload: cfg.Reload}
 	if len(list.refresh()) == 0 {
 		return ErrNoProfiles
@@ -158,9 +174,13 @@ func Run(ctx context.Context, cfg Config, run Runner) error {
 
 		state.start(profile.Name, cycle, idx)
 		cfg.notifyStart(profile, cycle)
+		started := time.Now()
 		err := run(ctx, profile.Config)
 		if ctx.Err() != nil {
 			return nil //nolint:nilerr // context cancellation is normal supervisor shutdown
+		}
+		if time.Since(started) >= profileHeldFor {
+			pace.held()
 		}
 		resultErr := profileResultError(profile.Name, err)
 		state.end(profile.Name, cycle, err)
@@ -169,13 +189,48 @@ func Run(ctx context.Context, cfg Config, run Runner) error {
 		// Judged against the list as it is now, not as it was when this
 		// profile started. Checked before the retry delay, so a list with
 		// nowhere left to go fails fast.
-		if _, done := nextStep(list.refresh(), last); cfg.MaxCycles > 0 && cycle >= cfg.MaxCycles && done {
+		_, done := nextStep(list.refresh(), last)
+		if cfg.MaxCycles > 0 && cycle >= cfg.MaxCycles && done {
 			return fmt.Errorf("%w after %d cycle(s): %w", ErrMaxCyclesExceeded, cycle, resultErr)
 		}
-		if err := waitRetryDelay(ctx, cfg.RetryDelay); err != nil {
+		if err := waitRetryDelay(ctx, pace.wait(cfg.RetryDelay, done)); err != nil {
 			return nil //nolint:nilerr // context cancellation during retry delay is normal shutdown
 		}
 	}
+}
+
+// profilePace spaces out passes that produce nothing. Every profile of a pass
+// ending as fast as it can start is a client that is offline, or a server that
+// has left every room it was in, and at RetryDelay apiece that is a join of
+// the relay's room every few seconds for as long as olcrtc runs. A successful
+// rejoin never counts against a provider's own reconnect budget, so nothing
+// else bounds it - the same finding the client's recovery backoff came from
+// (olcrtc#19, review of #20). A profile that held is one that worked, and
+// clears the pacing, so a room retired after hours is followed at once.
+//
+// ai-generated: the whole type and its use (review of olcrtc#39).
+type profilePace struct {
+	deadCycles int
+	heldACycle bool
+}
+
+func (p *profilePace) held() { p.heldACycle = true }
+
+// wait is the pause before the next profile; passComplete says the pass just
+// ended, which is when the pacing is reconsidered.
+func (p *profilePace) wait(base time.Duration, passComplete bool) time.Duration {
+	if passComplete {
+		if p.heldACycle {
+			p.deadCycles = 0
+		} else {
+			p.deadCycles++
+		}
+		p.heldACycle = false
+	}
+	if p.deadCycles <= 0 {
+		return base
+	}
+	return min(base<<uint(min(p.deadCycles, maxRetryBackoff)), maxRetryDelay)
 }
 
 // lastProfile is where the walk is: the profile that ran last, by name and by

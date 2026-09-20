@@ -166,12 +166,19 @@ func TestNoteConnectFailureLatchesMissingIPv6(t *testing.T) {
 // ai-generated: the whole test (review of olcrtc#39).
 func TestOneDeadIPv6DestinationDoesNotLatchTheExit(t *testing.T) {
 	unreachable := &connectAckError{code: socksRepHostUnreachable}
+	// Two is the smallest run that is still "several"; the threshold has to
+	// be above it whatever else it is, or one shut port speaks for the exit.
+	if ipv6FailuresBeforeLatch < 3 {
+		t.Fatalf("ipv6FailuresBeforeLatch = %d, want at least 3", ipv6FailuresBeforeLatch)
+	}
 	c := &Client{}
-	for i := range ipv6FailuresBeforeLatch - 1 {
-		c.noteConnectFailure(unreachable, "2606:4700:4700::1111")
-		if c.noIPv6Route() {
-			t.Fatalf("the exit was judged IPv6-less after %d refusals", i+1)
-		}
+	c.noteConnectFailure(unreachable, "2606:4700:4700::1111")
+	if c.noIPv6Route() {
+		t.Fatal("one destination the exit could not reach was taken for the whole address family")
+	}
+	c.noteConnectFailure(unreachable, "2606:4700:4700::1112")
+	if c.noIPv6Route() {
+		t.Fatal("two destinations the exit could not reach were taken for the whole address family")
 	}
 	// A destination that answers says the ones before it were the problem.
 	c.noteConnectSuccess("2620:fe::fe")

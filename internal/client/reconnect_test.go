@@ -732,7 +732,7 @@ func TestOnlyARefusalEndsTheRound(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			wrapped := fmt.Errorf("handshake client: %w", tc.err)
-			classified := error(wrapped)
+			classified := wrapped
 			if tc.empty {
 				classified = fmt.Errorf("%w: %w", ErrNoPeer, wrapped)
 			}
