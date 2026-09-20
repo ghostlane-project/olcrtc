@@ -138,27 +138,27 @@ func TestDeliveryTrackJudgesABucketOnceALaterOneIsAnswered(t *testing.T) {
 	const at = 10_000 // ms, bucket 41
 	bucket := int64(at/deliveryBucketMs + 1)
 	for i := range uint32(8) {
-		track.count(at+i, 1, 0)
+		track.count(at+i, 1, 0, 0)
 	}
-	track.count(at+1, 0, 1)
-	track.count(at+7, 0, 1)
-	if pushes, acks := track.take(0); pushes != 0 || acks != 0 {
+	track.count(at+1, 0, 1, 0)
+	track.count(at+7, 0, 1, 0)
+	if pushes, acks, _ := track.take(0); pushes != 0 || acks != 0 {
 		t.Fatalf("take = %d pushes, %d acks before a later bucket was answered, want none judged", pushes, acks)
 	}
-	track.count(at+deliveryBucketMs, 1, 0)
-	track.count(at+deliveryBucketMs, 0, 1)
-	track.count(at-20*deliveryBucketMs, 0, 1) // an answer to a push no longer counted
-	if pushes, acks := track.take(0); pushes != 8 || acks != 2 {
+	track.count(at+deliveryBucketMs, 1, 0, 0)
+	track.count(at+deliveryBucketMs, 0, 1, 0)
+	track.count(at-20*deliveryBucketMs, 0, 1, 0) // an answer to a push no longer counted
+	if pushes, acks, _ := track.take(0); pushes != 8 || acks != 2 {
 		t.Fatalf("take = %d pushes, %d acks; want the first bucket's 8 and 2", pushes, acks)
 	}
-	track.count(at+2, 0, 1) // late, for a bucket already judged
-	track.count(at+2*deliveryBucketMs, 0, 1)
-	if pushes, acks := track.take(0); pushes != 1 || acks != 1 {
+	track.count(at+2, 0, 1, 0) // late, for a bucket already judged
+	track.count(at+2*deliveryBucketMs, 0, 1, 0)
+	if pushes, acks, _ := track.take(0); pushes != 1 || acks != 1 {
 		t.Fatalf("take = %d pushes, %d acks; want the next bucket's 1 and 1 and no late answer", pushes, acks)
 	}
-	track.count(at+3*deliveryBucketMs, 5, 5)
-	track.count(at+4*deliveryBucketMs, 0, 1)
-	if pushes, acks := track.take(bucket + 4); pushes != 0 || acks != 0 {
+	track.count(at+3*deliveryBucketMs, 5, 5, 0)
+	track.count(at+4*deliveryBucketMs, 0, 1, 0)
+	if pushes, acks, _ := track.take(bucket + 4); pushes != 0 || acks != 0 {
 		t.Fatalf("take = %d pushes, %d acks from before from, want them cleared, not counted", pushes, acks)
 	}
 }
@@ -169,36 +169,39 @@ func TestFrameCapShrinksOnLossAndGrowsBackWhenClean(t *testing.T) {
 		track deliveryTrack
 		ts    uint32 = 10_000
 	)
-	// judged pushes 100 packets in a bucket past the last judgement, of
-	// which answered come back, and has a later push answered so that the
-	// bucket is judged.
+	// judged pushes 100 packets in a bucket past the last judgement and the
+	// grow interval, of which answered come back, and has a later push
+	// answered so that the bucket is judged.
 	judged := func(answered int) (float64, bool) {
-		ts += 2 * deliveryBucketMs
+		ts += (frameGrowBuckets + 1) * deliveryBucketMs
 		for i := range 100 {
 			f.pushed(&track, ts)
+			if i%4 == 3 { // a frame of four packets
+				f.wrote(&track, ts)
+			}
 			if i < answered {
-				track.count(ts, 0, 1)
+				track.count(ts, 0, 1, 0)
 			}
 		}
-		track.count(ts+deliveryBucketMs, 0, 1)
+		track.count(ts+deliveryBucketMs, 0, 1, 0)
 		return f.judge(&track, 64)
 	}
 	if _, changed := judged(1); changed || f.limit != 0 {
 		t.Fatalf("limit = %d after a dark bucket, want the cap left to the dark spells", f.limit)
 	}
+	if _, changed := judged(20); changed || f.limit != 0 {
+		t.Fatalf("limit = %d after one lossy reading, want a second one before the frames shrink", f.limit)
+	}
 	if share, changed := judged(20); !changed || f.limit != shrunk(64, share) || f.limit > 32 {
-		t.Fatalf("limit = %d after %.0f%% came back, want %d", f.limit, share*100, shrunk(64, share))
+		t.Fatalf("limit = %d after %.0f%% came back twice, want %d", f.limit, share*100, shrunk(64, share))
 	}
 	limit := f.limit
-	if _, changed := judged(70); changed || f.limit != limit {
-		t.Fatalf("limit = %d after 70%% came back, want it kept at %d", f.limit, limit)
-	}
 	for limit != 0 {
 		if limit += max(limit/4, 1); limit >= 64 {
 			limit = 0
 		}
-		if _, changed := judged(95); !changed || f.limit != limit {
-			t.Fatalf("limit = %d after 95%% came back, want %d", f.limit, limit)
+		if _, changed := judged(70); !changed || f.limit != limit {
+			t.Fatalf("limit = %d after a reading that is not lossy, want %d, a quarter up", f.limit, limit)
 		}
 	}
 }
@@ -282,9 +285,10 @@ func judgeCleanPath(start uint32, steps int) (float64, int) {
 		for range n {
 			f.pushed(&track, ts)
 		}
+		f.wrote(&track, ts)
 		sent[ts] = n
 		for range sent[ts-rttMs] {
-			track.count(ts-rttMs, 0, 1)
+			track.count(ts-rttMs, 0, 1, 0)
 		}
 		delete(sent, ts-rttMs)
 		if share, changed := f.judge(&track, 64); changed || share != 0 {
@@ -313,6 +317,26 @@ func TestFrameCapKeepsFullFramesAcrossTheKCPClockWrap(t *testing.T) {
 			t.Errorf("%s: a lossless path ends capped at %d packets a frame (lowest share judged %.2f)",
 				tc.name, limit, low)
 		}
+	}
+}
+
+// TestDeliveryTrackJudgesTheWrappedBucketsInOrder is the tracker side of the
+// same wrap: read as 32-bit numbers, the buckets after it fall behind the
+// newest one answered before it, so the newest answered pins there and every
+// bucket after the wrap is judged the moment it is counted, before its
+// answers are back.
+func TestDeliveryTrackJudgesTheWrappedBucketsInOrder(t *testing.T) {
+	var track deliveryTrack
+	before := uint32(math.MaxUint32 - 100)
+	track.count(before, 1, 0, 1) // a push, answered, just before the wrap
+	track.count(before, 0, 1, 0)
+	track.count(50, 1, 0, 1) // a push after it, answered
+	track.count(50, 0, 1, 0)
+	track.count(300, 1, 0, 1) // and one still on its way
+	pushes, acks, _ := track.take(0)
+	if pushes != 1 || acks != 1 {
+		t.Fatalf("take = %d pushes, %d acks across the wrap, want the one bucket answered before it: "+
+			"a bucket after the wrap must wait for a later answer like any other", pushes, acks)
 	}
 }
 

@@ -198,7 +198,7 @@ func (c *kcpConn) deliver(payload []byte) {
 		c.lastAck.Store(monoNow())
 	}
 	if st := stampsOf(body); st.acked { // ai-generated: issue #12
-		c.delivery.count(st.ack, 0, 1)
+		c.delivery.count(st.ack, 0, 1, 0)
 	}
 	packet := acquirePacketBuffer(&c.inPools, len(body))
 	copy(packet.data, body)

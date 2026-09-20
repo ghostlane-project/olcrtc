@@ -374,7 +374,7 @@ func (l *dataLane) notePushes(sample []byte) bool {
 	if len(sample) <= epochHdrLen {
 		return false
 	}
-	found := false
+	found, last := false, uint32(0)
 	splitKCPPayload(sample[epochHdrLen:], func(packet []byte) {
 		if len(packet) < wireCRCLen {
 			return
@@ -383,8 +383,11 @@ func (l *dataLane) notePushes(sample []byte) bool {
 		if st.pushed && l.seen != nil {
 			l.frames.pushed(&l.seen.delivery, st.push)
 		}
-		found = found || st.pushed
+		found, last = found || st.pushed, cmp.Or(st.push, last)
 	})
+	if found && l.seen != nil {
+		l.frames.wrote(&l.seen.delivery, last)
+	}
 	return found
 }
 
