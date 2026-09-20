@@ -379,7 +379,7 @@ func (p *streamTransport) batchSampleUpTo(
 func prepareBatchBuffer(dst []byte, src <-chan *packetBuffer, first []byte, limit int) []byte {
 	packetSize := len(first) - epochHdrLen
 	packetCount := max(min(limit, len(src)+1), 1)
-	want := epochHdrLen + len(kcpBatchMagic) + packetCount*(2+packetSize)
+	want := epochHdrLen + len(kcpBatchMagic) + packetCount*(batchLenLen+packetSize)
 	if want > defaultMaxPayloadSize {
 		want = defaultMaxPayloadSize
 	}
@@ -388,6 +388,9 @@ func prepareBatchBuffer(dst []byte, src <-chan *packetBuffer, first []byte, limi
 	}
 	return dst[:0]
 }
+
+// batchLenLen is the length prefix appendBatchPacket puts before a packet.
+const batchLenLen = 2
 
 func appendBatchPacket(dst, packet []byte) []byte {
 	if len(packet) > 0xffff {
