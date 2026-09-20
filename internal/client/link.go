@@ -126,6 +126,7 @@ func (c *Client) bringUpLink(ctx context.Context, cfg Config, cancel context.Can
 	c.sessMu.Unlock()
 	c.signalSessionReady()
 	c.health.RecordSession(sessionID)
+	c.notifySessionOpen(sessionID)
 	c.startControlLoop(ctx, cfg, cancel, control)
 	return nil
 }
@@ -731,6 +732,7 @@ func (c *Client) tryReopenSession(
 	c.signalSessionReady()
 	c.failedRounds.Store(0)
 	c.health.RecordSession(sessionID)
+	c.notifySessionOpen(sessionID)
 	c.startControlLoop(ctx, cfg, cancel, control)
 	return roundOpened
 }
@@ -769,6 +771,14 @@ func (c *Client) helloTimeout() time.Duration {
 		return c.handshakeTimeout
 	}
 	return handshake.DefaultTimeout
+}
+
+// notifySessionOpen reports an established session to the host when it asked
+// to hear about them. The initial connect and every reconnect land here.
+func (c *Client) notifySessionOpen(sessionID string) {
+	if c.onSessionOpen != nil {
+		c.onSessionOpen(sessionID)
+	}
 }
 
 func (c *Client) installPairLocked(pair *tunnelcore.SessionPair) {
