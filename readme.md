@@ -39,10 +39,12 @@ report of that run is published with every application release.
 
 This is a fork of [openlibrecommunity/olcrtc](https://github.com/openlibrecommunity/olcrtc),
 which is now archived. The work is on the **`proofkit`** branch, the default
-here; `master` is an untouched copy of upstream and carries none of it. This
-branch is the engine [Ghostlane](https://github.com/romanpodpriatov/ghostlane)
-links on every platform, which is what most of the additions below are for: a
-relay has to tell its users apart, and a phone is not a server.
+here; that name is left over from the project's former one and is kept because
+builds and pins point at it, not because the project is still called that.
+`master` is an untouched copy of upstream and carries none of it. This branch is
+the engine [Ghostlane](https://github.com/romanpodpriatov/ghostlane) links on
+every platform, which is what most of the additions below are for: a relay has
+to tell its users apart, and a phone is not a server.
 
 | Added here | What it is |
 | --- | --- |
