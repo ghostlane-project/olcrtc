@@ -12,13 +12,13 @@ This project is derived from:
     https://github.com/openlibrecommunity/olcrtc
 
 The original project is copyright (C) 2026 zarazaex and was published under the
-WTFPL, version 2, whose text is preserved verbatim in LICENSE.upstream. The
+WTFPL, version 2, whose text is preserved verbatim in docs/upstream-license-wtfpl.txt. The
 WTFPL places no condition on redistribution and explicitly permits distributing
 modified copies under other terms, which is what this fork does: the combined
 work, including the parts derived from upstream, is offered under the Apache
 License 2.0.
 
-The original copyright notice is retained above and in LICENSE.upstream as a
+The original copyright notice is retained above and in docs/upstream-license-wtfpl.txt as a
 matter of attribution. Upstream is archived and no longer developed. Individual
 authorship is recorded in this repository's commit history, which includes the
 upstream history it was forked from.

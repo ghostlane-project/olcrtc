@@ -1,20 +1,5 @@
 <!-- If you are an AI agent, please read agents.md -->
 
-<div align="center">
-
-<img src="docs/asset/westand.svg" width="250" height="250">
-
-<br>
-
-<img src="https://github.com/openlibrecommunity/material/blob/master/olcrtc.png" width="250" height="250">
-
-<br>
-<br>
-
-<img src="https://count.owenewans.org/openlibrecommunity/olcrtc?theme=moebooru&notitle">
-
-</div>
-
 # olcRTC
 
 [RU](readme.ru.md) / **EN**
@@ -52,12 +37,11 @@ report of that run is published with every application release.
 
 ## This fork
 
-This is ProofKit's fork of [openlibrecommunity/olcrtc](https://github.com/openlibrecommunity/olcrtc).
-The work is on the **`proofkit`** branch, rebased onto upstream as upstream
-moves; `master` here is an untouched copy of upstream and carries none of it.
-This branch is the engine the ProofKit client
-([romanpodpriatov/olcbox](https://github.com/romanpodpriatov/olcbox)) links on
-every platform, which is what most of the additions below are for: a paid
+This is a fork of [openlibrecommunity/olcrtc](https://github.com/openlibrecommunity/olcrtc),
+which is now archived. The work is on the **`proofkit`** branch, the default
+here; `master` is an untouched copy of upstream and carries none of it. This
+branch is the engine [Ghostlane](https://github.com/romanpodpriatov/ghostlane)
+links on every platform, which is what most of the additions below are for: a
 relay has to tell its users apart, and a phone is not a server.
 
 | Added here | What it is |
@@ -132,15 +116,19 @@ mage mobile  # gomobile bindings (Android)
 - Main client: 
   - [owenewans/owenclave](https://github.com/owenewans/owenclave) - Android proxy client (fork of exclave). Supports all common protocols (vless, hysteria2, mieru, trojan, vmess, tuic, shadowsocks, socks ...) plus `olcrtc`, the `olcrtc://` URI format and subscriptions
 - This fork's client:
-  - [romanpodpriatov/olcbox](https://github.com/romanpodpriatov/olcbox) - ProofKit, a fork of olcbox below. Kotlin Multiplatform/Compose for Android, iOS, macOS, Windows and Linux; olcRTC beside VLESS Reality, VLESS over TLS, Hysteria2 and XHTTP, and the client the additions above are built for
+  - [romanpodpriatov/ghostlane](https://github.com/romanpodpriatov/ghostlane) - Ghostlane, a fork of olcbox below. Kotlin Multiplatform/Compose for Android, iOS, macOS, Windows and Linux; olcRTC beside VLESS Reality, VLESS over TLS, Hysteria2 and XHTTP, and the client the additions above are built for
 - Community clients:
   - [venterum/veil](https://github.com/venterum/veil) - V2Ray/Xray client for Android (fork of v2rayNG), Material 3. Protocols: VMess, VLESS, Shadowsocks, Trojan, SOCKS, WireGuard, Hysteria2 + `olcrtc`
   - [alananisimov/olcbox](https://github.com/alananisimov/olcbox) - Multiplatform UI client (Android, iOS, macOS, Windows, Linux). Kotlin Multiplatform/Compose. All providers (Jitsi, Telemost, WB Stream, Jazz), all transports, split tunneling, TUN/proxy modes
 
 ## Community
 
-- Telegram: [@openlibrecommunity](https://t.me/openlibrecommunity)
-- Issues: [github.com/openlibrecommunity/olcrtc/issues](https://github.com/openlibrecommunity/olcrtc/issues)
+- Issues and questions: [github.com/romanpodpriatov/olcrtc/issues](https://github.com/romanpodpriatov/olcrtc/issues)
+- The application built on this engine: [github.com/romanpodpriatov/ghostlane](https://github.com/romanpodpriatov/ghostlane)
+- How to contribute: [CONTRIBUTING.md](CONTRIBUTING.md) · Reporting a vulnerability: [SECURITY.md](SECURITY.md)
+
+Upstream's own channels belong to the archived project and are not where this
+fork is maintained.
 
 ## License
 
@@ -151,17 +139,6 @@ which was published under the WTFPL. That licence permits redistribution under
 other terms, and this fork uses that permission so the project carries a licence
 downstream users, packagers and auditors can rely on, with an explicit patent
 grant. The original licence text and copyright are preserved in
-[LICENSE.upstream](LICENSE.upstream), and [NOTICE](NOTICE) records the
+[docs/upstream-license-wtfpl.txt](docs/upstream-license-wtfpl.txt), and [NOTICE](NOTICE) records the
 provenance and the third-party licences.
 
-<div align="center">
-
----
-
-Telegram: [zarazaex](https://t.me/zarazaexe)
-<br>
-Email: [zarazaex@tuta.io](mailto:zarazaex@tuta.io)
-<br>
-Site: [zarazaex.xyz](https://zarazaex.xyz)
-
-</div>

@@ -1,20 +1,5 @@
 <!-- If you are an AI agent, please read agents.md -->
 
-<div align="center">
-
-<img src="docs/asset/westand.svg" width="250" height="250">
-
-<br>
-
-<img src="https://github.com/openlibrecommunity/material/blob/master/olcrtc.png" width="250" height="250">
-
-<br>
-<br>
-
-<img src="https://count.owenewans.org/openlibrecommunity/olcrtc?theme=moebooru&notitle">
-
-</div>
-
 # olcRTC
 
 **RU** / [EN](readme.md)
@@ -36,7 +21,7 @@ app -> SOCKS5 -> olcrtc cnc -> WebRTC/SFU сервис -> olcrtc srv -> инте
 который делает ProofKit. Работа идёт в ветке **`proofkit`**, её перекладывают на
 upstream по мере его движения; `master` здесь - нетронутая копия upstream и
 ничего из перечисленного не содержит. Именно эту ветку линкует клиент ProofKit
-([romanpodpriatov/olcbox](https://github.com/romanpodpriatov/olcbox)) на всех
+([romanpodpriatov/ghostlane](https://github.com/romanpodpriatov/ghostlane)) на всех
 платформах - для этого почти всё ниже и сделано: платный релей должен отличать
 своих пользователей друг от друга, а телефон - не сервер.
 
@@ -113,15 +98,19 @@ mage mobile  # gomobile bindings (Android)
 - Основной клиент:
   - [owenewans/owenclave](https://github.com/owenewans/owenclave) - Android-клиент прокси (форк exclave). Поддерживает все распространённые протоколы (vless, hysteria2, mieru, trojan, vmess, tuic, shadowsocks, socks ...) плюс `olcrtc`, формат URI `olcrtc://` и подписки
 - Клиент этого форка:
-  - [romanpodpriatov/olcbox](https://github.com/romanpodpriatov/olcbox) - ProofKit, форк olcbox из списка ниже. Kotlin Multiplatform/Compose для Android, iOS, macOS, Windows и Linux; olcRTC рядом с VLESS Reality, VLESS поверх TLS, Hysteria2 и XHTTP - тот клиент, ради которого сделано всё перечисленное выше
+  - [romanpodpriatov/ghostlane](https://github.com/romanpodpriatov/ghostlane) - Ghostlane, форк olcbox из списка ниже. Kotlin Multiplatform/Compose для Android, iOS, macOS, Windows и Linux; olcRTC рядом с VLESS Reality, VLESS поверх TLS, Hysteria2 и XHTTP - тот клиент, ради которого сделано всё перечисленное выше
 - Клиенты сообщества:
   - [venterum/veil](https://github.com/venterum/veil) - V2Ray/Xray клиент для Android (форк v2rayNG), Material 3. Протоколы: VMess, VLESS, Shadowsocks, Trojan, SOCKS, WireGuard, Hysteria2 + `olcrtc`
   - [alananisimov/olcbox](https://github.com/alananisimov/olcbox) - Мультиплатформенный UI-клиент (Android, iOS, macOS, Windows, Linux). Kotlin Multiplatform/Compose. Все провайдеры (Jitsi, Telemost, WB Stream, Jazz), все транспорты, split tunneling, режимы TUN/proxy
 
 ## Сообщество
 
-- Telegram: [@openlibrecommunity](https://t.me/openlibrecommunity)
-- Issues: [github.com/openlibrecommunity/olcrtc/issues](https://github.com/openlibrecommunity/olcrtc/issues)
+- Issues и вопросы: [github.com/romanpodpriatov/olcrtc/issues](https://github.com/romanpodpriatov/olcrtc/issues)
+- Приложение на этом движке: [github.com/romanpodpriatov/ghostlane](https://github.com/romanpodpriatov/ghostlane)
+- Как участвовать: [CONTRIBUTING.md](CONTRIBUTING.md) · Как сообщить об уязвимости: [SECURITY.md](SECURITY.md)
+
+Каналы апстрима принадлежат заархивированному проекту, этот форк там не
+поддерживается.
 
 ## Лицензия
 
@@ -132,17 +121,6 @@ Apache License 2.0, см. [LICENSE](LICENSE).
 условиях, и форк этим пользуется: проекту нужна лицензия, на которую могут
 опереться пользователи, сборщики пакетов и юристы, с явной патентной
 оговоркой. Исходный текст лицензии и копирайт сохранены в
-[LICENSE.upstream](LICENSE.upstream), происхождение и лицензии зависимостей
+[docs/upstream-license-wtfpl.txt](docs/upstream-license-wtfpl.txt), происхождение и лицензии зависимостей
 описаны в [NOTICE](NOTICE).
 
-<div align="center">
-
----
-
-Telegram: [zarazaex](https://t.me/zarazaexe)
-<br>
-Email: [zarazaex@tuta.io](mailto:zarazaex@tuta.io)
-<br>
-Site: [zarazaex.xyz](https://zarazaex.xyz)
-
-</div>
