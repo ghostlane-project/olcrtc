@@ -138,3 +138,131 @@ func TestSessionListenerCanBeTakenBack(t *testing.T) {
 		t.Fatalf("Stop() error = %v", err)
 	}
 }
+
+// roomRun is one room the supervisor handed the runner, and whether that run
+// was told to give up on the room if it turns out to be empty.
+type roomRun struct {
+	room     string
+	giveUpOn bool
+}
+
+// A generation with one room keeps retrying in it. Giving up there would end
+// the generation and leave the host holding a tunnel it did not ask to lose,
+// which is what the runtime did before failover and what a host without a
+// retry loop of its own still expects.
+func TestASingleRoomGenerationDoesNotGiveUpOnIt(t *testing.T) {
+	var mu sync.Mutex
+	var runs []roomRun
+	release := make(chan struct{})
+	runtime := configuredRuntime(t, func(_ context.Context, cfg client.Config, onReady func(string)) error {
+		mu.Lock()
+		runs = append(runs, roomRun{cfg.RoomURL, cfg.EndOnEmptyRoom})
+		mu.Unlock()
+		onReady("127.0.0.1:1080")
+		<-release
+		return nil
+	})
+	if err := runtime.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if err := runtime.WaitReady(2000); err != nil {
+		t.Fatalf("WaitReady() error = %v", err)
+	}
+	mu.Lock()
+	got := append([]roomRun(nil), runs...)
+	mu.Unlock()
+	close(release)
+	if want := []roomRun{{testRoom, false}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("runs = %v, want %v - a lone room must be retried, not given up on", got, want)
+	}
+	if err := runtime.Stop(1000); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+}
+
+// A second room is somewhere to go, so the run started after it arrives is
+// told to give up on a room nobody is in. The count is read when a room's run
+// starts: a room the host appends mid-session is in force from the next start,
+// which is the hop the retired room causes anyway.
+func TestASecondRoomLetsTheNextStartGiveUpOnAnEmptyRoom(t *testing.T) {
+	shortFailoverDelay(t)
+	var mu sync.Mutex
+	var runs []roomRun
+	firstStarted := make(chan struct{})
+	retire := make(chan struct{})
+	standby := make(chan struct{})
+	runtime := configuredRuntime(t, func(ctx context.Context, cfg client.Config, onReady func(string)) error {
+		mu.Lock()
+		runs = append(runs, roomRun{cfg.RoomURL, cfg.EndOnEmptyRoom})
+		first := len(runs) == 1
+		mu.Unlock()
+		onReady("127.0.0.1:1080")
+		if first {
+			close(firstStarted)
+			<-retire // the server retires this room once the standby is known
+			return errTestRun
+		}
+		close(standby)
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	if err := runtime.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	<-firstStarted
+	// The subscription refresh reaches a generation that is already live.
+	if err := runtime.AddFailoverRoom(testStandby); err != nil {
+		t.Fatalf("AddFailoverRoom() error = %v", err)
+	}
+	close(retire)
+	select {
+	case <-standby:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the room added mid-session was never started")
+	}
+	mu.Lock()
+	got := append([]roomRun(nil), runs...)
+	mu.Unlock()
+	want := []roomRun{{testRoom, false}, {testStandby, true}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("runs = %v, want %v", got, want)
+	}
+	if err := runtime.Stop(1000); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+}
+
+// Both rooms known before Start: the very first run already has somewhere to
+// go, so it is told to give up on an empty room from the outset.
+func TestAGenerationStartedWithTwoRoomsGivesUpOnTheFirst(t *testing.T) {
+	var mu sync.Mutex
+	var runs []roomRun
+	release := make(chan struct{})
+	runtime := configuredRuntime(t, func(_ context.Context, cfg client.Config, onReady func(string)) error {
+		mu.Lock()
+		runs = append(runs, roomRun{cfg.RoomURL, cfg.EndOnEmptyRoom})
+		mu.Unlock()
+		onReady("127.0.0.1:1080")
+		<-release
+		return nil
+	})
+	if err := runtime.AddFailoverRoom(testStandby); err != nil {
+		t.Fatalf("AddFailoverRoom() error = %v", err)
+	}
+	if err := runtime.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if err := runtime.WaitReady(2000); err != nil {
+		t.Fatalf("WaitReady() error = %v", err)
+	}
+	mu.Lock()
+	got := append([]roomRun(nil), runs...)
+	mu.Unlock()
+	close(release)
+	if want := []roomRun{{testRoom, true}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("runs = %v, want %v", got, want)
+	}
+	if err := runtime.Stop(1000); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+}
