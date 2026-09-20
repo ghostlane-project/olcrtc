@@ -38,20 +38,24 @@ func (c *Client) startControlLoop(
 			c.controlLastPong.Store(time.Now())
 			c.notifyLinkHealth(false)
 		},
-		// A peer that closed on purpose - the server retired this room - is
-		// not waited out: the reconnect path would spend the liveness
-		// fallback and three handshakes, about a minute, on a room that
-		// said it was leaving. Ending the session lets the supervisor move
-		// to the next room now. A silent drop still takes the reconnect path.
+		// A peer that closes the control stream on purpose says this
+		// session is over, not that this room is: our own server sends the
+		// same notice when its provider rebuilt underneath it and when its
+		// liveness gave up on us, and in both it is still in the room and
+		// about to answer again. So the close is taken as the death of the
+		// session it belongs to, told apart from a silent one only in the
+		// log and in how fast it is noticed - a close arrives at once, a
+		// silence takes the liveness window. What decides whether the room
+		// is worth keeping is the handshake that follows: see afterFailedRound.
 		//
-		// ai-generated: the closed-by-peer branch.
+		// ai-generated: the closed-by-peer branch (the port of olcrtc#39,
+		// resolved against olcrtc#19's recovery).
 		OnDeath: func(err error) {
+			reason := reconnectLiveness
 			if errors.Is(err, control.ErrClosedByPeer) {
-				logger.Infof("control closed by peer (server retired this room) - ending session for failover")
-				cancel()
-				return
+				reason = reconnectPeerClose
 			}
-			c.onSessionDeath(ctx, cfg, cancel, stream)
+			c.onSessionDeath(ctx, cfg, cancel, stream, reason)
 		},
 		// Payload on our streams, not every frame that opens: the server's
 		// next session seals under the same key and its frames would vouch

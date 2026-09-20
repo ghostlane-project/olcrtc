@@ -381,14 +381,16 @@ func (c *Client) handleReconnect(ctx, run context.Context, cfg Config, cancel co
 // was (olcrtc#19). It drops only the session that died: one a provider
 // callback has put in its place since is left alone, and so is the recovery
 // that callback runs.
-func (c *Client) onSessionDeath(ctx context.Context, cfg Config, cancel context.CancelFunc, dead *smux.Stream) {
+func (c *Client) onSessionDeath(
+	ctx context.Context, cfg Config, cancel context.CancelFunc, dead *smux.Stream, reason string,
+) {
 	expect := c.recovery.generation()
 	c.reconnectMu.Lock()
 	defer c.reconnectMu.Unlock()
-	if !c.dropSessionLocked(reconnectLiveness, dead) || c.ln == nil {
+	if !c.dropSessionLocked(reason, dead) || c.ln == nil {
 		return
 	}
-	c.rebuildProvider(ctx, cfg, cancel, reconnectLiveness, expect, false)
+	c.rebuildProvider(ctx, cfg, cancel, reason, expect, false)
 }
 
 // dropSessionLocked tears the installed session down, or with dead set only
@@ -491,9 +493,21 @@ func (c *Client) rebuildProvider(
 // that ends without a session: a provider that answers every ask promptly,
 // as Jitsi does, had the client rejoin the room every minute or two for as
 // long as it ran, because nothing there ever counted those rejoins.
+//
+// ai-generated: the empty-room branch (the port of olcrtc#39). A room nobody
+// is in is the one case where retrying here is provably useless and somebody
+// else may have somewhere better to go, so a caller that says so - a
+// supervisor walking a list of rooms - gets the run ended instead. Everyone
+// else keeps the pacing above: a client whose only room this is must not
+// give up, and a peer that is there but silent may yet answer.
 func (c *Client) afterFailedRound(
 	ctx context.Context, cfg Config, cancel context.CancelFunc, result roundResult, expect uint64,
 ) {
+	if result == roundEmpty && c.endOnEmptyRoom {
+		logger.Warnf("client reconnect: the room is empty and there are other rooms to try - ending the session")
+		cancel()
+		return
+	}
 	if !c.armFallback(ctx, cfg, cancel, expect, true, result != roundRefused) {
 		return
 	}
@@ -592,6 +606,13 @@ const (
 	// roundRefused: the peer answered and refused; another connection to it
 	// would be refused the same way.
 	roundRefused
+	// roundEmpty: the handshake failed and nothing in the room had sent a
+	// frame while it ran, so there is nobody here to handshake with. Another
+	// attempt in this room costs a whole handshake timeout to learn the same
+	// thing, which is why the round stops at the first one.
+	//
+	// ai-generated: the result (the port of olcrtc#39).
+	roundEmpty
 )
 
 // retryHandshake reports how the round ended. It stops when the reason's
@@ -623,20 +644,15 @@ func (c *Client) retryHandshake(
 			logger.Warnf("client reconnect: the peer refused the handshake (reason=%s) - "+
 				"waiting before another try", reason)
 			return result
+		case roundEmpty:
+			logger.Warnf("client reconnect: nobody in the room answered or sent a frame (reason=%s)", reason)
+			return result
 		case roundSilent:
 		}
 		if maxAttempts > 0 && attempt >= maxAttempts {
-			// The room is gone: a server torn down by a rotation reads as a
-			// peer-gone or liveness death, not a conference end, so the
-			// EndedCallback never fires and the session would sit here with
-			// the listener up for good. End it ourselves, as EndedCallback
-			// would, so the supervisor advances to the next room.
-			//
-			// ai-generated: the cancel and this comment.
-			logger.Warnf("client reconnect: exhausted %d handshake attempts (reason=%s) - ending session for failover",
-				attempt, reason)
-			cancel()
-			return roundStopped
+			logger.Warnf("client reconnect: exhausted %d handshake attempts (reason=%s) - "+
+				"pausing before the next try", attempt, reason)
+			return roundSilent
 		}
 		select {
 		case <-run.Done():
@@ -700,12 +716,12 @@ func (c *Client) tryReopenSession(
 		run, pair.ControlSession, c.deviceID, c.claims, c.helloTimeout(),
 	)
 	if err != nil {
+		classified := c.classifyHandshakeFailure(err, conn, controlConn)
 		if run.Err() == nil {
-			logger.Warnf("handshake on reconnect failed (attempt %d): %v", attempt,
-				c.classifyHandshakeFailure(err, conn, controlConn))
+			logger.Warnf("handshake on reconnect failed (attempt %d): %v", attempt, classified)
 		}
 		_ = pair.Close()
-		return handshakeOutcome(run, err)
+		return handshakeOutcome(run, err, classified)
 	}
 	if err := confirmPeer(c.ln, peerID); err != nil {
 		logger.Warnf("peer confirmation on reconnect failed (attempt %d): %v", attempt, err)
@@ -737,13 +753,19 @@ func (c *Client) tryReopenSession(
 	return roundOpened
 }
 
-// handshakeOutcome reads a failed handshake. ai-generated (review of #20).
-func handshakeOutcome(run context.Context, err error) roundResult {
+// handshakeOutcome reads a failed handshake; classified is err as
+// classifyHandshakeFailure read it, which is where an empty room is named.
+//
+// ai-generated: classified and the empty branch (the port of olcrtc#39);
+// the rest is from the review of #20.
+func handshakeOutcome(run context.Context, err, classified error) roundResult {
 	switch {
 	case run.Err() != nil:
 		return roundStopped
 	case helloRefused(err):
 		return roundRefused
+	case errors.Is(classified, ErrNoPeer):
+		return roundEmpty
 	default:
 		return roundSilent
 	}

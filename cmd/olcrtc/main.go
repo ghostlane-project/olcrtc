@@ -154,6 +154,7 @@ func loadProfiles(path string) ([]supervisor.Profile, error) {
 		}
 
 		scfg := session.ApplyDefaults(configpkg.ApplyProfile(base, profile))
+		scfg.EndOnEmptyRoom = true
 		if err := session.Validate(scfg); err != nil {
 			logger.Warnf("skipping invalid failover profile %q on reload: %v", name, err)
 
@@ -202,11 +203,18 @@ func runWithConfig(cfg loadedConfig) error {
 	return runSessionMode(cfg.dataDir, scfg)
 }
 
+// prepareProfiles applies the session defaults and tells each client that it
+// is one room of several: a room whose server has gone ends the run so the
+// supervisor advances, rather than being retried for as long as olcrtc runs.
+// A single-profile config never comes through here.
+//
+// ai-generated: EndOnEmptyRoom and this comment (the port of olcrtc#39).
 func prepareProfiles(profiles []supervisor.Profile) []supervisor.Profile {
 	out := make([]supervisor.Profile, 0, len(profiles))
 
 	for _, profile := range profiles {
 		profile.Config = session.ApplyDefaults(profile.Config)
+		profile.Config.EndOnEmptyRoom = true
 		out = append(out, profile)
 	}
 

@@ -165,6 +165,13 @@ type Config struct {
 	// (0 means the default).
 	UDPDisabled bool
 	UDPMaxFlows int
+	// EndOnEmptyRoom ends a client run when a reconnect handshake finds the
+	// room empty, so a supervisor walking a room list moves on instead of
+	// waiting in a room whose server has gone. Not read from YAML: whoever
+	// runs the list sets it.
+	//
+	// ai-generated: the field (the port of olcrtc#39).
+	EndOnEmptyRoom bool
 	// DirectRules names the destinations a client dials directly instead of
 	// through the tunnel, one rule per line (see internal/route); empty
 	// tunnels everything.

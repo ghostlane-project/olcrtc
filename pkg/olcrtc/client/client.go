@@ -117,6 +117,10 @@ type Config struct {
 	// established; a host that cannot read the log learns of a room
 	// handover this way.
 	OnSessionOpen SessionOpenFunc
+	// EndOnEmptyRoom ends the run when a reconnect handshake finds the room
+	// empty, instead of retrying in it for as long as the tunnel lives. Set
+	// it only when the caller has another room to try.
+	EndOnEmptyRoom bool
 }
 
 type runner func(context.Context, internalclient.Config, func(string)) error
@@ -175,9 +179,10 @@ func toClientConfig(cfg Config) internalclient.Config {
 			MinDelay:       cfg.Traffic.MinDelay, MaxDelay: cfg.Traffic.MaxDelay,
 		},
 		DeviceID: cfg.DeviceID, DeviceIDPath: cfg.DeviceIDPath, Claims: cfg.Claims,
-		OnHealth:      internalclient.HealthFunc(cfg.OnHealth),
-		OnSessionOpen: internalclient.SessionOpenFunc(cfg.OnSessionOpen),
-		UDPDisabled:   cfg.UDPDisabled, UDPMaxFlows: cfg.UDPMaxFlows,
+		OnHealth:       internalclient.HealthFunc(cfg.OnHealth),
+		OnSessionOpen:  internalclient.SessionOpenFunc(cfg.OnSessionOpen),
+		EndOnEmptyRoom: cfg.EndOnEmptyRoom,
+		UDPDisabled:    cfg.UDPDisabled, UDPMaxFlows: cfg.UDPMaxFlows,
 	}
 }
 
