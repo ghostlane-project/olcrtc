@@ -446,3 +446,95 @@ func TestLocalTargetRefusesAPairItDoesNotCarry(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// ai-generated: the rest of the file (olcrtc#26). What it holds: a failed
+// cell says whether the relay ended the server's session under it, with the
+// reason the relay gave, and nothing about a cell that passed.
+
+const relayDropLog = `2026/09/20 10:28:21 Connecting transport=vp8channel provider=wbstream ...
+2026/09/20 10:28:22 Link connected
+2026/09/20 10:28:24 vp8channel: authenticated peer epoch=0x5634ae87
+2026/09/20 10:29:01 livekit: disconnected from the room, reason=PARTICIPANT_REMOVED
+2026/09/20 10:29:02 server reconnect reason=provider - tearing down smux session
+not a log line at all
+`
+
+func relayLogFile(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "srv.log")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write log: %v", err)
+	}
+	return path
+}
+
+func stamp(t *testing.T, value string) time.Time {
+	t.Helper()
+	at, err := time.ParseInLocation(logTimeLayout, value, time.Local)
+	if err != nil {
+		t.Fatalf("parse %q: %v", value, err)
+	}
+	return at
+}
+
+func TestRelayDropFailuresNamesTheReasonAndWhen(t *testing.T) {
+	path := relayLogFile(t, relayDropLog)
+
+	got := RelayDropFailures(path, stamp(t, "2026/09/20 10:28:35"), stamp(t, "2026/09/20 10:29:10"))
+	if len(got) != 1 {
+		t.Fatalf("RelayDropFailures() = %q, want one line", got)
+	}
+	for _, want := range []string{"PARTICIPANT_REMOVED", "26s into the cell", "39s after it joined"} {
+		if !strings.Contains(got[0], want) {
+			t.Fatalf("RelayDropFailures() = %q, want it to name %q", got[0], want)
+		}
+	}
+}
+
+func TestRelayDropFailuresKeepsToTheCellWindow(t *testing.T) {
+	path := relayLogFile(t, relayDropLog)
+
+	before := RelayDropFailures(path, stamp(t, "2026/09/20 10:29:02"), stamp(t, "2026/09/20 10:29:30"))
+	if len(before) != 0 {
+		t.Fatalf("a drop before the cell was reported: %q", before)
+	}
+	after := RelayDropFailures(path, stamp(t, "2026/09/20 10:28:00"), stamp(t, "2026/09/20 10:28:59"))
+	if len(after) != 0 {
+		t.Fatalf("a drop after the cell was reported: %q", after)
+	}
+	if got := RelayDropFailures(filepath.Join(t.TempDir(), "absent.log"),
+		stamp(t, "2026/09/20 10:28:00"), stamp(t, "2026/09/20 10:30:00")); got != nil {
+		t.Fatalf("a log that cannot be read reported %q", got)
+	}
+}
+
+func TestRelayDropFailuresWithoutAJoinOrAReason(t *testing.T) {
+	path := relayLogFile(t, "2026/09/20 10:29:01 livekit: disconnected from the room, reason=\n")
+
+	got := RelayDropFailures(path, stamp(t, "2026/09/20 10:28:00"), stamp(t, "2026/09/20 10:30:00"))
+	if len(got) != 1 {
+		t.Fatalf("RelayDropFailures() = %q, want one line", got)
+	}
+	if !strings.Contains(got[0], "UNKNOWN_REASON") {
+		t.Fatalf("RelayDropFailures() = %q, want an unnamed reason", got[0])
+	}
+	if strings.Contains(got[0], "after it joined") {
+		t.Fatalf("RelayDropFailures() = %q, want no join it never saw", got[0])
+	}
+}
+
+func TestWithRelayDropsLeavesAPassingCellAlone(t *testing.T) {
+	path := relayLogFile(t, relayDropLog)
+	from, to := stamp(t, "2026/09/20 10:28:35"), stamp(t, "2026/09/20 10:29:10")
+
+	if got := withRelayDrops(nil, path, from, to); got != nil {
+		t.Fatalf("a cell that passed was given %q", got)
+	}
+	got := withRelayDrops([]string{"pull_ok 0 != 6"}, path, from, to)
+	if len(got) != 2 || got[0] != "pull_ok 0 != 6" {
+		t.Fatalf("withRelayDrops() = %q, want the cell's own failure and the relay's line", got)
+	}
+	if !strings.Contains(got[1], "PARTICIPANT_REMOVED") {
+		t.Fatalf("withRelayDrops() = %q, want the relay's reason", got)
+	}
+}

@@ -37,6 +37,11 @@ type Endpoint struct {
 	DNS       string
 	VP8FPS    int
 	VP8Batch  int
+	// ServerLog is the raw log of the server behind this endpoint, for a
+	// target that runs one; empty for the link target, whose server is a
+	// fleet node. A failed cell is read for what the relay did to it (see
+	// RelayDropFailures). ai-generated: this field (olcrtc#26).
+	ServerLog string
 }
 
 // String describes the endpoint without its secrets: a room or a key that is
