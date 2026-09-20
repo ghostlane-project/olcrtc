@@ -805,7 +805,8 @@ func (c *Client) notifySessionOpen(sessionID string) {
 
 func (c *Client) installPairLocked(pair *tunnelcore.SessionPair) {
 	// A new session may be a different exit, so its IPv6 is probed afresh.
-	c.peerNoIPv6.Store(false)
+	c.peerNoIPv6Until.Store(0)
+	c.ipv6Failures.Store(0)
 	c.pair = pair
 	c.conn = pair.DataConn
 	c.controlConn = pair.ControlConn

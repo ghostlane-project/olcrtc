@@ -67,6 +67,19 @@ const (
 	maxRecoveryPause   = 5 * time.Minute
 	maxRecoveryBackoff = 8
 
+	// ipv6FailuresBeforeLatch and ipv6LatchWindow shape the judgement that
+	// an exit has no IPv6 route. The exit answers host-unreachable for any
+	// dial that fails, so one refusal is an ordinary dead destination and
+	// says nothing about the address family; a run of them with none
+	// succeeding in between is the shape of an exit that cannot route the
+	// family at all. The judgement then lapses, so an exit whose route came
+	// back - or one this got wrong - costs at most a window of IPv4-only
+	// browsing rather than the whole session.
+	//
+	// ai-generated: both (review of olcrtc#39).
+	ipv6FailuresBeforeLatch = 3
+	ipv6LatchWindow         = 2 * time.Minute
+
 	// defaultShutdownGrace bounds how long shutdown waits for tracked
 	// goroutines after they have been told to stop.
 	//
@@ -135,17 +148,20 @@ type Client struct {
 	// ai-generated: the field (the port of olcrtc#39).
 	endOnEmptyRoom bool
 
-	// peerNoIPv6 latches once the exit answers "host unreachable" for an
-	// IPv6 literal. A dual-stack host tries IPv6 first for nearly every
-	// connection, so against an IPv4-only exit that is the bulk of all
-	// streams, each one a stream open and a round trip over the tunnel to
-	// learn what the previous one did. Latched, the same connections are
-	// refused locally and Happy Eyeballs falls back to IPv4 at once. Reset
-	// per session, since another exit may have IPv6.
+	// peerNoIPv6Until is when the exit's lack of an IPv6 route stops being
+	// assumed, or zero while it is not; ipv6Failures counts the IPv6
+	// literals it has refused in a row. A dual-stack host tries IPv6 first
+	// for nearly every connection, so against an IPv4-only exit that is the
+	// bulk of all streams, each one a stream open and a round trip over the
+	// tunnel to learn what the one before it did. While the latch holds,
+	// those are refused locally and Happy Eyeballs falls back to IPv4 at
+	// once. Cleared per session, since another exit may have IPv6.
 	//
-	// ai-generated: the latch (this field, noteConnectFailure, isIPv6Literal
-	// and the check in tunnelWhenReady).
-	peerNoIPv6 atomic.Bool
+	// ai-generated: the latch (these fields, noteConnectFailure,
+	// isIPv6Literal and the check in tunnelWhenReady); the counter and the
+	// window are from the review of olcrtc#39.
+	peerNoIPv6Until atomic.Int64
+	ipv6Failures    atomic.Int32
 
 	// parked counts the requests waiting for a session that is not there
 	// (tunnelWhenReady, waitSessionReady). With a tun2socks in front every
