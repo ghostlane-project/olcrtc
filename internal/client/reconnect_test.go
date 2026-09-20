@@ -724,3 +724,29 @@ func TestOnlyARefusalEndsTheRound(t *testing.T) {
 		t.Fatalf("handshakeOutcome() after a takeover = %v, want roundStopped", got)
 	}
 }
+
+// The pause after a failed round comes before the provider is asked again,
+// not after: a provider that answers every ask at once - Jitsi rejoins its
+// MUC in seconds - would otherwise be asked again the moment the round ended,
+// which is how the client came to rejoin the room every minute or two for as
+// long as it ran.
+//
+// ai-generated: the whole test (review of #20).
+func TestTheAskAfterAFailedRoundWaits(t *testing.T) {
+	r := newRig(t, func(c *Client) {
+		c.livenessFallback = 400 * time.Millisecond
+		c.handshakeTimeout = 50 * time.Millisecond
+		c.retryDelay = 5 * time.Millisecond
+	})
+	r.server.stopAnswering()
+
+	start := time.Now()
+	r.loseSession() // the death asks at once, and arms the fallback
+	r.waitRequest(reconnectHandshake, 5*time.Second)
+	// 400 ms of fallback, a round of three 50 ms handshakes, then the 400 ms
+	// pause of the first failed round. Asked the moment that round ended, it
+	// would be about 600 ms.
+	if took := time.Since(start); took < 800*time.Millisecond {
+		t.Fatalf("the provider was asked again %v after the session went: the pause was skipped", took)
+	}
+}
