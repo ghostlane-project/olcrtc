@@ -273,6 +273,7 @@ func (t *LocalTarget) Open(ctx context.Context, p Pair, dir string, opt OpenOpti
 		return Endpoint{}, nil, err
 	}
 	stop := func() { srv.stop(filepath.Join(dir, serverLogName), secrets) }
+	ep.ServerLog = srv.log // ai-generated: this line (olcrtc#26)
 	if err := waitForLine(srv.log, linkedLine, t.linkWait, srv.exited); err != nil {
 		tail := clip(Scrub(lastLine(srv.log), secrets...))
 		stop()
@@ -498,4 +499,86 @@ func clip(line string) string {
 		return line
 	}
 	return strings.ToValidUTF8(line[:tailBytes], "") + "..."
+}
+
+// ai-generated: the rest of the file (olcrtc#26).
+
+const (
+	// relayDropMarker is how the engine names the end of a room session and
+	// the protocol reason the relay gave for it.
+	relayDropMarker = "disconnected from the room, reason="
+	// logTimeLayout is what the server stamps every line with.
+	logTimeLayout = "2006/01/02 15:04:05"
+)
+
+// RelayDropFailures reads a server log and reports, for every session the
+// relay ended inside [from, to], a line naming the reason and when it
+// happened. A failed cell gets these next to its own failures so a red cell
+// says at once whether the relay took the server out from under it.
+//
+// It judges nothing: a removal is usually our own doing (the relay policing
+// what we publish, olcrtc#26), so it never turns a failure into a pass and
+// never fires for a cell that passed. A log it cannot read yields nothing.
+func RelayDropFailures(logPath string, from, to time.Time) []string {
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		return nil
+	}
+	var (
+		out    []string
+		joined time.Time
+	)
+	for line := range strings.SplitSeq(string(data), "\n") {
+		stamp, ok := logTime(line)
+		if !ok {
+			continue
+		}
+		switch {
+		case strings.Contains(line, linkedLine):
+			joined = stamp
+		case strings.Contains(line, relayDropMarker):
+			if stamp.Before(from) || stamp.After(to) {
+				continue
+			}
+			out = append(out, relayDropLine(line, stamp, joined, from))
+		}
+	}
+	return out
+}
+
+// withRelayDrops adds what the relay did to a cell that failed. A cell that
+// passed is left alone, whatever the log says.
+func withRelayDrops(failures []string, logPath string, from, to time.Time) []string {
+	if len(failures) == 0 {
+		return failures
+	}
+	return append(failures, RelayDropFailures(logPath, from, to)...)
+}
+
+// relayDropLine is one such failure, in the words of the reason the relay
+// gave and the two times that place it.
+func relayDropLine(line string, stamp, joined, from time.Time) string {
+	reason := strings.Fields(line[strings.Index(line, relayDropMarker)+len(relayDropMarker):])
+	name := "UNKNOWN_REASON"
+	if len(reason) > 0 {
+		name = reason[0]
+	}
+	msg := fmt.Sprintf("the relay ended the server's session (%s) %s into the cell",
+		name, stamp.Sub(from).Round(time.Second))
+	if !joined.IsZero() && !stamp.Before(joined) {
+		msg += fmt.Sprintf(", %s after it joined", stamp.Sub(joined).Round(time.Second))
+	}
+	return msg
+}
+
+// logTime reads the stamp a server log line opens with.
+func logTime(line string) (time.Time, bool) {
+	if len(line) < len(logTimeLayout) {
+		return time.Time{}, false
+	}
+	stamp, err := time.ParseInLocation(logTimeLayout, line[:len(logTimeLayout)], time.Local)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return stamp, true
 }

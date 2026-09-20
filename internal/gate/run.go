@@ -305,6 +305,10 @@ func runCell(ctx context.Context, o Options, env *Env, s Scenario) error {
 	id := CellID(o.Target.Platform(), env.Pair, env.Client.Name(), s.ID)
 	env.Log = o.Capture.Begin()
 	m, failures, took := RunCell(ctx, env, s)
+	// ai-generated: the relay's own doing, named next to the cell's failures
+	// (olcrtc#26). It judges nothing; it says who ended the session.
+	end := time.Now()
+	failures = withRelayDrops(failures, env.Endpoint.ServerLog, end.Add(-took), end)
 	logPath := o.writeLog(env.Log, env.Dir, env.Client.Name()+"-"+s.ID+".log")
 	if s.ID == "S7" {
 		if err := env.Sampler.WriteCSV(filepath.Join(env.Dir, env.Client.Name()+"-samples.csv")); err != nil {
