@@ -96,6 +96,10 @@ type Client struct {
 	shutdownGrace    time.Duration
 	fallbackPending  atomic.Bool
 
+	// onSessionOpen hears each session id as the session is established;
+	// see Config.OnSessionOpen.
+	onSessionOpen SessionOpenFunc
+
 	// peerNoIPv6 latches once the exit answers "host unreachable" for an
 	// IPv6 literal. A dual-stack host tries IPv6 first for nearly every
 	// connection, so against an IPv4-only exit that is the bulk of all
@@ -148,6 +152,14 @@ type Client struct {
 // HealthFunc is called when the client control health snapshot changes.
 type HealthFunc func(control.Status)
 
+// SessionOpenFunc is called each time a tunnel session is established - on the
+// initial connect and after every reconnect - with the server-assigned session
+// id. It runs on the connect path, so it must return promptly.
+//
+// ai-generated: the session-open hook (this type, Config.OnSessionOpen and
+// notifySessionOpen).
+type SessionOpenFunc func(sessionID string)
+
 // Config holds runtime configuration for [Run], [RunWithReady], and [RunWithAddress].
 type Config struct {
 	Transport        string
@@ -178,6 +190,10 @@ type Config struct {
 	// Direct names the destinations dialed from this process instead of
 	// through the tunnel; nil, the default, tunnels everything.
 	Direct *route.Rules
+	// OnSessionOpen, when set, is told each session id as the session is
+	// established: on the initial connect and after every reconnect. A host
+	// that cannot read the log learns of a room handover this way.
+	OnSessionOpen SessionOpenFunc
 }
 
 // Run starts the client with the given configuration.
@@ -212,6 +228,7 @@ func RunWithAddress(ctx context.Context, cfg Config, onReady func(actualAddr str
 		udpFlows: make(map[uint64]clientUDPFlow), udpFlowIndex: make(map[clientUDPFlowKey]uint64),
 		udpDisabled: cfg.UDPDisabled, maxUDPFlows: normalizeMaxUDPFlows(cfg.UDPMaxFlows),
 		rules: cfg.Direct, dialer: protect.NewDialer(cfg.Resolver),
+		onSessionOpen: cfg.OnSessionOpen,
 	}
 	if exchanger, ok := cfg.Resolver.(protect.Exchanger); ok {
 		client.exchanger = exchanger
