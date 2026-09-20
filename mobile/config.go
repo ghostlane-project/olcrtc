@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -55,6 +56,10 @@ type runtimeConfig struct {
 	channelID string
 	keyHex    string
 	dnsServer string
+	// failoverRooms are the extra rooms a generation may move to when the
+	// one it is in ends; roomURL always comes first. The list may grow while
+	// a session is live: the supervisor re-reads it at every hop.
+	failoverRooms []string
 	// resolver is an override handed in by SetResolver; dns is the runtime's
 	// own, which SetDNS steers and every run without an override uses.
 	resolver      protect.Lookup
@@ -137,6 +142,49 @@ func (r *Runtime) SetRoom(roomURL string) error {
 	r.defaults.roomURL = roomURL
 	r.mu.Unlock()
 	return nil
+}
+
+// AddFailoverRoom appends a room the client may move to when the one it is in
+// ends. The primary set with SetRoom always comes first; extras follow in the
+// order added, the shape a `##rooms` subscription header has. Safe to call
+// while running: the supervisor re-reads the list at every hop, which is how a
+// server hands a connected client its next room without a restart.
+//
+// ai-generated: the failover room list (AddFailoverRoom, ClearFailoverRooms
+// and rooms).
+func (r *Runtime) AddFailoverRoom(roomURL string) error {
+	roomURL = strings.TrimSpace(roomURL)
+	if roomURL == "" {
+		return fmt.Errorf("%w: failover room is required", ErrInvalidConfig)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if roomURL == r.defaults.roomURL || slices.Contains(r.defaults.failoverRooms, roomURL) {
+		return nil
+	}
+	r.defaults.failoverRooms = append(r.defaults.failoverRooms, roomURL)
+	return nil
+}
+
+// ClearFailoverRooms drops every extra room, keeping the primary.
+func (r *Runtime) ClearFailoverRooms() {
+	r.mu.Lock()
+	r.defaults.failoverRooms = nil
+	r.mu.Unlock()
+}
+
+// rooms is the ordered, de-duplicated room list: the primary, then the extras.
+// The primary is always present, so a configuration without a room (the "none"
+// provider) still yields exactly one profile, as it did before failover.
+func (cfg runtimeConfig) rooms() []string {
+	out := make([]string, 0, 1+len(cfg.failoverRooms))
+	out = append(out, cfg.roomURL)
+	for _, room := range cfg.failoverRooms {
+		if room != "" && !slices.Contains(out, room) {
+			out = append(out, room)
+		}
+	}
+	return out
 }
 
 // SetChannel sets the optional peer-routing channel ID.
