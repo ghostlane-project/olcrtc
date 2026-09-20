@@ -6,7 +6,6 @@ package jitsi
 import (
 	"context"
 	"fmt"
-	"maps"
 	"slices"
 	"testing"
 	"time"
@@ -39,7 +38,7 @@ func TestRemoteVideoLatchSkipsTheBridgesOwnSource(t *testing.T) {
 		arrived <- uint32(track.SSRC())
 	})
 	connectPair(t, bridge, endpoint)
-	s.noteBridgeSources(initiateWithBridgeSources(probeSSRC, probeSSRC+1))
+	s.noteSources(initiateWithBridgeSources(probeSSRC, probeSSRC+1), true)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -61,7 +60,7 @@ func TestRemoteVideoLatchSkipsTheBridgesOwnSource(t *testing.T) {
 	}
 }
 
-func TestBridgeSSRCsReadsBothSourceFormats(t *testing.T) {
+func TestSourceOwnersReadsBothSourceFormats(t *testing.T) {
 	jsonForm := initiateWithBridgeSources(1001, 1002)
 	xmlForm := `<iq type='set' xmlns='jabber:client'><jingle action='session-initiate' xmlns='urn:xmpp:jingle:1'>` +
 		`<content name='video'><description media='video' xmlns='urn:xmpp:jingle:apps:rtp:1'>` +
@@ -76,16 +75,29 @@ func TestBridgeSSRCsReadsBothSourceFormats(t *testing.T) {
 		`</json-message></jingle></iq>`
 	for _, tc := range []struct {
 		name, stanza string
-		want         []uint32
+		bridge       []uint32
+		owners       map[uint32]string
 	}{
-		{"json", jsonForm, []uint32{1001, 1002}},
-		{"xml", xmlForm, []uint32{2001}},
-		{"json with a participant", withPeer, []uint32{3004}},
-		{"not a stanza", "<iq", nil},
+		{"json", jsonForm, []uint32{1001, 1002}, nil},
+		{"xml", xmlForm, []uint32{2001}, map[uint32]string{2002: "abcd1234"}},
+		{"json with a participant", withPeer, []uint32{3004},
+			map[uint32]string{3001: "abcd1234", 3002: "abcd1234", 3003: "abcd1234"}},
+		{"not a stanza", "<iq", nil, nil},
 	} {
-		got := slices.Sorted(maps.Keys(bridgeSSRCs(tc.stanza)))
-		if !slices.Equal(got, tc.want) {
-			t.Errorf("%s: bridgeSSRCs = %v, want %v", tc.name, got, tc.want)
+		owners := sourceOwners(tc.stanza)
+		var bridge []uint32
+		for ssrc, owner := range owners {
+			if owner == bridgeOwner {
+				bridge = append(bridge, ssrc)
+			}
+		}
+		if got := slices.Sorted(slices.Values(bridge)); !slices.Equal(got, tc.bridge) {
+			t.Errorf("%s: the bridge's sources = %v, want %v", tc.name, got, tc.bridge)
+		}
+		for ssrc, want := range tc.owners {
+			if owners[ssrc] != want {
+				t.Errorf("%s: source %d belongs to %q, want %q", tc.name, ssrc, owners[ssrc], want)
+			}
 		}
 	}
 }
