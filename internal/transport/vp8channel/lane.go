@@ -35,10 +35,15 @@ const (
 	// the path is back.
 	defaultProbeEvery = 250 * time.Millisecond
 	// capQueue is how long KCP's send window takes to go out at a capped
-	// lane's pace: a round trip on a slow relay and some, and no more, so a
-	// slow lane does not queue seconds of data for timeouts to resend on
-	// top of.
-	capQueue = time.Second
+	// lane's pace, so a capped lane does not queue seconds of data for
+	// timeouts to resend on top of. It is what a capped lane waits before
+	// its own queue, and KCP reads that wait as the round trip: a second of
+	// it put every retransmission a second and a half out and cost a third
+	// of the throughput on a path losing one packet in thirty (4.6 Mbit/s
+	// at 300 ms against 3.7 at a second, with 4.5 uncapped). Below a
+	// round trip the window stops covering the pipe instead, which is what
+	// the floor of minCapWindow segments is for.
+	capQueue = 300 * time.Millisecond
 	// minCapWindow is the fewest segments a capped lane lets KCP keep in
 	// flight.
 	minCapWindow = 32
