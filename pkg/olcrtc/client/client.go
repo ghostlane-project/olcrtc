@@ -64,7 +64,9 @@ type HealthFunc func(HealthStatus)
 
 // SessionOpenFunc is called each time a tunnel session is established - on the
 // initial connect and after every reconnect - with the server-assigned session
-// id. It runs on the connect path and must return promptly.
+// id. It runs on the connect path, and everything the client would do to
+// recover from the next outage waits behind it: return promptly and do the
+// work elsewhere.
 type SessionOpenFunc func(sessionID string)
 
 // LivenessConfig controls control-stream ping and pong checks.

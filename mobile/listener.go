@@ -15,7 +15,8 @@ type SessionListener interface {
 	// connect, after a reconnect within the same room, and after a failover.
 	// room is the room the session is in, as given to SetRoom or
 	// AddFailoverRoom; sessionID is the server-assigned id. It is called on
-	// the runtime's connect path: return promptly and do the work elsewhere.
+	// the runtime's connect path, under the client's reconnect lock: return
+	// promptly and do the work elsewhere, or the next outage waits for it.
 	OnSessionOpened(room string, sessionID string)
 }
 
