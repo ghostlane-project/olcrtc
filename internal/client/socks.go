@@ -114,6 +114,13 @@ func (c *Client) handleSocks5(ctx context.Context, conn net.Conn) {
 // tunnelWhenReady carries a CONNECT through the tunnel once the session is
 // up, waiting for it when it is not — as one of at most maxParkedRequests.
 func (c *Client) tunnelWhenReady(ctx context.Context, conn net.Conn, job connectJob) {
+	// Refused before parking: with the exit known to have no IPv6 route a
+	// stream for an IPv6 literal can only come back unreachable, after a
+	// round trip, and a dual-stack host sends one per connection.
+	if c.peerNoIPv6.Load() && isIPv6Literal(job.host) {
+		job.fail(conn, replyHostUnreachable(job.host))
+		return
+	}
 	readyCtx, cancel := context.WithTimeout(ctx, c.readyTimeout())
 	defer cancel()
 	parked := false

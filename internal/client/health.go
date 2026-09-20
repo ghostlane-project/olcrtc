@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/xtaci/smux"
@@ -37,7 +38,21 @@ func (c *Client) startControlLoop(
 			c.controlLastPong.Store(time.Now())
 			c.notifyLinkHealth(false)
 		},
-		OnDeath: func(error) { c.handleReconnect(ctx, cfg, cancel, reconnectLiveness) },
+		// A peer that closed on purpose - the server retired this room - is
+		// not waited out: the reconnect path would spend the liveness
+		// fallback and three handshakes, about a minute, on a room that
+		// said it was leaving. Ending the session lets the supervisor move
+		// to the next room now. A silent drop still takes the reconnect path.
+		//
+		// ai-generated: the closed-by-peer branch.
+		OnDeath: func(err error) {
+			if errors.Is(err, control.ErrClosedByPeer) {
+				logger.Infof("control closed by peer (server retired this room) - ending session for failover")
+				cancel()
+				return
+			}
+			c.handleReconnect(ctx, cfg, cancel, reconnectLiveness)
+		},
 		// Payload on our streams, not every frame that opens: the server's
 		// next session seals under the same key and its frames would vouch
 		// for a session it has already closed (olcbox#25).

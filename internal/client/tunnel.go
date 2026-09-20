@@ -62,6 +62,7 @@ func (c *Client) tunnel(ctx context.Context, conn net.Conn, session *smux.Sessio
 	logger.Infof("sid=%d tunnel to %s:%d", stream.ID(), job.host, job.port)
 	if err := c.sendConnectRequest(stream, job.host, job.port); err != nil {
 		logger.Warnf("sid=%d connect failed: %v", stream.ID(), err)
+		c.noteConnectFailure(err, job.host)
 		job.fail(conn, replyForConnectError(err, job.host))
 		return
 	}
@@ -95,6 +96,27 @@ func (c *Client) sendConnectRequest(stream *smux.Stream, targetAddr string, targ
 		return &connectAckError{code: ack[0], streamID: stream.ID()}
 	}
 	return nil
+}
+
+// noteConnectFailure latches the exit's lack of IPv6 the first time it refuses
+// an IPv6 literal as unreachable, so the rest of the session stops spending
+// tunnel streams on an address family the exit cannot route at all.
+func (c *Client) noteConnectFailure(err error, targetAddr string) {
+	var ackErr *connectAckError
+	if !errors.As(err, &ackErr) || ackErr.code != socksRepHostUnreachable || !isIPv6Literal(targetAddr) {
+		return
+	}
+	if c.peerNoIPv6.CompareAndSwap(false, true) {
+		logger.Infof("exit reports no IPv6 route (%s unreachable) - refusing further IPv6 targets locally", targetAddr)
+	}
+}
+
+// isIPv6Literal reports whether target is an IPv6 address literal. Names are
+// deliberately excluded: the exit resolves those itself and may pick an A
+// record, so short-circuiting them would break hosts that are reachable.
+func isIPv6Literal(target string) bool {
+	ip := net.ParseIP(target)
+	return ip != nil && ip.To4() == nil
 }
 
 type connectAckError struct {
