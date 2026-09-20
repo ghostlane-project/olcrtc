@@ -7,11 +7,21 @@ import "time"
 
 const (
 	// defaultGrowEvery is how often a capped lane whose cap holds data back
-	// raises the cap by an eighth, while the peer answers: it doubles in
-	// about twelve seconds. An SFU that stopped forwarding a stream over its
+	// raises the cap by a quarter, while the peer answers: it doubles in
+	// about six seconds. An SFU that stopped forwarding a stream over its
 	// budget does it again as soon as the stream is back over it, and each
-	// time costs the tunnel seconds of nothing, control included.
+	// time costs the tunnel seconds of nothing, control included. Recovery
+	// has to outrun those spells: a relay that suspends a stream every ten
+	// seconds for reasons of its own ratcheted a lane from 1801 to 434
+	// KiB/s over 80 s when the cap grew by an eighth and every spell halved
+	// it.
 	defaultGrowEvery = 2 * time.Second
+	// capObeyed is how far over its cap a lane's busiest second may go and
+	// still count as having kept to it: the token bucket lets a burst of
+	// paceBurst through, so a saturated lane measures a little over. A lane
+	// that kept to its cap and went dark anyway did not go dark for the
+	// rate it was writing, and halving it again would only ratchet it down.
+	capObeyed = 1.25
 	// minPaceRate is the lowest cap, in bytes per second: a probe's worth a
 	// few times a second.
 	minPaceRate = 16 << 10
@@ -88,11 +98,11 @@ func (s *pace) sentRate(now int64) float64 {
 
 // slow caps the lane at half of sent, the busiest second it wrote before it
 // went dark, or of its cap if that was lower. A lane that was quiet, wrote
-// less than an eighth of full, its uncapped rate, or less than half of its
-// cap did not take the path over any budget and stays as it was. It reports
-// whether the cap changed.
+// less than an eighth of full, its uncapped rate, or kept within a cap it
+// already had did not take the path over any budget and stays as it was. It
+// reports whether the cap changed.
 func (s *pace) slow(now int64, sent, full float64) bool {
-	if sent < max(quietRate, full/8) || (s.rate > 0 && sent < s.rate/2) {
+	if sent < max(quietRate, full/8) || (s.rate > 0 && sent <= s.rate*capObeyed) {
 		return false
 	}
 	if s.rate > 0 {
@@ -103,14 +113,14 @@ func (s *pace) slow(now int64, sent, full float64) bool {
 	return true
 }
 
-// grow raises the cap by an eighth when it held data back for a whole grow
+// grow raises the cap by a quarter when it held data back for a whole grow
 // interval, and lifts it once it reaches full, the most the lane writes
 // uncapped. It reports whether the cap changed.
 func (s *pace) grow(now int64, every time.Duration, full float64) bool {
 	if s.rate == 0 || !s.held || now-s.grownAt < int64(every) {
 		return false
 	}
-	s.rate += s.rate / 8
+	s.rate += s.rate / 4
 	if s.rate >= full {
 		s.rate = 0
 	}
