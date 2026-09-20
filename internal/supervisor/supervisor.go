@@ -22,6 +22,12 @@ const DefaultRetryDelay = 2 * time.Second
 // DefaultHistoryLimit bounds emitted status history when Config.HistoryLimit is unset.
 const DefaultHistoryLimit = 20
 
+// maxTrackedProfiles bounds the per-profile counters a rolling list can
+// accumulate; see statusTracker.forgetOldest.
+//
+// ai-generated: the constant (review of olcrtc#39).
+const maxTrackedProfiles = 64
+
 const (
 	// EventProfileStart marks a profile attempt starting.
 	EventProfileStart = "profile_start"
@@ -64,6 +70,13 @@ type Event struct {
 }
 
 // Status is a point-in-time view of the supervisor.
+//
+// ActiveProfileIndex is the active profile's place in the list being walked,
+// which with Config.Reload is not its place in Profiles: that one is ordered
+// by when each profile was first seen and holds names the list has since
+// dropped. ActiveProfile names it unambiguously.
+//
+// ai-generated: the note on ActiveProfileIndex (review of olcrtc#39).
 type Status struct {
 	Cycle              int
 	ActiveProfile      string
@@ -123,11 +136,8 @@ func Run(ctx context.Context, cfg Config, run Runner) error {
 	}
 	state := newStatusTracker(cfg.HistoryLimit, cfg.OnStatus)
 
-	lastName := ""
+	var last lastProfile
 	cycle := 1
-	// Profiles started in the current cycle, by name. A cycle is one pass
-	// over every profile on offer, and MaxCycles is measured against that.
-	startedThisCycle := map[string]bool{}
 	for {
 		if ctx.Err() != nil {
 			return nil //nolint:nilerr // context cancellation is normal supervisor shutdown
@@ -139,14 +149,12 @@ func Run(ctx context.Context, cfg Config, run Runner) error {
 			}
 			continue
 		}
-		idx := indexAfter(profiles, lastName)
-		if idx == 0 && lastName != "" {
+		idx, wrapped := nextStep(profiles, last)
+		if wrapped {
 			cycle++
-			startedThisCycle = map[string]bool{}
 		}
 		profile := profiles[idx]
-		lastName = profile.Name
-		startedThisCycle[profile.Name] = true
+		last = lastProfile{name: profile.Name, index: idx, ran: true}
 
 		state.start(profile.Name, cycle, idx)
 		cfg.notifyStart(profile, cycle)
@@ -161,13 +169,27 @@ func Run(ctx context.Context, cfg Config, run Runner) error {
 		// Judged against the list as it is now, not as it was when this
 		// profile started. Checked before the retry delay, so a list with
 		// nowhere left to go fails fast.
-		if cfg.MaxCycles > 0 && cycle >= cfg.MaxCycles && passComplete(list.refresh(), lastName, startedThisCycle) {
+		if _, done := nextStep(list.refresh(), last); cfg.MaxCycles > 0 && cycle >= cfg.MaxCycles && done {
 			return fmt.Errorf("%w after %d cycle(s): %w", ErrMaxCyclesExceeded, cycle, resultErr)
 		}
 		if err := waitRetryDelay(ctx, cfg.RetryDelay); err != nil {
 			return nil //nolint:nilerr // context cancellation during retry delay is normal shutdown
 		}
 	}
+}
+
+// lastProfile is where the walk is: the profile that ran last, by name and by
+// position. ran tells a first run from one whose profile happened to be
+// unnamed.
+//
+// ai-generated: the type (review of olcrtc#39). The port went by name alone,
+// and an unnamed profile - what the "none" provider yields on mobile, where
+// the room is the name - then looked like a walk that had not started, so the
+// head ran for ever and nothing after it was ever reached.
+type lastProfile struct {
+	name  string
+	index int
+	ran   bool
 }
 
 // profileList is the rolling set of profiles the supervisor walks. With a
@@ -188,29 +210,32 @@ func (p *profileList) refresh() []Profile {
 	return p.current
 }
 
-// passComplete reports whether the next step would revisit a profile already
-// started in this cycle. It judges the list as it is now: an entry added while
-// the last profile ran is still part of this pass.
-func passComplete(profiles []Profile, lastName string, started map[string]bool) bool {
-	if len(profiles) == 0 {
-		return false
+// nextStep says which profile runs next and whether getting there went past
+// the end of the list - one completed pass, which is what MaxCycles counts.
+//
+// It finds the profile that just ran by name, which is what lets the list roll
+// underneath the walk, and starts the search where that profile ran, so a list
+// whose names repeat - or has none, as the "none" provider's rooms do - walks
+// all of them instead of pinning the first match. A profile the list no longer
+// holds means the window rolled past it: the head is next and no pass ended,
+// since nothing on offer now has been run yet. That is the difference between
+// a list that wrapped and one that was rewritten, and going by "the next index
+// is 0" alone could not tell them apart.
+//
+// ai-generated: the whole function (review of olcrtc#39); the name lookup is
+// from the port. It replaces the port's set of names started this cycle, which
+// could not tell two unnamed profiles apart and ended the pass at the first.
+func nextStep(profiles []Profile, last lastProfile) (int, bool) {
+	if !last.ran || len(profiles) == 0 {
+		return 0, false
 	}
-	return started[profiles[indexAfter(profiles, lastName)].Name]
-}
-
-// indexAfter returns the position of the profile to run next: the one after the
-// profile named lastName, wrapping to 0 at the end. When lastName is not in the
-// list (first run, or it was dropped on reload) it returns 0.
-func indexAfter(profiles []Profile, lastName string) int {
-	if lastName == "" {
-		return 0
-	}
-	for i, profile := range profiles {
-		if profile.Name == lastName {
-			return (i + 1) % len(profiles)
+	for offset := range profiles {
+		i := (last.index + offset) % len(profiles)
+		if profiles[i].Name == last.name {
+			return (i + 1) % len(profiles), i+1 == len(profiles)
 		}
 	}
-	return 0
+	return 0, false
 }
 
 func (c Config) notifyStart(profile Profile, cycle int) {
@@ -260,8 +285,23 @@ func (t *statusTracker) profile(name string) *ProfileStatus {
 		profile = &ProfileStatus{Name: name}
 		t.byName[name] = profile
 		t.order = append(t.order, name)
+		t.forgetOldest()
 	}
 	return profile
+}
+
+// forgetOldest keeps the tracked profiles bounded. A static list is smaller
+// than the cap and nothing is ever dropped; a rolling one hands out a new name
+// every few hours, and without this the tracker, every status it emits and
+// every history entry it copies grew for as long as the client ran. The
+// oldest names go first, which on a rolling list are the rooms long retired.
+//
+// ai-generated: the whole function (review of olcrtc#39).
+func (t *statusTracker) forgetOldest() {
+	for len(t.order) > maxTrackedProfiles {
+		delete(t.byName, t.order[0])
+		t.order = t.order[1:]
+	}
 }
 
 func (t *statusTracker) start(name string, cycle, idx int) {
