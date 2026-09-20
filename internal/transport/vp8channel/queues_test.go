@@ -26,7 +26,7 @@ func TestConstrainedProfileShrinksThePacketQueues(t *testing.T) {
 	}
 	// One receive window of packets is all the inbound side can usefully hold:
 	// past that KCP's own window has already stopped the sender.
-	if _, rcv := kcpWindow(); in < rcv {
+	if rcv := kcpRcvWindow(); in < rcv {
 		t.Fatalf("constrained inbound queue %d holds less than the KCP receive window %d", in, rcv)
 	}
 }

@@ -533,3 +533,24 @@ func assertChanString(t *testing.T, ch <-chan string, want string) {
 		t.Fatalf("timed out waiting for %q", want)
 	}
 }
+
+// TestSessionDeclaresThePublishRateLimit holds what olcrtc#26 measured: a
+// transport on this engine publishes under WB Stream's ceiling, and reads it
+// through the engine.PublishRateLimited shape rather than a number of its own.
+// ai-generated: the whole test.
+func TestSessionDeclaresThePublishRateLimit(t *testing.T) {
+	var s any = &Session{}
+	limited, ok := s.(engine.PublishRateLimited)
+	if !ok {
+		t.Fatal("the livekit session does not declare a publish rate limit")
+	}
+	got := limited.PublishRateLimit()
+	if got != publishRateLimit {
+		t.Fatalf("PublishRateLimit = %d, want %d", got, publishRateLimit)
+	}
+	// The measured boundary was 1.5 MB/s sustained; anything at or above it
+	// is removed, so the ceiling has to stay under it with room to spare.
+	if got <= 0 || got >= 1_500_000 {
+		t.Fatalf("PublishRateLimit = %d, outside what the measurements allow", got)
+	}
+}

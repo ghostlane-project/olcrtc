@@ -63,7 +63,7 @@ func assertReleaseNeighborTraffic(t *testing.T, live *peerSession) {
 	t.Helper()
 	received := make(chan []byte, 1)
 	out := make(chan *packetBuffer, 64)
-	client, err := startKCP(out, func(b []byte) { received <- b }, testEpochHdr(3))
+	client, err := startKCP(out, func(b []byte) { received <- b }, testEpochHdr(3), 0)
 	if err != nil {
 		t.Fatal(err)
 	}

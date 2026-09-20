@@ -12,13 +12,27 @@ import (
 	runtimecfg "github.com/openlibrecommunity/olcrtc/internal/runtime"
 )
 
-// kcpWindow returns the send and receive window in segments for this host's
-// memory profile.
-func kcpWindow() (int, int) {
+// kcpRcvWindow returns the receive window in segments for this host's memory
+// profile.
+func kcpRcvWindow() int {
 	if runtimecfg.BuffersAreConstrained() {
-		return kcpConstrainedSndWnd, kcpConstrainedRcvWnd
+		return kcpConstrainedRcvWnd
 	}
-	return kcpSndWnd, kcpRcvWnd
+	return kcpRcvWnd
+}
+
+// kcpSendWindow returns the send window in segments: this host's profile, cut
+// to a round trip of the ceiling when the writer publishes under one.
+// ai-generated: kcpSendWindow (olcrtc#26).
+func kcpSendWindow(paced bool) int {
+	wnd := kcpSndWnd
+	if runtimecfg.BuffersAreConstrained() {
+		wnd = kcpConstrainedSndWnd
+	}
+	if paced && kcpPacedSndWnd < wnd {
+		wnd = kcpPacedSndWnd
+	}
+	return wnd
 }
 
 // inboundQueueSizeFor is the packet queue between the track reader and KCP
@@ -61,6 +75,19 @@ const (
 	// instead of being clamped to a fraction of it.
 	kcpSndWnd = 4096
 	kcpRcvWnd = 4096
+
+	// ai-generated: kcpPacedSndWnd and this comment (olcrtc#26).
+	// kcpPacedSndWnd is the send window when the writer publishes under a
+	// ceiling the engine's service polices. The send window is what a sender
+	// can have unacknowledged, so at a fixed publish rate it is also how long
+	// a byte handed to KCP waits behind the bulk already queued: 4096
+	// segments is 5.7 MB, which an unpoliced SFU drains at whatever rate it
+	// takes but a paced writer turns into 5 s of buffer in front of every new
+	// stream - the gate's connect on top of six downloads went from under
+	// 4 s to 9.75 s, past its 5 s bound, with nothing else changed. 512
+	// segments is ~0.7 MB: a round trip of the ceiling even on WB Stream's
+	// 380 ms path, and well under a second of standing queue.
+	kcpPacedSndWnd = 512
 
 	// The same windows on a host that is killed for using memory rather than
 	// swapped: 4096 segments is about 5.7 MB per direction, and this
@@ -106,7 +133,11 @@ type kcpRuntime struct {
 	closeOnce sync.Once
 }
 
-func startKCP(out chan<- *packetBuffer, onData func([]byte), epochHdr [epochHdrLen]byte) (*kcpRuntime, error) {
+// startKCP brings up one KCP session. sndWnd is the send window in segments;
+// 0 takes this host's profile. ai-generated: the sndWnd parameter (olcrtc#26).
+func startKCP(
+	out chan<- *packetBuffer, onData func([]byte), epochHdr [epochHdrLen]byte, sndWnd int,
+) (*kcpRuntime, error) {
 	c := newKCPConn(out, inboundQueueSizeFor(), epochHdr)
 
 	sess, err := kcp.NewConn3(kcpConvID, fakeUDPAddr(), nil, 0, 0, c)
@@ -124,7 +155,10 @@ func startKCP(out chan<- *packetBuffer, onData func([]byte), epochHdr [epochHdrL
 	// the wire. With nc=1 KCP keeps the window full and retransmits the few
 	// losses, letting throughput reach the SFU's real ceiling.
 	sess.SetNoDelay(1, 5, 2, 1)
-	sess.SetWindowSize(kcpWindow())
+	if sndWnd <= 0 {
+		sndWnd = kcpSendWindow(false)
+	}
+	sess.SetWindowSize(sndWnd, kcpRcvWindow())
 	sess.SetMtu(kcpMTU)
 	// Upstream marked SetStreamMode deprecated without providing a replacement;
 	// stream framing is still required for our wire format.
@@ -223,6 +257,9 @@ func (r *kcpRuntime) close() {
 type kcpPlane struct {
 	out    chan *packetBuffer
 	onData func([]byte)
+	// sndWnd is the KCP send window its sessions run with; 0 takes this
+	// host's profile. The transport sets it. ai-generated (olcrtc#26).
+	sndWnd int
 
 	// lifecycleMu serializes start/restart/close. Without it two concurrent
 	// restarts - a provider reconnect and an upper-layer ResetPeer fire
@@ -273,7 +310,7 @@ func (p *kcpPlane) start(hdr [epochHdrLen]byte) (bool, error) {
 			return
 		}
 		var rt *kcpRuntime
-		rt, err = startKCP(p.out, p.onData, hdr)
+		rt, err = startKCP(p.out, p.onData, hdr, p.sndWnd)
 		if err != nil {
 			return
 		}
@@ -305,7 +342,7 @@ func (p *kcpPlane) restart(hdr [epochHdrLen]byte) {
 		old.close()
 	}
 
-	rt, err := startKCP(p.out, p.onData, hdr)
+	rt, err := startKCP(p.out, p.onData, hdr, p.sndWnd)
 	if err != nil {
 		return
 	}

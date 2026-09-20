@@ -346,7 +346,7 @@ func (p *streamTransport) peerSessionFor(epoch uint32) *peerSession {
 		if p.onPeerData != nil {
 			p.onPeerData(peerID, payload)
 		}
-	}, hdr)
+	}, hdr, p.sendWindow)
 	if err != nil {
 		logger.Warnf("vp8channel: startKCP for peer 0x%08x failed: %v", epoch, err)
 
@@ -411,7 +411,7 @@ func (p *streamTransport) controlOf(sess *peerSession) *kcpRuntime {
 
 	control, err := startKCP(p.control.out, func(data []byte) {
 		p.deliverPeerControlData(peerID, data)
-	}, hdr)
+	}, hdr, p.sendWindow)
 	if err != nil {
 		logger.Warnf("vp8channel: startKCP for peer control 0x%08x failed: %v", epoch, err)
 
