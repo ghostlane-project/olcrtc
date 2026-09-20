@@ -6,6 +6,7 @@ package jitsi
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -58,6 +59,82 @@ func TestConferenceReceiverSendsTransportCCFeedback(t *testing.T) {
 	go forwardFrames(ctx, track)
 	if err := waitTransportCC(ctx, sender); err != nil {
 		t.Fatalf("the bridge got no transport-cc feedback from the endpoint: %v", err)
+	}
+}
+
+// TestConferenceReportsTheTracksNobodyReadsAsReceived plays a bridge
+// forwarding two video tracks to an endpoint that hands neither to a carrier
+// (a datachannel session: no video track handler). What is never read off a
+// track never reaches the transport-cc generator, so the bridge is told none
+// of it arrived, and its estimate for the endpoint falls with the loss it
+// reads. Every track the engine does not hand on has to be drained.
+func TestConferenceReportsTheTracksNobodyReadsAsReceived(t *testing.T) {
+	session := newSilentSession(t)
+	bridge := newTaggingBridge(t)
+	endpointAPI, err := newConferenceAPI(nil)
+	if err != nil {
+		t.Fatalf("newConferenceAPI: %v", err)
+	}
+	endpoint, err := endpointAPI.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatalf("endpoint pc: %v", err)
+	}
+	t.Cleanup(func() { _ = endpoint.Close() })
+	endpoint.OnTrack(session.handleRemoteTrack)
+
+	var tracks []*webrtc.TrackLocalStaticSample
+	var senders []*webrtc.RTPSender
+	for _, id := range []string{"first", "second"} {
+		track, trackErr := webrtc.NewTrackLocalStaticSample(
+			webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8}, id, id)
+		if trackErr != nil {
+			t.Fatalf("track %s: %v", id, trackErr)
+		}
+		sender, addErr := bridge.AddTrack(track)
+		if addErr != nil {
+			t.Fatalf("add track %s: %v", id, addErr)
+		}
+		tracks, senders = append(tracks, track), append(senders, sender)
+	}
+	connectPair(t, bridge, endpoint)
+
+	var covered, received atomic.Int64
+	for _, sender := range senders {
+		go countTransportCC(sender, &covered, &received)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	frame := make([]byte, 3000)
+	copy(frame, []byte{0x30, 0x01, 0x00, 0x9d, 0x01, 0x2a, 0x10, 0x00, 0x10, 0x00})
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for ctx.Err() == nil {
+		<-ticker.C
+		for _, track := range tracks {
+			_ = track.WriteSample(media.Sample{Data: frame, Duration: 20 * time.Millisecond})
+		}
+	}
+	sent, back := covered.Load(), received.Load()
+	if sent < 100 || float64(sent-back)/float64(sent) > 0.1 {
+		t.Fatalf("transport-cc feedback covered %d packets and reported %d of them arriving on a loopback "+
+			"path, want next to all of them: what nobody reads off a track never reaches the generator", sent, back)
+	}
+}
+
+// countTransportCC adds up how many packets a sender's transport-cc feedback
+// covers and how many of them it reports arriving.
+func countTransportCC(sender *webrtc.RTPSender, covered, received *atomic.Int64) {
+	for {
+		pkts, _, err := sender.ReadRTCP()
+		if err != nil {
+			return
+		}
+		for _, pkt := range pkts {
+			if fb, ok := pkt.(*rtcp.TransportLayerCC); ok {
+				covered.Add(int64(fb.PacketStatusCount))
+				received.Add(int64(len(fb.RecvDeltas)))
+			}
+		}
 	}
 }
 
