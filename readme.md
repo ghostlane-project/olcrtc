@@ -30,6 +30,26 @@ app -> SOCKS5 -> olcrtc cnc -> WebRTC/SFU service -> olcrtc srv -> internet
 
 > **Important:** make sure the video call service you need is on the allow lists and works in your network. If not, use another one.
 
+## The project
+
+olcRTC is maintained as part of **[Ghostlane](https://github.com/romanpodpriatov/ghostlane)**,
+an open-source VPN client for Android, iOS, macOS, Windows and Linux. This
+repository is the transport engine; the application repository is where the
+project's governance, funding policy and community documents live:
+
+| | |
+| --- | --- |
+| What the application is | [ghostlane/README.MD](https://github.com/romanpodpriatov/ghostlane/blob/main/README.MD) |
+| How the project is run | [GOVERNANCE.md](GOVERNANCE.md) |
+| How to contribute | [CONTRIBUTING.md](CONTRIBUTING.md) |
+| Reporting a vulnerability | [SECURITY.md](SECURITY.md) |
+| Funding, and who holds the money | [ghostlane/FUNDING.md](https://github.com/romanpodpriatov/ghostlane/blob/main/FUNDING.md) |
+| Licence and upstream attribution | [LICENSE](LICENSE), [NOTICE](NOTICE) |
+
+The engine is under active maintenance: changes are exercised by a release gate
+that moves real traffic through real relays before anything ships, and the
+report of that run is published with every application release.
+
 ## This fork
 
 This is ProofKit's fork of [openlibrecommunity/olcrtc](https://github.com/openlibrecommunity/olcrtc).

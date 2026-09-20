@@ -1,0 +1,26 @@
+# Notice
+
+olcRTC (this repository) is a fork of
+[openlibrecommunity/olcrtc](https://github.com/openlibrecommunity/olcrtc),
+which is now archived. The original work is copyright (C) 2026 zarazaex and was
+released under the WTFPL, version 2. Its licence text is kept verbatim in
+`LICENSE.upstream`.
+
+The WTFPL places no condition on redistribution: it permits copying,
+modification and distribution under any terms, including other licences. This
+fork therefore offers the combined work under the MIT licence in `LICENSE`, so
+that the project has a licence that is recognised, reviewable and acceptable to
+downstream users, packagers and funders. The upstream notice above is preserved
+as a matter of attribution rather than obligation.
+
+Third-party components keep their own licences:
+
+- [pion/webrtc](https://github.com/pion/webrtc) and the rest of the pion stack,
+  MIT
+- [xtaci/kcp-go](https://github.com/xtaci/kcp-go) and
+  [xtaci/smux](https://github.com/xtaci/smux), MIT
+- [livekit/server-sdk-go](https://github.com/livekit/server-sdk-go), Apache-2.0
+- the Go standard library and `golang.org/x/*`, BSD-3-Clause
+
+`go.mod` is the authoritative list of dependencies; each carries its own licence
+in the module cache.
