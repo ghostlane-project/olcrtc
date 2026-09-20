@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: WTFPL
+// SPDX-License-Identifier: Apache-2.0
 
 // ProtectedNet wraps Pion's network adapter. It applies the configured protector to each
 // socket fd and hides tunnel-style interfaces from candidate gathering.

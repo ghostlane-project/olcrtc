@@ -125,7 +125,15 @@ mage mobile  # gomobile bindings (Android)
 
 ## Лицензия
 
-WTFPL
+Apache License 2.0, см. [LICENSE](LICENSE).
+
+Это форк [openlibrecommunity/olcrtc](https://github.com/openlibrecommunity/olcrtc),
+который выходил под WTFPL. Та лицензия разрешает распространение на других
+условиях, и форк этим пользуется: проекту нужна лицензия, на которую могут
+опереться пользователи, сборщики пакетов и юристы, с явной патентной
+оговоркой. Исходный текст лицензии и копирайт сохранены в
+[LICENSE.upstream](LICENSE.upstream), происхождение и лицензии зависимостей
+описаны в [NOTICE](NOTICE).
 
 <div align="center">
 

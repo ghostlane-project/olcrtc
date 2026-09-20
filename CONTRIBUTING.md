@@ -48,9 +48,11 @@ could not run it, and a maintainer will.
 
 ## Licence
 
-Contributions are accepted under the repository's licence (MIT; see `LICENSE`
-and `NOTICE` for how this fork relates to its upstream). No copyright assignment
-is asked for and there is no contributor licence agreement.
+Contributions are accepted under the repository's licence, the Apache License
+2.0 (`LICENSE`); `NOTICE` records how this fork relates to its upstream. No
+copyright assignment is asked for and there is no contributor licence agreement
+to sign: section 5 of the licence already states that a contribution you submit
+is offered under it, and section 3 carries the patent grant that goes with it.
 
 ## Being paid
 
