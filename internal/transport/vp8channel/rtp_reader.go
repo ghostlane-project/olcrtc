@@ -18,17 +18,25 @@ import (
 const reorderWindow = 256
 
 // reorderHold bounds how long a gap may hold back the packets behind it.
-// Reordering on these paths spans milliseconds, so a gap still open after
-// this is a lost packet. The count bound alone is reached in a fraction of a
-// second at full rate, but a stream down to keepalives and probes - an idle
-// peer, or one whose lane is waiting out a dark path - brings a dozen packets
-// a second, and one lost packet held control and data behind it for twenty
-// seconds, long enough for the sender to count the path dark (issue #12).
-// The check runs on each arrival, and an idle peer still sends a keepalive
-// every keepaliveIdlePeriod.
+// The count bound alone is reached in a fraction of a second at full rate,
+// but a stream down to keepalives and probes - an idle peer, or one whose
+// lane is waiting out a dark path - brings a dozen packets a second, and one
+// lost packet held control and data behind it for twenty seconds, long
+// enough for the sender to count the path dark (issue #12).
+//
+// It has to outlast a repair, not just reordering: on every provider but
+// Jitsi the engine registers pion's default interceptors, whose generator
+// asks for a lost packet every 100 ms, so a repaired packet lands a NACK
+// interval plus a round trip late. A gap given up sooner than that throws
+// the repair away and loses the frame anyway: modelled at 1000 packets a
+// second in frames of 17, with 95% of losses repaired, a 100 ms hold put
+// frames through 93.9% of the time against 99.2% for the count bound at 1%
+// loss and a 40 ms round trip, and 89.4% against 98.3% at 2%. Three hundred
+// covers the generator's interval and a round trip of 100 ms with room to
+// spare, and still ends the twenty-second holds it was added for.
 //
 // ai-generated: the time bound.
-const reorderHold = 100 * time.Millisecond
+const reorderHold = 300 * time.Millisecond
 
 // Reordered RTP packets normally carry an MTU-sized payload. Larger buffers
 // are not retained after delivery so one malformed packet cannot pin a large
