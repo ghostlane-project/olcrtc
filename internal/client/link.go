@@ -471,32 +471,32 @@ func closeClientPair(pair *tunnelcore.SessionPair, session, controlSession *smux
 func (c *Client) rebuildProvider(
 	ctx context.Context, cfg Config, cancel context.CancelFunc, reason string, expect uint64, owned bool,
 ) {
-	if c.armFallback(ctx, cfg, cancel, expect, owned) {
+	if !c.armFallback(ctx, cfg, cancel, expect, owned, false) {
+		return
+	}
+	if c.ln != nil {
 		c.ln.Reconnect(reason)
 	}
 }
 
-// afterFailedRound paces the next round of handshakes and, unless the peer
-// answered, asks the provider for a new connection first.
+// afterFailedRound waits before anything else is tried, and has the wait end
+// in a new connection unless the peer refused this client.
 //
-// ai-generated: the whole function (review of #20). A peer that answers and
-// refuses - a rejection, a protocol version, a malformed reply - would answer
-// a connection just like this one the same way, so asking for one buys
-// nothing: a server that rejects every hello had the client spend the
-// provider's whole reconnect budget in under a minute. What the client does
-// instead is wait, longer after every round that ends without a session, so
-// a peer that is gone or refusing is still retried without a rejoin every
-// minute or two.
+// ai-generated: the whole function (review of #20). A peer that refuses - it
+// rejected the hello, or speaks a version this build does not - would refuse
+// a connection just like this one, so asking for one buys nothing: a server
+// that rejected every hello had the client spend the provider's whole
+// reconnect budget in under a minute. And the wait grows with every round
+// that ends without a session: a provider that answers every ask promptly,
+// as Jitsi does, had the client rejoin the room every minute or two for as
+// long as it ran, because nothing there ever counted those rejoins.
 func (c *Client) afterFailedRound(
 	ctx context.Context, cfg Config, cancel context.CancelFunc, result roundResult, expect uint64,
 ) {
-	if !c.armFallback(ctx, cfg, cancel, expect, true) {
+	if !c.armFallback(ctx, cfg, cancel, expect, true, result != roundRefused) {
 		return
 	}
 	c.failedRounds.Add(1)
-	if result != roundRefused && c.ln != nil {
-		c.ln.Reconnect(reconnectHandshake)
-	}
 }
 
 // recoveryPause is how long the fallback waits before the next round: the
@@ -515,11 +515,12 @@ func (c *Client) recoveryPause() time.Duration {
 	return min(pause, maxRecoveryPause)
 }
 
-// armFallback is the next attempt at a session: it waits recoveryPause and
-// then handshakes itself. Armed after the provider was asked for a new
-// connection, it is the answer to a provider that silently never calls back,
-// which would otherwise leave sessionReady unsignalled for good; armed after
-// a round of handshakes failed, it is the pause before the next one.
+// armFallback is what happens next when there is no session: it waits
+// recoveryPause and then, with ask, asks the provider for a new connection,
+// or handshakes over the one there is. Armed after an ask, it is the answer
+// to a provider that silently never calls back, which would otherwise leave
+// sessionReady unsignalled for good; armed after a round of handshakes
+// failed, it is the pause before the next one.
 //
 // ai-generated: arming on the recovery generation, the disarm by a provider
 // callback and the rebuild when its handshakes fail too (olcrtc#19); the
@@ -531,7 +532,7 @@ func (c *Client) recoveryPause() time.Duration {
 // they have begun; and when they fail it asks the provider again rather than
 // leave the tunnel without a session and nothing retrying.
 func (c *Client) armFallback(
-	ctx context.Context, cfg Config, cancel context.CancelFunc, expect uint64, owned bool,
+	ctx context.Context, cfg Config, cancel context.CancelFunc, expect uint64, owned, ask bool,
 ) bool {
 	run, gen, ok := c.recovery.takeIf(ctx, expect, owned)
 	if !ok {
@@ -548,6 +549,11 @@ func (c *Client) armFallback(
 		case <-timer.C:
 		}
 		if c.sessionEstablished() {
+			return
+		}
+		if ask {
+			logger.Warnf("client reconnect: no session after %s - asking the provider for a new connection", delay)
+			c.rebuildProvider(ctx, cfg, cancel, reconnectHandshake, gen, true)
 			return
 		}
 		logger.Warnf("client reconnect: no session after %s - handshaking again", delay)
@@ -620,7 +626,7 @@ func (c *Client) retryHandshake(
 		}
 		if maxAttempts > 0 && attempt >= maxAttempts {
 			logger.Warnf("client reconnect: exhausted %d handshake attempts (reason=%s) - "+
-				"asking the provider for a new connection", attempt, reason)
+				"pausing before the next try", attempt, reason)
 			return roundSilent
 		}
 		select {
