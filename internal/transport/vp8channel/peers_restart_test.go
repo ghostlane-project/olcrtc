@@ -172,3 +172,43 @@ func TestClientSeesServerRestartThroughPeerTraffic(t *testing.T) {
 		t.Fatalf("client rebuilt its provider %d times after the server restarted, want 1", got)
 	}
 }
+
+// A restart waits for a peer session that is being created, so the session
+// either lands in the table for readdressPeers to find or reads the epoch the
+// restart has just installed. Without that, a session created while the
+// restart ran kept the old epoch and went on vouching for a peer that had
+// restarted (olcrtc#19, review of #20).
+//
+// ai-generated: the whole test.
+func TestRestartWaitsForAPeerSessionBeingCreated(t *testing.T) {
+	srv := newRestartTestTransport(&fakeVideoStream{canSend: true}, transport.Config{
+		OnPeerData: func(string, []byte) {},
+	})
+	srv.sampleWriter = func([]byte) bool { return true }
+	defer func() { _ = srv.Close() }()
+	if srv.peerSessionFor(0x0333) == nil {
+		t.Fatal("peer session was not created")
+	}
+
+	// A session is being built right now: peerSessionFor holds createMu from
+	// before it reads the epoch until after it installs the session.
+	srv.peers.createMu.Lock()
+	done := make(chan struct{})
+	go func() {
+		srv.restartPlanes()
+		close(done)
+	}()
+	select {
+	case <-done:
+		srv.peers.createMu.Unlock()
+		t.Fatal("the restart readdressed the peers while one was being created")
+	case <-time.After(100 * time.Millisecond):
+	}
+	srv.peers.createMu.Unlock()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the restart did not finish once the session was in the table")
+	}
+}
