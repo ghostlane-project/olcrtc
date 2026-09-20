@@ -315,8 +315,17 @@ func (c *kcpConn) probe() {
 	c.probeMu.Lock()
 	c.probeOut = append(c.probeOut[:0], c.probeBuf...)
 	c.probeMu.Unlock()
-	if len(c.probeOut) > 0 {
-		_, _ = c.enqueue(c.probeOut)
+	if len(c.probeOut) == 0 {
+		return
+	}
+	// The lane's own writer calls this, and it is what drains the queue, so
+	// a probe waits for no room: with none there is plenty on its way out
+	// already, and the next interval brings another probe.
+	packet := c.wrap(c.probeOut)
+	select {
+	case c.out <- packet:
+	default:
+		packet.release()
 	}
 }
 
@@ -327,10 +336,10 @@ func (c *kcpConn) WriteTo(p []byte, _ net.Addr) (int, error) {
 	return c.enqueue(p)
 }
 
-// enqueue wraps a KCP packet for the wire and queues it for the lane.
-func (c *kcpConn) enqueue(p []byte) (int, error) {
-	// Layout: [epoch header][KCP packet p][CRC32(p)]. The receiver strips the
-	// epoch header before deliver(), which then verifies and strips the CRC.
+// wrap builds the wire packet for a KCP packet. Layout: [epoch header][KCP
+// packet p][CRC32(p)]. The receiver strips the epoch header before
+// deliver(), which then verifies and strips the CRC.
+func (c *kcpConn) wrap(p []byte) *packetBuffer {
 	packet := acquirePacketBuffer(&c.outPools, epochHdrLen+len(p)+wireCRCLen)
 	packet.queued = monoNow()
 	buf := packet.data
@@ -339,7 +348,12 @@ func (c *kcpConn) enqueue(p []byte) (int, error) {
 	c.hdrMu.RUnlock()
 	copy(buf[epochHdrLen:], p)
 	binary.BigEndian.PutUint32(buf[epochHdrLen+len(p):], crc32.Checksum(p, crcTable))
+	return packet
+}
 
+// enqueue wraps a KCP packet for the wire and queues it for the lane.
+func (c *kcpConn) enqueue(p []byte) (int, error) {
+	packet := c.wrap(p)
 	if c.acks != nil && answers(p) && !pushes(p) { // ai-generated: issue #12
 		select {
 		case c.acks <- packet:
