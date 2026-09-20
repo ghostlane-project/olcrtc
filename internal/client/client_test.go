@@ -741,8 +741,12 @@ func TestWatchControlStalenessNotifiesTransport(t *testing.T) {
 	c.controlLastPong.Store(time.Now())
 	go c.watchControlStaleness(ctx, interval)
 
+	// Keep the last pong fresh while waiting, as a peer that answers does:
+	// a watcher whose first tick lands a scheduling delay later would
+	// otherwise see it stale already and never report a healthy link.
 	deadline := time.Now().Add(time.Second)
 	for {
+		c.controlLastPong.Store(time.Now())
 		if v, ok := ln.lastNotified(); ok && !v {
 			break
 		}
