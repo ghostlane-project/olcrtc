@@ -16,30 +16,38 @@ const (
 	// deliveryBucketMs is how many milliseconds of KCP timestamps one bucket
 	// of the delivery count spans.
 	deliveryBucketMs = 250
-	// minJudgedPushes is the fewest pushed packets a judgement rests on.
+	// minJudgedPushes is the fewest pushed packets a judgement rests on,
+	// and minJudgedFrames the fewest frames they came in: every packet of a
+	// frame shares its fate, so it is the frames that make the evidence.
+	// Sixty-four packets is a frame and a half at full size, and a lane on
+	// a path losing one packet in a hundred read shares of 0.01 and 0.14
+	// off such samples and halved frames it had no reason to.
 	minJudgedPushes = 64
+	minJudgedFrames = 24
 	// minFramePackets is the fewest KCP packets a capped lane puts in a
 	// frame.
 	minFramePackets = 4
-	// A lane shrinks its frames while fewer than lossyShare of the packets
-	// it pushes come back acknowledged, to what should bring back
-	// aimShare of them, and grows them by a quarter while more than
-	// cleanShare do. Under darkShare next to nothing got through: a relay
+	// What a frame of k packets carries through a path that loses one in n
+	// goes as k*q^(1.17k), whose peak sits at a delivered share of 1/e:
+	// aiming higher than that trades away more in frame size than it wins
+	// back in deliveries, and on the 1-3% paths aiming at 65% measured
+	// 30-45% slower than no cap at all. So a lane shrinks its frames only
+	// once two judgements in a row read well under the peak, and aims a
+	// little over it. Under darkShare next to nothing got through: a relay
 	// that stopped forwarding, which the lane's dark spells deal with, not
 	// loss. What a lane pushed before it came back from a dark spell is not
 	// weighed at all (forget).
-	//
-	// What a frame of k packets carries through a path that loses one in
-	// n goes as k*q^(1.17k), whose peak sits at a delivered share of 1/e:
-	// aiming higher than that trades away more in frame size than it wins
-	// back in deliveries, and on the 1-3% paths it measured 30-45% slower
-	// than no cap at all. The lane aims a little over the peak and leaves a
-	// wide band where it does not move at all, so the share it reads, which
-	// rests on a few frames, does not walk the cap about.
 	darkShare  = 0.02
-	lossyShare = 0.35
+	lossyShare = 0.25
 	aimShare   = 0.40
-	cleanShare = 0.85
+	// frameGrowBuckets is how long a capped lane goes between raising the
+	// cap a quarter while its readings are not lossy, in buckets. A cap
+	// that only grew on a share the aim never reaches would be permanent,
+	// and a cap set on a burst of bad luck would cost the rest of the
+	// session; growing until the readings turn lossy and shrinking back
+	// keeps a lane around the peak instead, and the curve is flat enough
+	// there that the cycle costs a few per cent.
+	frameGrowBuckets = 8
 
 	// kcpTSOff is where the timestamp sits in a KCP segment header.
 	kcpTSOff = 8
@@ -85,14 +93,14 @@ type deliveryTrack struct {
 // deliveryBucket is one bucket of the count; id is the unwrapped timestamp
 // over deliveryBucketMs plus one, zero for an unused bucket.
 type deliveryBucket struct {
-	id           int64
-	pushes, acks int
+	id                   int64
+	pushes, acks, frames int
 }
 
-// count adds pushes and acknowledgements under the push timestamp ts and
-// returns its bucket. An acknowledgement for a bucket already judged or
+// count adds pushes, acknowledgements and frames under the push timestamp ts
+// and returns its bucket. An acknowledgement for a bucket already judged or
 // reused is dropped.
-func (t *deliveryTrack) count(ts uint32, pushes, acks int) int64 {
+func (t *deliveryTrack) count(ts uint32, pushes, acks, frames int) int64 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	id := t.clock.unwrap(ts)/deliveryBucketMs + 1
@@ -108,18 +116,19 @@ func (t *deliveryTrack) count(ts uint32, pushes, acks int) int64 {
 	}
 	b.pushes += pushes
 	b.acks += acks
+	b.frames += frames
 	return id
 }
 
 // take clears the buckets from before the newest acknowledged one, which
 // have all they are going to get, and returns the pushes and
 // acknowledgements of those from the bucket id from on.
-func (t *deliveryTrack) take(from int64) (int, int) {
+func (t *deliveryTrack) take(from int64) (int, int, int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	pushes, acks, before := 0, 0, t.newestAck
+	pushes, acks, frames, before := 0, 0, 0, t.newestAck
 	if before == 0 {
-		return 0, 0
+		return 0, 0, 0
 	}
 	for i := range t.buckets {
 		b := &t.buckets[i]
@@ -129,10 +138,11 @@ func (t *deliveryTrack) take(from int64) (int, int) {
 		if b.id >= from {
 			pushes += b.pushes
 			acks += b.acks
+			frames += b.frames
 		}
 		*b = deliveryBucket{}
 	}
-	return pushes, acks
+	return pushes, acks, frames
 }
 
 // frameCap is the most KCP packets a data lane puts in one frame. A frame
@@ -145,21 +155,32 @@ type frameCap struct {
 	// limit is the cap, zero for none. newest is the newest bucket a push
 	// went out in, and since the first bucket whose pushes went out under
 	// the current limit. pushes and acks are the evidence gathered since.
-	limit         int
-	newest, since int64
-	pushes, acks  int
+	limit                int
+	newest, since        int64
+	grownAt              int64
+	pushes, acks, frames int
+	// lossy is whether the last judgement read under lossyShare. One such
+	// reading is a run of bad luck as often as it is a lossy path, and
+	// halving the frames for it costs seconds of growing back.
+	lossy bool
 }
 
 // pushed counts a packet with a push that went out under timestamp ts.
 func (f *frameCap) pushed(track *deliveryTrack, ts uint32) {
-	f.newest = track.count(ts, 1, 0)
+	f.newest = track.count(ts, 1, 0, 0)
+}
+
+// wrote counts the frame those pushes went out in, under the timestamp of
+// its last one.
+func (f *frameCap) wrote(track *deliveryTrack, ts uint32) {
+	track.count(ts, 0, 0, 1)
 }
 
 // forget drops the evidence gathered so far, and what was pushed before now:
 // the lane came back from a dark spell, which says nothing of how lossy the
 // path is.
 func (f *frameCap) forget() {
-	f.pushes, f.acks, f.since = 0, 0, f.newest+1
+	f.pushes, f.acks, f.frames, f.lossy, f.since = 0, 0, 0, false, f.newest+1
 }
 
 // halve halves the cap, down to minFramePackets, as the lane goes dark, and
@@ -172,32 +193,34 @@ func (f *frameCap) forget() {
 func (f *frameCap) halve(full int) bool {
 	limit := max(cmp.Or(f.limit, full)/2, minFramePackets)
 	changed := limit != f.limit
-	f.limit = limit
+	f.limit, f.grownAt = limit, f.newest
 	f.forget()
 	return changed
 }
 
 // judge weighs what came back of the packets pushed before the newest one
-// acknowledged, and changes the cap when there is enough of it: while under
-// lossyShare got through, down to what should bring back aimShare, at most
-// half of it; while over cleanShare, a quarter up, to full, the batch size,
-// which lifts it. It returns the share judged and whether the cap changed.
+// acknowledged, and changes the cap when there is enough of it: while two
+// judgements in a row read under lossyShare, down to what should bring back
+// aimShare, at most half of it; otherwise a quarter up every
+// frameGrowBuckets, to full, the packets a sample holds, which lifts it. It
+// returns the share judged and whether the cap changed.
 func (f *frameCap) judge(track *deliveryTrack, full int) (float64, bool) {
-	pushes, acks := track.take(f.since)
-	f.pushes += pushes
-	f.acks += acks
-	if f.pushes < minJudgedPushes {
+	pushes, acks, frames := track.take(f.since)
+	f.pushes, f.acks, f.frames = f.pushes+pushes, f.acks+acks, f.frames+frames
+	if f.pushes < minJudgedPushes || f.frames < minJudgedFrames {
 		return 0, false
 	}
 	share := float64(f.acks) / float64(f.pushes)
-	f.pushes, f.acks = 0, 0
+	f.pushes, f.acks, f.frames = 0, 0, 0
+	lossyBefore := f.lossy
+	f.lossy = share >= darkShare && share < lossyShare
 	limit := f.limit
 	switch {
 	case share < darkShare:
 		return share, false
-	case share < lossyShare:
+	case f.lossy && lossyBefore:
 		limit = shrunk(cmp.Or(limit, full), share)
-	case share > cleanShare && limit > 0:
+	case limit > 0 && !f.lossy && f.newest-f.grownAt >= frameGrowBuckets:
 		limit += max(limit/4, 1)
 		if limit >= full {
 			limit = 0
@@ -206,7 +229,7 @@ func (f *frameCap) judge(track *deliveryTrack, full int) (float64, bool) {
 	if limit == f.limit {
 		return share, false
 	}
-	f.limit, f.since = limit, f.newest+1
+	f.limit, f.since, f.grownAt = limit, f.newest+1, f.newest
 	return share, true
 }
 

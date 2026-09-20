@@ -386,10 +386,10 @@ func TestKCPConnCountsWhatComesBackForItsPushes(t *testing.T) {
 		binary.BigEndian.PutUint32(crc[:], crc32.Checksum(segs, crcTable))
 		return append(append([]byte(nil), segs...), crc[:]...)
 	}
-	c.delivery.count(1000, 1, 0) // a push went out stamped 1000
+	c.delivery.count(1000, 1, 0, 0) // a push went out stamped 1000
 	c.deliver(wire(kcpSegmentAt(kcp.IKCP_CMD_ACK, 1000, "")))
 	c.deliver(wire(kcpSegmentAt(kcp.IKCP_CMD_ACK, 2000, ""))) // a later bucket answered
-	if pushes, acks := c.delivery.take(0); pushes != 1 || acks != 1 {
+	if pushes, acks, _ := c.delivery.take(0); pushes != 1 || acks != 1 {
 		t.Fatalf("the conn counted %d pushes and %d answers, want one of each", pushes, acks)
 	}
 }
