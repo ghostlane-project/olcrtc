@@ -136,11 +136,13 @@ type Session struct {
 	peerEpochMu     sync.Mutex
 	peerEpochs      map[string]uint32
 	peerVideoSSRC   atomic.Uint32
-	// bridgeSSRCs are the SSRCs the current session-initiate announces as
-	// the bridge's own, which the peerVideoSSRC latch skips.
+	// sourceOwners is which endpoint owns which source, as the session's
+	// stanzas announce them: the bridge's own, which the peerVideoSSRC
+	// latch skips, and the peers', which tell the latch when the source
+	// holding it is gone.
 	//
 	// ai-generated: this field.
-	bridgeSSRCs atomic.Pointer[map[uint32]bool]
+	sourceOwners atomic.Pointer[map[uint32]string]
 
 	done     chan struct{}
 	doneOnce sync.Once
