@@ -84,6 +84,13 @@ type kcpConn struct {
 	lastAck   atomic.Int64
 	holdEvery atomic.Int64
 	probeAt   atomic.Int64
+	// probeMu guards probeBuf, the newest push held back, which probe()
+	// sends again when the next one is due. probeOut is probe()'s copy of
+	// it, touched by the lane's writer alone.
+	// ai-generated: issue #12.
+	probeMu  sync.Mutex
+	probeBuf []byte
+	probeOut []byte
 
 	// delivery counts the packets with a push the data lane writes and the
 	// acknowledgements that come back for them, for the lane's frame cap.
@@ -266,23 +273,62 @@ func (c *kcpConn) hold(every time.Duration) {
 }
 
 // withheld reports whether WriteTo drops p: a push, while pushes are held
-// back, with the next probe not due. What answers the peer always goes.
+// back. What answers the peer always goes. The newest push held back is kept
+// for probe() to send.
 //
 // ai-generated: issue #12.
 func (c *kcpConn) withheld(p []byte) bool {
-	every := c.holdEvery.Load()
-	if every == 0 || answers(p) || !pushes(p) {
+	if c.holdEvery.Load() == 0 || answers(p) || !pushes(p) {
 		return false
+	}
+	c.keepProbe(p)
+	return true
+}
+
+// keepProbe remembers a push that was dropped rather than sent, as the one
+// probe() sends while the lane is dark.
+//
+// ai-generated: issue #12.
+func (c *kcpConn) keepProbe(p []byte) {
+	c.probeMu.Lock()
+	c.probeBuf = append(c.probeBuf[:0], p...)
+	c.probeMu.Unlock()
+}
+
+// probe sends the newest push held back, once per hold interval, so the peer
+// has something to answer while the lane is dark. Leaving that to whatever
+// KCP happens to resend does not work: kcp-go backs each segment's timeout
+// off every time it goes unanswered, so the next resend can be seconds away
+// and the lane never learns the path is back.
+//
+// ai-generated: the whole function (issue #12).
+func (c *kcpConn) probe() {
+	every := c.holdEvery.Load()
+	if every == 0 {
+		return
 	}
 	now := monoNow()
 	at := c.probeAt.Load()
-	return now < at || !c.probeAt.CompareAndSwap(at, now+every)
+	if now < at || !c.probeAt.CompareAndSwap(at, now+every) {
+		return
+	}
+	c.probeMu.Lock()
+	c.probeOut = append(c.probeOut[:0], c.probeBuf...)
+	c.probeMu.Unlock()
+	if len(c.probeOut) > 0 {
+		_, _ = c.enqueue(c.probeOut)
+	}
 }
 
 func (c *kcpConn) WriteTo(p []byte, _ net.Addr) (int, error) {
 	if c.withheld(p) { // ai-generated: issue #12, as a full path would drop it
 		return len(p), nil
 	}
+	return c.enqueue(p)
+}
+
+// enqueue wraps a KCP packet for the wire and queues it for the lane.
+func (c *kcpConn) enqueue(p []byte) (int, error) {
 	// Layout: [epoch header][KCP packet p][CRC32(p)]. The receiver strips the
 	// epoch header before deliver(), which then verifies and strips the CRC.
 	packet := acquirePacketBuffer(&c.outPools, epochHdrLen+len(p)+wireCRCLen)

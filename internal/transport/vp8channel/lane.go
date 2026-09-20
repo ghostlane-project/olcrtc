@@ -108,7 +108,10 @@ type dataLane struct {
 // what is queued is what answers the peer, and a probe now and then.
 func (l *dataLane) flush(p *streamTransport, write func([]byte) bool) bool {
 	now := monoNow()
-	if !l.watch(p, now) && l.pace.grow(now, cmp.Or(p.growEvery, defaultGrowEvery), p.fullRate()) {
+	switch {
+	case l.watch(p, now):
+		l.seen.probe() // on the lane's cadence, see kcpConn.probe
+	case l.pace.grow(now, cmp.Or(p.growEvery, defaultGrowEvery), p.fullRate()):
 		l.resize(p)
 	}
 	acked := l.sendAcks(p, write)
@@ -296,7 +299,7 @@ func (l *dataLane) send(p *streamTransport, now int64, write func([]byte) bool) 
 // sift drops the pushes already queued when the lane goes dark, keeping what
 // answers the peer: the peer's own lane may be dark too, and it only comes
 // back on the acknowledgements this one sends. KCP resends whatever pushes
-// it still needs.
+// it still needs, and the last push dropped here is the conn's first probe.
 func (l *dataLane) sift() {
 	var keep []*packetBuffer
 	for range cap(l.out) + 1 {
@@ -307,6 +310,9 @@ func (l *dataLane) sift() {
 		if len(frame.data) > epochHdrLen+wireCRCLen && answers(frame.data[epochHdrLen:]) {
 			keep = append(keep, frame)
 			continue
+		}
+		if l.seen != nil && len(frame.data) > epochHdrLen+wireCRCLen {
+			l.seen.keepProbe(frame.data[epochHdrLen : len(frame.data)-wireCRCLen])
 		}
 		frame.release()
 	}

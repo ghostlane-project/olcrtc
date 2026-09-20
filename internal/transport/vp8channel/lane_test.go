@@ -123,7 +123,7 @@ func newLaneTestTransport(t *testing.T, cfg transport.Config, relay *budgetRelay
 // that goes quiet once nothing is acknowledged lets the SFU take the stream
 // back, and the transfer keeps moving.
 func TestDataLaneBringsBackAStreamTheSFUStoppedForwarding(t *testing.T) {
-	runLanePair(t, lanePair{toClient: 256 << 10, pull: 768 << 10})
+	runLanePair(t, lanePair{toClient: 512 << 10, pull: 768 << 10})
 }
 
 // TestDataLanesKeepAnsweringWhileBothAreDark pulls and pushes at once through
@@ -132,11 +132,14 @@ func TestDataLaneBringsBackAStreamTheSFUStoppedForwarding(t *testing.T) {
 // what answers the peer: holding back acknowledgements too leaves each side
 // waiting for the other's, and neither direction comes back.
 func TestDataLanesKeepAnsweringWhileBothAreDark(t *testing.T) {
-	runLanePair(t, lanePair{toClient: 256 << 10, toServer: 256 << 10, pull: 512 << 10, push: 512 << 10})
+	runLanePair(t, lanePair{toClient: 512 << 10, toServer: 512 << 10, pull: 512 << 10, push: 512 << 10})
 }
 
 // lanePair is a server and a client on budget relays: the budgets per
-// window each way (zero forwards everything) and what to move each way.
+// window each way (zero forwards everything) and what to move each way. A
+// budget is above what a lane paces itself down to after a spell, half of
+// the 560 KiB/s these options allow, so coming back does not trip it again
+// by construction.
 type lanePair struct {
 	toClient, toServer int
 	pull, push         int
@@ -265,17 +268,110 @@ func TestKCPConnHoldsPushesBackButNotAnswers(t *testing.T) {
 	}
 
 	c.hold(time.Hour)
-	write(kcpSegments([]byte("d"), push)) // the probe
 	write(kcpSegments([]byte("d"), push)) // held back
+	write(kcpSegments([]byte("d"), push)) // held back, and kept as the probe
 	write(kcpSegments([]byte("d"), ack, push))
 	write(kcpSegments(nil, ack))
-	if len(out) != 4 || len(acks) != 2 {
-		t.Fatalf("while held: out=%d acks=%d, want one probe and everything that answers", len(out), len(acks))
+	if len(out) != 3 || len(acks) != 2 {
+		t.Fatalf("while held: out=%d acks=%d, want only what answers the peer", len(out), len(acks))
+	}
+	c.probe()
+	if len(out) != 4 {
+		t.Fatalf("after the first probe: out=%d, want the push held back sent again", len(out))
+	}
+	c.probe()
+	if len(out) != 4 {
+		t.Fatalf("out=%d, want at most one probe per interval", len(out))
 	}
 	c.hold(0)
 	write(kcpSegments([]byte("d"), push))
 	if len(out) != 5 {
 		t.Fatalf("after the hold: out=%d, want the push through", len(out))
+	}
+}
+
+// TestDataLaneGoingDarkHoldsPushesAndKeepsProbing drives one lane by hand
+// over a path that answers nothing. Going dark it has to hold the conn's
+// pushes back, halve its frames and its KCP send window, and then keep one
+// probe going out per interval on its own cadence: left to KCP, whose
+// segment timeouts back off every time they go unanswered, the next push
+// can be seconds away and the lane never learns the path is back. Once the
+// peer answers, the hold lifts and a loud lane is paced.
+func TestDataLaneGoingDarkHoldsPushesAndKeepsProbing(t *testing.T) {
+	tr := newStreamTransport(&fakeVideoStream{canSend: true}, nil,
+		transport.Config{ChannelID: "dark-lane"}, Options{FPS: 50, BatchSize: 64})
+	tr.blackoutAfter = 100 * time.Millisecond
+	tr.probeEvery = 20 * time.Millisecond
+	out := make(chan *packetBuffer, 512)
+	conn := newKCPConn(out, 16, testEpochHdr(1))
+	windows := make(chan int, 16)
+	lane := &dataLane{
+		out: out, acks: make(chan *packetBuffer, 8), name: "dark-lane",
+		conn: func() *kcpConn { return conn }, window: func(segments int) { windows <- segments },
+	}
+	samples := 0
+	write := func([]byte) bool { samples++; return true }
+	body := make([]byte, kcpMTU-kcp.IKCP_OVERHEAD)
+	push := func() { _, _ = conn.WriteTo(kcpSegments(body, kcp.IKCP_CMD_PUSH), nil) }
+
+	for range 400 {
+		push()
+	}
+	for len(out) > 0 {
+		lane.flush(tr, write)
+	}
+	for range 20 { // queued when the spell starts, for sift to drop
+		push()
+	}
+	if lane.frames.limit != 0 || conn.holdEvery.Load() != 0 {
+		t.Fatalf("frames %d, hold %d before any spell; want neither", lane.frames.limit, conn.holdEvery.Load())
+	}
+
+	time.Sleep(2 * tr.blackoutAfter)
+	lane.flush(tr, write)
+	if conn.holdEvery.Load() == 0 {
+		t.Fatal("going dark left the conn sending pushes")
+	}
+	if want := tr.fullPackets() / 2; lane.frames.limit != want {
+		t.Fatalf("frames %d going dark, want half of a full one (%d)", lane.frames.limit, want)
+	}
+	snd, _ := kcpWindow()
+	select {
+	case segments := <-windows:
+		if segments >= snd {
+			t.Fatalf("KCP send window %d going dark, want it under the default %d", segments, snd)
+		}
+	default:
+		t.Fatal("going dark left the KCP send window alone")
+	}
+	// Nothing is pushed from here on: the probes have to come from what the
+	// lane dropped as it went dark, as they would when KCP has backed the
+	// timeouts of everything it holds off past the spell.
+	probes := 0
+	for range 10 {
+		time.Sleep(tr.probeEvery)
+		before := samples
+		lane.flush(tr, write)
+		probes += samples - before
+	}
+	if probes < 5 {
+		t.Fatalf("%d probes over ten intervals, want about one each", probes)
+	}
+	push()
+	if len(out) != 0 {
+		t.Fatalf("%d packets queued while the lane held pushes back", len(out))
+	}
+
+	conn.lastAck.Store(monoNow())
+	lane.flush(tr, write)
+	if conn.holdEvery.Load() != 0 {
+		t.Fatal("the peer answered and the lane went on holding pushes back")
+	}
+	if lane.pace.rate == 0 {
+		t.Fatal("a loud lane came back from a long spell unpaced")
+	}
+	if len(windows) == 0 {
+		t.Fatal("the pace cap left the KCP send window alone")
 	}
 }
 
