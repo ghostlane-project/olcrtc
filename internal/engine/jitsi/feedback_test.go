@@ -82,9 +82,10 @@ func TestConferenceReportsTheTracksNobodyReadsAsReceived(t *testing.T) {
 	t.Cleanup(func() { _ = endpoint.Close() })
 	endpoint.OnTrack(session.handleRemoteTrack)
 
-	var tracks []*webrtc.TrackLocalStaticSample
-	var senders []*webrtc.RTPSender
-	for _, id := range []string{"first", "second"} {
+	ids := []string{"first", "second"}
+	tracks := make([]*webrtc.TrackLocalStaticSample, 0, len(ids))
+	senders := make([]*webrtc.RTPSender, 0, len(ids))
+	for _, id := range ids {
 		track, trackErr := webrtc.NewTrackLocalStaticSample(
 			webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8}, id, id)
 		if trackErr != nil {
