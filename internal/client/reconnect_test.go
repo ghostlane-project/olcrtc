@@ -32,6 +32,9 @@ import (
 
 var errRigGateClosed = errors.New("rig: provider not sendable")
 
+// errRigRefused is what a refusing rig server answers a hello with.
+var errRigRefused = errors.New("rig: this client is not welcome")
+
 // rigKey is the tunnel key both sides of the rig use.
 var rigKey = []byte("01234567890123456789012345678901")
 
@@ -47,6 +50,30 @@ type rigLink struct {
 	// before the request returns.
 	onRequest func(reason string)
 	requests  chan string
+	// peerReady is what WaitForPeer waits for, so a test can park a
+	// handshake between its welcome and the session being installed. It is
+	// closed in newRig; a test that wants that pause puts an open one here.
+	// ai-generated (review of #20).
+	peerReady chan struct{}
+}
+
+// WaitForPeer implements transport.PeerReadyTransport.
+func (l *rigLink) WaitForPeer(context.Context) error {
+	l.mu.Lock()
+	ready := l.peerReady
+	l.mu.Unlock()
+	<-ready
+	return nil
+}
+
+// parkPeer makes the next handshake wait in WaitForPeer and returns the
+// func that lets it through.
+func (l *rigLink) parkPeer() func() {
+	ready := make(chan struct{})
+	l.mu.Lock()
+	l.peerReady = ready
+	l.mu.Unlock()
+	return func() { close(ready) }
 }
 
 func (l *rigLink) Connect(context.Context) error { return nil }
@@ -121,6 +148,17 @@ type rigServer struct {
 	answerFrom atomic.Int32
 	sessions   atomic.Int32
 	welcomed   atomic.Int32
+	// refuse answers every hello with a rejection, the way a server that
+	// cannot authenticate this client does. ai-generated (review of #20).
+	refuse  atomic.Bool
+	refused atomic.Int32
+
+	// writeMu is held while the server writes to a session and while one is
+	// replaced, so a close notice on its way out is not cut short by the
+	// client opening the conn that replaces it. The client can be through
+	// its whole recovery before smux hands the write's result back, and the
+	// test then read a closed pipe as a failure to send.
+	writeMu sync.Mutex
 
 	mu      sync.Mutex
 	conn    *muxconn.Conn
@@ -134,6 +172,8 @@ func (s *rigServer) reset(toClient func([]byte)) {
 	if err != nil {
 		panic(err)
 	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	s.mu.Lock()
 	oldConn, oldSess := s.conn, s.sess
 	s.conn, s.sess = conn, sess
@@ -175,6 +215,10 @@ func (s *rigServer) serve(sess *smux.Session, index int32) {
 func (s *rigServer) welcome(stream *smux.Stream) {
 	_ = stream.SetDeadline(time.Now().Add(5 * time.Second))
 	auth := func(string, map[string]any) (string, error) {
+		if s.refuse.Load() {
+			s.refused.Add(1)
+			return "", errRigRefused
+		}
 		return fmt.Sprintf("rig-%d", s.welcomed.Add(1)), nil
 	}
 	if _, _, err := handshake.Server(stream, auth, ""); err != nil {
@@ -194,13 +238,17 @@ func (s *rigServer) welcome(stream *smux.Stream) {
 func (s *rigServer) closeSession() error {
 	deadline := time.Now().Add(2 * time.Second)
 	for {
+		s.writeMu.Lock()
 		s.mu.Lock()
 		if n := len(s.streams); n > 0 {
 			stream := s.streams[n-1]
 			s.mu.Unlock()
-			return control.SendClose(stream)
+			err := control.SendClose(stream)
+			s.writeMu.Unlock()
+			return err
 		}
 		s.mu.Unlock()
+		s.writeMu.Unlock()
 		if time.Now().After(deadline) {
 			return errors.New("rig: no session to close")
 		}
@@ -258,7 +306,9 @@ func newRig(t *testing.T, tune func(*Client)) *rig {
 		t.Fatalf("NewKeySet(client) error = %v", err)
 	}
 	server := &rigServer{keys: serverKeys}
-	link := &rigLink{server: server, requests: make(chan string, 16)}
+	ready := make(chan struct{})
+	close(ready)
+	link := &rigLink{server: server, requests: make(chan string, 16), peerReady: ready}
 	link.gate.Store(true)
 	name := "reconnect-rig-" + t.Name()
 	transport.Register(name, func(context.Context, transport.Config) (transport.Transport, error) {
@@ -414,6 +464,11 @@ func TestFailedCallbackHandshakesAskProviderAgain(t *testing.T) {
 	r.server.answerNew()
 	r.link.callback()
 	r.waitNewSession(first, time.Second)
+	// A session clears the streak, so the next outage starts at the plain
+	// fallback window again.
+	if got := r.client.failedRounds.Load(); got != 0 {
+		t.Fatalf("failed rounds after a session came back = %d, want 0", got)
+	}
 }
 
 // A fallback whose handshakes go unanswered asks the provider for a new
@@ -480,5 +535,158 @@ func TestLateSessionDeathLeavesTheReplacementAlone(t *testing.T) {
 	case reason := <-r.link.requests:
 		t.Fatalf("the client asked the provider to reconnect (%s) for a session already replaced", reason)
 	default:
+	}
+}
+
+// ai-generated: the tests below (review of #20).
+
+// A peer that answers and refuses is not a reason to ask the provider for a
+// new connection: the next one would be refused the same way. The round also
+// stops at the answer instead of spending its five attempts. Before this, a
+// server that rejected every hello had the client rejoin the room every few
+// seconds until the provider's reconnect budget ran out and the session
+// ended.
+func TestRefusedHandshakeDoesNotAskForANewConnection(t *testing.T) {
+	r := newRig(t, func(c *Client) {
+		c.livenessFallback = time.Hour
+		c.handshakeTimeout = time.Second
+		c.retryDelay = 10 * time.Millisecond
+	})
+	r.server.refuse.Store(true)
+	before := r.server.sessions.Load()
+
+	r.link.callback()
+	deadline := time.Now().Add(2 * time.Second)
+	for r.server.refused.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if r.server.refused.Load() == 0 {
+		t.Fatal("the server never refused a hello")
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	select {
+	case reason := <-r.link.requests:
+		t.Fatalf("the client asked the provider to reconnect (%s) although the peer answered", reason)
+	default:
+	}
+	if got := r.server.sessions.Load() - before; got != 1 {
+		t.Fatalf("handshakes after the refusal = %d, want the one that was answered", got)
+	}
+	if got := r.client.failedRounds.Load(); got != 1 {
+		t.Fatalf("failed rounds = %d, want 1", got)
+	}
+}
+
+// Every round that ends without a session doubles the wait before the next
+// one, up to the cap: a server that is gone is still retried, but a client
+// whose provider is Jitsi no longer asks for a MUC rejoin every minute or
+// two for as long as it runs.
+func TestRecoveryPauseGrowsWithFailedRounds(t *testing.T) {
+	c := &Client{livenessFallback: 30 * time.Second}
+	for _, want := range []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute, 4 * time.Minute} {
+		if got := c.recoveryPause(); got != want {
+			t.Fatalf("pause after %d failed rounds = %v, want %v", c.failedRounds.Load(), got, want)
+		}
+		c.failedRounds.Add(1)
+	}
+	c.failedRounds.Store(100)
+	if got := c.recoveryPause(); got != maxRecoveryPause {
+		t.Fatalf("pause after a long outage = %v, want the cap %v", got, maxRecoveryPause)
+	}
+	if got := (&Client{}).recoveryPause(); got != defaultLivenessFallback {
+		t.Fatalf("pause with no window set = %v, want %v", got, defaultLivenessFallback)
+	}
+}
+
+// A liveness death that read the generation a provider callback holds must
+// leave the recovery to that callback: it drops the session it reported and
+// stops there, without asking the provider again or cancelling the handshake
+// the callback is about to run.
+func TestDeathBehindALiveCallbackKeepsItsRecovery(t *testing.T) {
+	r := newRig(t, func(c *Client) { c.livenessFallback = time.Hour })
+	// The callback has taken the recovery; its handshake has not started.
+	run, gen := r.client.recovery.take(r.ctx)
+	defer r.client.recovery.release(gen)
+
+	r.client.onSessionDeath(r.ctx, Config{}, r.cancel, nil)
+
+	select {
+	case reason := <-r.link.requests:
+		t.Fatalf("the death asked the provider to reconnect (%s) although a callback owned the recovery", reason)
+	default:
+	}
+	select {
+	case <-run.Done():
+		t.Fatal("the death cancelled the callback's recovery")
+	default:
+	}
+	if got := r.client.recovery.generation(); got != gen {
+		t.Fatalf("recovery generation = %d after the death, want the callback's %d", got, gen)
+	}
+}
+
+// A callback whose recovery was taken over while it waited for reconnectMu
+// leaves everything alone: the session it would have torn down belongs to
+// whoever took over.
+func TestSupersededCallbackLeavesTheSessionAlone(t *testing.T) {
+	r := newRig(t, nil)
+	first := r.sessionID()
+	run, _ := r.client.recovery.take(r.ctx)
+	_, newer := r.client.recovery.take(r.ctx)
+	defer r.client.recovery.release(newer)
+
+	r.client.handleReconnect(r.ctx, run, Config{}, r.cancel, reconnectProvider)
+
+	if got := r.sessionID(); got != first {
+		t.Fatalf("session after a superseded callback = %q, want the untouched %q", got, first)
+	}
+	select {
+	case reason := <-r.link.requests:
+		t.Fatalf("a superseded callback asked the provider to reconnect (%s)", reason)
+	default:
+	}
+}
+
+// A handshake that finishes after a newer recovery took over is dropped, not
+// installed: it ran over the connection that recovery has just replaced.
+func TestHandshakeAfterTakeoverIsNotInstalled(t *testing.T) {
+	r := newRig(t, func(c *Client) { c.livenessFallback = time.Hour })
+	welcomed := r.server.welcomed.Load()
+	letPeerThrough := r.link.parkPeer()
+
+	run, _ := r.client.recovery.take(r.ctx)
+	done := make(chan roundResult, 1)
+	go func() { done <- r.client.tryReopenSession(r.ctx, run, Config{}, r.cancel, 1) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for r.server.welcomed.Load() == welcomed && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if r.server.welcomed.Load() == welcomed {
+		t.Fatal("the handshake never reached the server")
+	}
+	_, newer := r.client.recovery.take(r.ctx) // a newer recovery takes over
+	defer r.client.recovery.release(newer)
+	letPeerThrough()
+
+	select {
+	case got := <-done:
+		if got != roundStopped {
+			t.Fatalf("handshake after a takeover = %v, want roundStopped", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the handshake did not end after the takeover")
+	}
+	// The session the server welcomed for that handshake must never be
+	// installed; the client is free to give the one it had up, since the
+	// attempt replaced the conns under it.
+	welcomedID := fmt.Sprintf("rig-%d", r.server.welcomed.Load())
+	deadline = time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if got := r.sessionID(); got == welcomedID {
+			t.Fatalf("session id = %q: the taken-over handshake was installed", got)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
