@@ -37,6 +37,9 @@ type loopPath struct {
 	once    sync.Once
 	written atomic.Uint64
 	dropped atomic.Uint64
+	// dark drops everything while it is set, the way an SFU that stopped
+	// forwarding a stream does.
+	dark atomic.Bool
 }
 
 type timedPacket struct {
@@ -75,6 +78,10 @@ func (p *loopPath) run() {
 
 func (p *loopPath) write(header *rtp.Header, payload []byte) {
 	n := p.written.Add(1)
+	if p.dark.Load() {
+		p.dropped.Add(1)
+		return
+	}
 	if p.lossOne > 0 && n%uint64(p.lossOne) == 0 {
 		p.dropped.Add(1)
 		return
@@ -128,6 +135,8 @@ func (c *loopContext) RTCPReader() interceptor.RTCPReader      { return nil }
 type loopSide struct {
 	tr     *streamTransport
 	reader packetReader
+	// out is the path this side writes into.
+	out *loopPath
 
 	mu       sync.Mutex
 	received [][]byte
@@ -176,7 +185,8 @@ func newLoopPair(t *testing.T, opts Options, delay time.Duration, lossOne int) (
 }
 
 // newLoopPairAs is newLoopPair with a client that speaks as a version
-// without the ordered feature: its hello announces none.
+// without the ordered feature: its hello announces none. The paths it wires
+// are recorded on each side so a test can take them dark.
 func newLoopPairAs(
 	t *testing.T, opts Options, delay time.Duration, lossOne int, clientIsOld bool,
 ) (*loopSide, *loopSide) {
@@ -200,6 +210,7 @@ func newLoopPairAs(
 	})
 	t.Cleanup(toClient.close)
 	t.Cleanup(toServer.close)
+	server.out, client.out = toClient, toServer
 
 	if _, err := serverTrack.Bind(&loopContext{ssrc: 1, writer: &loopWriter{path: toClient}}); err != nil {
 		t.Fatalf("bind server track: %v", err)
@@ -352,4 +363,44 @@ func TestLoopbackSendFailsAfterClose(t *testing.T) {
 	if err := server.tr.Send(loopMessage(1, 100)); !errors.Is(err, ErrTransportClosed) {
 		t.Fatalf("Send after Close = %v, want %v", err, ErrTransportClosed)
 	}
+}
+
+// TestLoopbackSurvivesAPathThatGoesDark is what an SFU does when a stream is
+// over the receiver's budget: it stops forwarding all of it, control
+// included, and takes it back once the stream is small again. The transfer
+// has to finish anyway, in order and whole.
+func TestLoopbackSurvivesAPathThatGoesDark(t *testing.T) {
+	if testing.Short() {
+		t.Skip("timing test")
+	}
+	const (
+		delay    = 30 * time.Millisecond
+		messages = 60
+		size     = 4000
+	)
+	server, client := newLoopPair(t, Options{FPS: 60, BatchSize: 64, FragmentSize: 900}, delay, 0)
+	waitFor(t, 5*time.Second, func() bool { return server.tr.peerOrdered.Load() })
+
+	go func() {
+		for i := range messages {
+			if err := server.tr.Send(loopMessage(i, size)); err != nil {
+				return
+			}
+		}
+	}()
+	waitFor(t, 10*time.Second, func() bool { return client.bytes.Load() > 0 })
+
+	server.out.dark.Store(true)
+	time.Sleep(4 * time.Second)
+	dark := client.bytes.Load()
+	server.out.dark.Store(false)
+
+	waitFor(t, 30*time.Second, func() bool { return len(client.messages()) >= messages })
+	got := client.messages()
+	for i, message := range got[:messages] {
+		if !bytes.Equal(message, loopMessage(i, size)) {
+			t.Fatalf("message %d differs from the one sent in that position", i)
+		}
+	}
+	t.Logf("%d messages through a 4 s blackout, %d bytes had arrived when it started", messages, dark)
 }
