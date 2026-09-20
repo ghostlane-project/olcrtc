@@ -6,6 +6,14 @@ on:
     branches: ["main", "master"]
   workflow_dispatch:
 
+# ai-generated: one run per ref. A force-push while a run is in flight (a
+# rebase, a fixed commit) used to leave the old run going, and with it the
+# gate holding the live rooms for a commit nobody will merge. The default
+# branch is excluded: its runs are the record of what main did.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/proofkit' }}
+
 env:
   GO_VERSION: "1.26.x"
   GOLANGCI_LINT_VERSION: "v2.12.2"
@@ -172,7 +180,13 @@ jobs:
     # which holds whether or not this repository is itself a fork
     # (head.repo.fork would be true for every branch of a forked repository).
     name: Gate (local server, real relays)
-    needs: gate-plan
+    # ai-generated: the `needs` list beyond gate-plan. The gate holds the live
+    # rooms for most of an hour and only one gate runs at a time across the
+    # repository, so a branch whose unit tests or lint already failed must not
+    # take that slot: it cannot merge anyway. Waiting costs the two or three
+    # minutes those jobs take, and a job skipped because a dependency failed
+    # is reported as skipped, not as a pass.
+    needs: [gate-plan, hygiene, lint, test]
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     # The job holds the secrets: its token only reads the repository, and
