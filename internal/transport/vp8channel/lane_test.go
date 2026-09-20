@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"hash/crc32"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -372,6 +373,39 @@ func TestDataLaneGoingDarkHoldsPushesAndKeepsProbing(t *testing.T) {
 	}
 	if len(windows) == 0 {
 		t.Fatal("the pace cap left the KCP send window alone")
+	}
+}
+
+// TestKCPConnCountsWhatComesBackForItsPushes is the frame cap's evidence: a
+// conn has to count the acknowledgements it delivers against the pushes they
+// answer, or the cap never learns what share of the frames gets through.
+func TestKCPConnCountsWhatComesBackForItsPushes(t *testing.T) {
+	c := newKCPConn(make(chan *packetBuffer, 4), 8, testEpochHdr(1))
+	wire := func(segs []byte) []byte {
+		var crc [wireCRCLen]byte
+		binary.BigEndian.PutUint32(crc[:], crc32.Checksum(segs, crcTable))
+		return append(append([]byte(nil), segs...), crc[:]...)
+	}
+	c.delivery.count(1000, 1, 0) // a push went out stamped 1000
+	c.deliver(wire(kcpSegmentAt(kcp.IKCP_CMD_ACK, 1000, "")))
+	c.deliver(wire(kcpSegmentAt(kcp.IKCP_CMD_ACK, 2000, ""))) // a later bucket answered
+	if pushes, acks := c.delivery.take(0); pushes != 1 || acks != 1 {
+		t.Fatalf("the conn counted %d pushes and %d answers, want one of each", pushes, acks)
+	}
+}
+
+// TestServerPeerLaneKeepsAQueueForAnswers is the server side of the ack
+// queue: what only answers the peer has to go out ahead of the data a peer
+// lane is holding, or a peer whose own lane is dark never hears from this
+// one and both sides wait each other out.
+func TestServerPeerLaneKeepsAQueueForAnswers(t *testing.T) {
+	tr := newLossyTestTransport(t, transport.Config{OnPeerData: func(string, []byte) {}}, newLossyRelay(0, 0, 1))
+	sess := tr.peerSessionFor(0xabcd1234)
+	if sess == nil {
+		t.Fatal("no peer session")
+	}
+	if sess.data.conn.acks == nil {
+		t.Fatal("the peer's lane has no queue for what answers the peer")
 	}
 }
 

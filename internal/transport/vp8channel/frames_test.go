@@ -238,15 +238,18 @@ func TestShrunkAimsAtTheShareAndStaysInItsBounds(t *testing.T) {
 	}
 }
 
+// kcpSegmentAt is one KCP segment of a command, a timestamp and a body.
+func kcpSegmentAt(cmd byte, ts uint32, body string) []byte {
+	seg := make([]byte, kcp.IKCP_OVERHEAD+len(body))
+	seg[kcpCmdOff] = cmd
+	binary.LittleEndian.PutUint32(seg[kcpTSOff:], ts)
+	binary.LittleEndian.PutUint32(seg[kcpLenOff:], uint32(len(body))) //nolint:gosec // test body
+	copy(seg[kcp.IKCP_OVERHEAD:], body)
+	return seg
+}
+
 func TestStampsOfReadsTheLastPushAndAck(t *testing.T) {
-	segment := func(cmd byte, ts uint32, body string) []byte {
-		seg := make([]byte, kcp.IKCP_OVERHEAD+len(body))
-		seg[kcpCmdOff] = cmd
-		binary.LittleEndian.PutUint32(seg[kcpTSOff:], ts)
-		binary.LittleEndian.PutUint32(seg[kcpLenOff:], uint32(len(body))) //nolint:gosec // test body
-		copy(seg[kcp.IKCP_OVERHEAD:], body)
-		return seg
-	}
+	segment := kcpSegmentAt
 	packet := append(append(append(segment(kcp.IKCP_CMD_ACK, 5, ""), segment(kcp.IKCP_CMD_ACK, 6, "")...),
 		segment(kcp.IKCP_CMD_PUSH, 7, "ab")...), segment(kcp.IKCP_CMD_PUSH, 8, "c")...)
 	if st := stampsOf(packet); !st.pushed || !st.acked || st.push != 8 || st.ack != 6 {
