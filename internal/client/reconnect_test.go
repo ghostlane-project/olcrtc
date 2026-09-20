@@ -690,3 +690,37 @@ func TestHandshakeAfterTakeoverIsNotInstalled(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 }
+
+// Only the peer deciding about this client - a rejection, or a protocol
+// version it will not speak - ends the round: the other bad answers are what
+// reordered records and the bytes of a session just torn down read like, and
+// those are worth another attempt and, failing that, a new connection.
+//
+// ai-generated: the whole test (review of #20).
+func TestOnlyARefusalEndsTheRound(t *testing.T) {
+	live := context.Background()
+	for _, tc := range []struct {
+		name string
+		err  error
+		want roundResult
+	}{
+		{"rejected", handshake.ErrRejected, roundRefused},
+		{"protocol version", handshake.ErrProtocolVersion, roundRefused},
+		{"frame too large", handshake.ErrFrameTooLarge, roundSilent},
+		{"unexpected message", handshake.ErrUnexpectedMessage, roundSilent},
+		{"challenge mismatch", handshake.ErrChallengeMismatch, roundSilent},
+		{"nobody answered", errRigGateClosed, roundSilent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wrapped := fmt.Errorf("handshake client: %w", tc.err)
+			if got := handshakeOutcome(live, wrapped); got != tc.want {
+				t.Fatalf("handshakeOutcome(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+	stopped, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got := handshakeOutcome(stopped, handshake.ErrRejected); got != roundStopped {
+		t.Fatalf("handshakeOutcome() after a takeover = %v, want roundStopped", got)
+	}
+}

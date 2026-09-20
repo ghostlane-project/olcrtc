@@ -721,18 +721,32 @@ func (c *Client) tryReopenSession(
 	return roundOpened
 }
 
-// handshakeOutcome reads a failed handshake: an answer, however bad, is the
-// peer refusing this client, and a new connection to it would be refused the
-// same way. ai-generated (review of #20).
+// handshakeOutcome reads a failed handshake. ai-generated (review of #20).
 func handshakeOutcome(run context.Context, err error) roundResult {
 	switch {
 	case run.Err() != nil:
 		return roundStopped
-	case helloAnswered(err):
+	case helloRefused(err):
 		return roundRefused
 	default:
 		return roundSilent
 	}
+}
+
+// helloRefused reports whether the peer decided about this client: it
+// rejected the hello, or it speaks a protocol version this build does not.
+// Either way the next connection to that peer would be refused the same way,
+// so the round stops and nothing is asked of the provider.
+//
+// The other answers helloAnswered covers - a challenge that does not match, a
+// message where another belongs, a frame that reads too large - are what a
+// relay that reorders or drops records leaves behind, and what stale bytes of
+// a session just torn down read like. Those are worth the round's other
+// attempts and, if they fail, a new connection.
+//
+// ai-generated: the whole function (review of #20).
+func helloRefused(err error) bool {
+	return errors.Is(err, handshake.ErrRejected) || errors.Is(err, handshake.ErrProtocolVersion)
 }
 
 // helloTimeout is the handshake timeout of a reconnect. ai-generated (olcrtc#19).
