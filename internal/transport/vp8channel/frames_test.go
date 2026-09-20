@@ -186,7 +186,7 @@ func TestFrameCapShrinksOnLossAndGrowsBackWhenClean(t *testing.T) {
 	if _, changed := judged(1); changed || f.limit != 0 {
 		t.Fatalf("limit = %d after a dark bucket, want the cap left to the dark spells", f.limit)
 	}
-	if share, changed := judged(20); !changed || f.limit != shrunk(64, share) || f.limit > 20 {
+	if share, changed := judged(20); !changed || f.limit != shrunk(64, share) || f.limit > 32 {
 		t.Fatalf("limit = %d after %.0f%% came back, want %d", f.limit, share*100, shrunk(64, share))
 	}
 	limit := f.limit
@@ -227,9 +227,9 @@ func TestShrunkAimsAtTheShareAndStaysInItsBounds(t *testing.T) {
 		share float64
 		want  int
 	}{
-		{64, 0.1, 11},  // 64 * ln 0.65 / ln 0.1 = 11.97
-		{64, 0.45, 32}, // the model says 34, at most half
-		{8, 0.49, 4},   // the model says 4.8
+		{64, 0.1, 25},  // 64 * ln 0.40 / ln 0.1 = 25.5
+		{64, 0.45, 32}, // the model says 57, at most half
+		{8, 0.49, 4},   // the model says 10, at most half, and the floor
 		{6, 0.2, 4},    // the floor
 	} {
 		if got := shrunk(tc.limit, tc.share); got != tc.want {
