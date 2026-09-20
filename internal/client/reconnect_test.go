@@ -540,13 +540,9 @@ func TestLateSessionDeathLeavesTheReplacementAlone(t *testing.T) {
 
 // ai-generated: the tests below (review of #20).
 
-// A peer that answers and refuses is not a reason to ask the provider for a
-// new connection: the next one would be refused the same way. The round also
-// stops at the answer instead of spending its five attempts. Before this, a
-// server that rejected every hello had the client rejoin the room every few
-// seconds until the provider's reconnect budget ran out and the session
-// ended.
-func TestRefusedHandshakeDoesNotAskForANewConnection(t *testing.T) {
+// A round stops at a refusal instead of spending its five attempts: the peer
+// answered, and the answer would be the same.
+func TestRefusedHandshakeEndsTheRound(t *testing.T) {
 	r := newRig(t, func(c *Client) {
 		c.livenessFallback = time.Hour
 		c.handshakeTimeout = time.Second
@@ -748,5 +744,36 @@ func TestTheAskAfterAFailedRoundWaits(t *testing.T) {
 	// would be about 600 ms.
 	if took := time.Since(start); took < 800*time.Millisecond {
 		t.Fatalf("the provider was asked again %v after the session went: the pause was skipped", took)
+	}
+}
+
+// And no round that ends in a refusal asks the provider for a new
+// connection, however many of them there are: the next connection to that
+// peer would be refused the same way. A server that rejected every hello had
+// the client rejoin the room every few seconds until the provider's reconnect
+// budget ran out and the session ended.
+//
+// ai-generated: the whole test (review of #20).
+func TestRefusedRoundsNeverAskTheProvider(t *testing.T) {
+	r := newRig(t, func(c *Client) {
+		c.livenessFallback = 100 * time.Millisecond
+		c.handshakeTimeout = 200 * time.Millisecond
+		c.retryDelay = 10 * time.Millisecond
+	})
+	r.server.refuse.Store(true)
+	before := r.server.sessions.Load()
+
+	r.link.callback()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case reason := <-r.link.requests:
+			t.Fatalf("the client asked the provider to reconnect (%s) after a refusal", reason)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	// It kept trying on its own, at the pace the pause sets.
+	if got := r.server.sessions.Load() - before; got < 2 {
+		t.Fatalf("handshakes over the second = %d, want the refused rounds to go on", got)
 	}
 }
