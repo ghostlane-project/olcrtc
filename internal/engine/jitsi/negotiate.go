@@ -368,8 +368,18 @@ func drainTrack(track *webrtc.TrackRemote) {
 	}
 }
 
+// handleRemoteTrack hands the peer's video to the carrier and drains every
+// other track the bridge forwards. Draining is not only about the receiver
+// buffer: the transport-cc generator records what is read off a track, so a
+// track nobody reads is reported to JVB as lost end to end, and with the
+// audio track alone unread half of what the bridge sent came back marked
+// lost.
+//
+// ai-generated: draining the tracks with no reader (issue #12 review).
 func (s *Session) handleRemoteTrack(track *webrtc.TrackRemote, recv *webrtc.RTPReceiver) {
-	if track.Kind() != webrtc.RTPCodecTypeVideo {
+	cb := s.VideoTrackHandler()
+	if track.Kind() != webrtc.RTPCodecTypeVideo || cb == nil {
+		go drainTrack(track)
 		return
 	}
 	ssrc := uint32(track.SSRC())
@@ -381,9 +391,7 @@ func (s *Session) handleRemoteTrack(track *webrtc.TrackRemote, recv *webrtc.RTPR
 		go drainTrack(track)
 		return
 	}
-	if cb := s.VideoTrackHandler(); cb != nil {
-		cb(track, recv)
-	}
+	cb(track, recv)
 }
 
 func (s *Session) handlePeerConnectionState(state webrtc.PeerConnectionState) {
