@@ -181,7 +181,9 @@ func TestEvaluateBoundsAreInclusive(t *testing.T) {
 	hs := float64(handshakeBudget.Milliseconds())
 	s3 := Metrics{"push_ok": 4, "push_total": 4, "throughput_up_bps": 1.5e6,
 		"on_top_ok": 1, "on_top_total": 1, "on_top_p95_ms": 5000}
-	s6 := Metrics{"ready_3s_ms": 3000 + hs, "ready_8s_ms": 8000 + hs}
+	// The bound is the delay, the reply window and readySlack (see verdict.go).
+	slack := float64(readySlack / time.Millisecond)
+	s6 := Metrics{"ready_3s_ms": 3000 + hs + slack, "ready_8s_ms": 8000 + hs + slack}
 	s7 := Metrics{"heap_baseline_bytes": 4 << 20, "heap_peak_bytes": 16 << 20, "rss_baseline_bytes": 26 << 20,
 		"rss_peak_bytes": 45 << 20, "goroutines_idle": 80, "goroutines_after": 100}
 	cases := []struct {
