@@ -625,9 +625,17 @@ func (c *Client) retryHandshake(
 		case roundSilent:
 		}
 		if maxAttempts > 0 && attempt >= maxAttempts {
-			logger.Warnf("client reconnect: exhausted %d handshake attempts (reason=%s) - "+
-				"pausing before the next try", attempt, reason)
-			return roundSilent
+			// The room is gone: a server torn down by a rotation reads as a
+			// peer-gone or liveness death, not a conference end, so the
+			// EndedCallback never fires and the session would sit here with
+			// the listener up for good. End it ourselves, as EndedCallback
+			// would, so the supervisor advances to the next room.
+			//
+			// ai-generated: the cancel and this comment.
+			logger.Warnf("client reconnect: exhausted %d handshake attempts (reason=%s) - ending session for failover",
+				attempt, reason)
+			cancel()
+			return roundStopped
 		}
 		select {
 		case <-run.Done():
@@ -764,6 +772,8 @@ func (c *Client) helloTimeout() time.Duration {
 }
 
 func (c *Client) installPairLocked(pair *tunnelcore.SessionPair) {
+	// A new session may be a different exit, so its IPv6 is probed afresh.
+	c.peerNoIPv6.Store(false)
 	c.pair = pair
 	c.conn = pair.DataConn
 	c.controlConn = pair.ControlConn

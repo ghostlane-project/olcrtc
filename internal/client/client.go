@@ -121,6 +121,18 @@ type Client struct {
 	// which is what recoveryPause backs off on. ai-generated (olcrtc#19).
 	failedRounds atomic.Int32
 
+	// peerNoIPv6 latches once the exit answers "host unreachable" for an
+	// IPv6 literal. A dual-stack host tries IPv6 first for nearly every
+	// connection, so against an IPv4-only exit that is the bulk of all
+	// streams, each one a stream open and a round trip over the tunnel to
+	// learn what the previous one did. Latched, the same connections are
+	// refused locally and Happy Eyeballs falls back to IPv4 at once. Reset
+	// per session, since another exit may have IPv6.
+	//
+	// ai-generated: the latch (this field, noteConnectFailure, isIPv6Literal
+	// and the check in tunnelWhenReady).
+	peerNoIPv6 atomic.Bool
+
 	// parked counts the requests waiting for a session that is not there
 	// (tunnelWhenReady, waitSessionReady). With a tun2socks in front every
 	// one of them is also a session over there, with a stack of its own that
