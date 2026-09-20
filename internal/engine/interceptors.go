@@ -19,6 +19,19 @@ const (
 	constrainedNackResponderSize = 256
 )
 
+// NackResponderOptions returns what a pion NACK responder is built with: the
+// default history on a server, and the constrained profile's smaller one on a
+// phone. A responder answers the relay's retransmission requests, which is how
+// a lossy uplink is repaired; the note above says what the history costs.
+//
+// ai-generated: this function (olcrtc#14).
+func NackResponderOptions() []nack.ResponderOption {
+	if !hostprofile.BuffersAreConstrained() {
+		return nil
+	}
+	return []nack.ResponderOption{nack.ResponderSize(constrainedNackResponderSize)}
+}
+
 // DefaultInterceptorOptions returns what an engine passes to
 // [webrtc.RegisterDefaultInterceptorsWithOptions]: nothing on a server, and on
 // the constrained profile a NACK responder that keeps a fraction of the
