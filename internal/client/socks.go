@@ -117,7 +117,7 @@ func (c *Client) tunnelWhenReady(ctx context.Context, conn net.Conn, job connect
 	// Refused before parking: with the exit known to have no IPv6 route a
 	// stream for an IPv6 literal can only come back unreachable, after a
 	// round trip, and a dual-stack host sends one per connection.
-	if c.peerNoIPv6.Load() && isIPv6Literal(job.host) {
+	if isIPv6Literal(job.host) && c.noIPv6Route() {
 		job.fail(conn, replyHostUnreachable(job.host))
 		return
 	}

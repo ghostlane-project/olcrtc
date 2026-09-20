@@ -66,6 +66,7 @@ func (c *Client) tunnel(ctx context.Context, conn net.Conn, session *smux.Sessio
 		job.fail(conn, replyForConnectError(err, job.host))
 		return
 	}
+	c.noteConnectSuccess(job.host)
 	if !job.open(conn, stream) {
 		return
 	}
@@ -98,17 +99,63 @@ func (c *Client) sendConnectRequest(stream *smux.Stream, targetAddr string, targ
 	return nil
 }
 
-// noteConnectFailure latches the exit's lack of IPv6 the first time it refuses
-// an IPv6 literal as unreachable, so the rest of the session stops spending
-// tunnel streams on an address family the exit cannot route at all.
+// noteConnectFailure counts an IPv6 literal the exit could not reach, and
+// latches its lack of an IPv6 route once several in a row have failed with
+// none in between succeeding.
+//
+// It takes several because the exit answers host-unreachable for every dial
+// that fails, whatever the reason: a host that is down, a port that is shut,
+// a firewall that drops. One of those is an ordinary destination, not a
+// missing address family, and latching on it refused every IPv6 target for
+// the rest of the session - including the ones that work. The latch also
+// lapses rather than holding until the next session, so an exit whose route
+// came back, or one wrongly judged, is tried again within the window instead
+// of staying cut off.
+//
+// ai-generated: the threshold and the lapsing latch (review of olcrtc#39);
+// the ack-code check is from the port.
 func (c *Client) noteConnectFailure(err error, targetAddr string) {
 	var ackErr *connectAckError
 	if !errors.As(err, &ackErr) || ackErr.code != socksRepHostUnreachable || !isIPv6Literal(targetAddr) {
 		return
 	}
-	if c.peerNoIPv6.CompareAndSwap(false, true) {
-		logger.Infof("exit reports no IPv6 route (%s unreachable) - refusing further IPv6 targets locally", targetAddr)
+	if c.ipv6Failures.Add(1) < ipv6FailuresBeforeLatch {
+		return
 	}
+	if c.peerNoIPv6Until.Swap(time.Now().Add(ipv6LatchWindow).UnixNano()) == 0 {
+		logger.Infof("exit reports no IPv6 route (%d unreachable literals, last %s) - "+
+			"refusing IPv6 targets locally for %s", ipv6FailuresBeforeLatch, targetAddr, ipv6LatchWindow)
+	}
+}
+
+// noteConnectSuccess clears the run of IPv6 failures, and the latch with it:
+// the exit has just routed one, so whatever the earlier refusals were, they
+// were about those destinations.
+//
+// ai-generated: the whole function (review of olcrtc#39).
+func (c *Client) noteConnectSuccess(targetAddr string) {
+	if !isIPv6Literal(targetAddr) {
+		return
+	}
+	c.ipv6Failures.Store(0)
+	c.peerNoIPv6Until.Store(0)
+}
+
+// noIPv6Route reports whether the exit is currently held to have no IPv6
+// route. ai-generated (review of olcrtc#39).
+func (c *Client) noIPv6Route() bool {
+	until := c.peerNoIPv6Until.Load()
+	if until == 0 {
+		return false
+	}
+	if time.Now().UnixNano() < until {
+		return true
+	}
+	// The window is over: let the next IPv6 target through, and let it
+	// re-latch if the exit still cannot route it.
+	c.peerNoIPv6Until.CompareAndSwap(until, 0)
+	c.ipv6Failures.Store(0)
+	return false
 }
 
 // isIPv6Literal reports whether target is an IPv6 address literal. Names are

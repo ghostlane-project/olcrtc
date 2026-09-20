@@ -127,6 +127,7 @@ func TestASilentPeerIsNotAnEmptyRoom(t *testing.T) {
 }
 
 func TestNoteConnectFailureLatchesMissingIPv6(t *testing.T) {
+	const v6 = "2606:4700:4700::1111"
 	tests := []struct {
 		name   string
 		err    error
@@ -134,24 +135,89 @@ func TestNoteConnectFailureLatchesMissingIPv6(t *testing.T) {
 		want   bool
 	}{
 		{name: "ipv6 unreachable latches", err: &connectAckError{code: socksRepHostUnreachable},
-			target: "2606:4700:4700::1111", want: true},
+			target: v6, want: true},
 		{name: "ipv4 unreachable does not latch", err: &connectAckError{code: socksRepHostUnreachable},
 			target: "1.1.1.1", want: false},
 		{name: "domain does not latch", err: &connectAckError{code: socksRepHostUnreachable},
 			target: "example.com", want: false},
 		{name: "other ack code does not latch", err: &connectAckError{code: socksRepNetworkUnreachable},
-			target: "2606:4700:4700::1111", want: false},
+			target: v6, want: false},
 		{name: "non-ack error does not latch", err: ErrRemoteNotReady,
-			target: "2606:4700:4700::1111", want: false},
+			target: v6, want: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			c := &Client{}
-			c.noteConnectFailure(tt.err, tt.target)
-			if got := c.peerNoIPv6.Load(); got != tt.want {
-				t.Fatalf("peerNoIPv6 = %v, want %v", got, tt.want)
+			for range ipv6FailuresBeforeLatch {
+				c.noteConnectFailure(tt.err, tt.target)
+			}
+			if got := c.noIPv6Route(); got != tt.want {
+				t.Fatalf("noIPv6Route() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// One dead IPv6 destination is a dead destination, not an exit without a
+// route: the exit answers host-unreachable for every dial that fails, so a
+// shut port latched the whole address family and every working IPv6 target
+// with it. It takes a run of them, and one that connects clears the run.
+//
+// ai-generated: the whole test (review of olcrtc#39).
+func TestOneDeadIPv6DestinationDoesNotLatchTheExit(t *testing.T) {
+	unreachable := &connectAckError{code: socksRepHostUnreachable}
+	c := &Client{}
+	for i := range ipv6FailuresBeforeLatch - 1 {
+		c.noteConnectFailure(unreachable, "2606:4700:4700::1111")
+		if c.noIPv6Route() {
+			t.Fatalf("the exit was judged IPv6-less after %d refusals", i+1)
+		}
+	}
+	// A destination that answers says the ones before it were the problem.
+	c.noteConnectSuccess("2620:fe::fe")
+	for range ipv6FailuresBeforeLatch - 1 {
+		c.noteConnectFailure(unreachable, "2606:4700:4700::1111")
+	}
+	if c.noIPv6Route() {
+		t.Fatal("a connect that succeeded did not clear the run of failures")
+	}
+	c.noteConnectFailure(unreachable, "2606:4700:4700::1111")
+	if !c.noIPv6Route() {
+		t.Fatalf("the exit was not judged IPv6-less after %d refusals in a row", ipv6FailuresBeforeLatch)
+	}
+	// And an IPv6 connect that works afterwards lifts the judgement.
+	c.noteConnectSuccess("2620:fe::fe")
+	if c.noIPv6Route() {
+		t.Fatal("the judgement survived an IPv6 connect the exit routed")
+	}
+}
+
+// The judgement lapses. An exit whose IPv6 came back, or one this got wrong,
+// costs a window of IPv4-only browsing and no more; if it is still IPv6-less
+// the next refusals latch it again.
+//
+// ai-generated: the whole test (review of olcrtc#39).
+func TestTheIPv6JudgementLapses(t *testing.T) {
+	unreachable := &connectAckError{code: socksRepHostUnreachable}
+	c := &Client{}
+	for range ipv6FailuresBeforeLatch {
+		c.noteConnectFailure(unreachable, "2606:4700:4700::1111")
+	}
+	if !c.noIPv6Route() {
+		t.Fatal("the exit was not judged IPv6-less")
+	}
+	c.peerNoIPv6Until.Store(time.Now().Add(-time.Second).UnixNano())
+	if c.noIPv6Route() {
+		t.Fatal("the judgement outlived its window")
+	}
+	if got := c.ipv6Failures.Load(); got != 0 {
+		t.Fatalf("failures after the window = %d, want the count to start over", got)
+	}
+	for range ipv6FailuresBeforeLatch {
+		c.noteConnectFailure(unreachable, "2606:4700:4700::1111")
+	}
+	if !c.noIPv6Route() {
+		t.Fatal("an exit that is still IPv6-less was not judged again")
 	}
 }
 
@@ -161,7 +227,7 @@ func TestNoteConnectFailureLatchesMissingIPv6(t *testing.T) {
 // session-ready wait, so an immediate reply is what proves the shortcut.
 func TestTunnelRefusesIPv6LocallyWhenExitHasNone(t *testing.T) {
 	c := &Client{sessionReady: make(chan struct{})}
-	c.peerNoIPv6.Store(true)
+	c.peerNoIPv6Until.Store(time.Now().Add(ipv6LatchWindow).UnixNano())
 	server, client := net.Pipe()
 	defer func() {
 		_ = server.Close()
