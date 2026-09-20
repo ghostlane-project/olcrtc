@@ -140,7 +140,9 @@ func (l *dataLane) frameNote() string {
 
 // sendAcks writes the queued packets that only acknowledge the peer, in one
 // sample, and reports whether it wrote one. They go uncapped: they are small,
-// and the peer's lane counts its path dark without them.
+// and the peer's lane counts its path dark without them. The publisher's
+// bucket is charged for them where the sample is written, as it is for
+// control frames and keepalives, but it never holds them back (olcrtc#26).
 func (l *dataLane) sendAcks(p *streamTransport, write func([]byte) bool) bool {
 	first := l.ackPending
 	l.ackPending = nil
