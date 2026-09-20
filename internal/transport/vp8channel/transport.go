@@ -87,6 +87,14 @@ const (
 	// is injected even while bulk data flows, so the SFU decoder never times
 	// out and stops forwarding the track.
 	forceKeepalivePeriod = 2 * time.Second
+	// ai-generated: publishBurstBytes and this comment (olcrtc#26).
+	// publishBurstBytes is what the writer's token bucket holds when the
+	// engine's service polices how fast a participant may publish (see
+	// engine.PublishRateLimited): two full samples, so both a peer pump and
+	// the writer loop can pass one in the same tick, and at the ceilings we
+	// meet a tenth of a second of traffic, far too short to look sustained.
+	// The rate itself is the service's, not this transport's.
+	publishBurstBytes = 2 * defaultMaxPayloadSize
 	// defaultPeerRestartGrace is how long the latched peer must be silent
 	// before a frame from a different epoch is read as a server restart. The
 	// server emits a decodable keepalive every ~2s, so a few missed beats is
@@ -184,6 +192,16 @@ type streamTransport struct {
 	// the control plane must stay unpaced.
 	shaper *transport.Shaper
 
+	// limiter holds the whole track under the rate the engine's service
+	// tolerates from one publisher, and is nil when it polices none. Every
+	// write charges it; the bulk writers ask it first.
+	// ai-generated: this field (olcrtc#26).
+	limiter *common.PublishLimiter
+	// sendWindow is the KCP send window every plane of this transport runs
+	// with: a round trip of the ceiling when there is one, the relay's own
+	// appetite when there is not. ai-generated: this field (olcrtc#26).
+	sendWindow int
+
 	// peers holds one session per remote epoch in server mode. Each session
 	// owns an isolated bulk KCP plus, once the peer starts handshaking, its
 	// own control KCP. Idle sessions are reclaimed by sweepPeers; without
@@ -240,6 +258,10 @@ func newStreamTransport(
 	cfg transport.Config,
 	opts Options,
 ) *streamTransport {
+	// ai-generated: limiter and sendWindow (olcrtc#26). The ceiling comes
+	// from the engine, so a service that polices publishers paces this
+	// transport and one that does not leaves it alone.
+	limiter := common.NewPublishLimiter(common.PublishRateLimit(stream), publishBurstBytes)
 	tr := &streamTransport{
 		Lifecycle:        common.NewLifecycle(stream),
 		stream:           stream,
@@ -255,6 +277,8 @@ func newStreamTransport(
 		frameInterval:    time.Second / time.Duration(opts.FPS),
 		batchSize:        opts.BatchSize,
 		bindingToken:     channelBindingToken(cfg),
+		limiter:          limiter,
+		sendWindow:       kcpSendWindow(limiter != nil),
 		localEpoch:       randomEpoch(),
 		peerRestartGrace: defaultPeerRestartGrace,
 	}
@@ -265,6 +289,8 @@ func newStreamTransport(
 		}
 	})
 	tr.control = newKCPPlane(controlOutboundQueueSize, tr.deliverControlData)
+	// ai-generated: both planes run with this transport's window (olcrtc#26).
+	tr.data.sndWnd, tr.control.sndWnd = tr.sendWindow, tr.sendWindow
 
 	tr.shaper = transport.NewShaper(cfg.Traffic, tr.Features())
 

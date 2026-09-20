@@ -55,13 +55,29 @@ func (w *writerState) writeSample(data []byte) bool {
 func (p *streamTransport) writeSampleLocked(data []byte) bool {
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
+	// ai-generated: the charge and the written result (olcrtc#26). Every
+	// sample this transport publishes passes here, so this is where the rate
+	// the relay sees is counted - control frames and keepalives included,
+	// which are charged but never held back.
+	var written bool
 	if p.sampleWriter != nil {
-		return p.sampleWriter(data)
+		written = p.sampleWriter(data)
+	} else {
+		written = p.track.WriteSample(media.Sample{
+			Data:     data,
+			Duration: p.frameInterval,
+		}) == nil
 	}
-	return p.track.WriteSample(media.Sample{
-		Data:     data,
-		Duration: p.frameInterval,
-	}) == nil
+	if written {
+		p.limiter.Charge(len(data))
+	}
+	return written
+}
+
+// readyToSend reports whether the bucket has room for a bulk frame of this
+// size. The control plane never asks. ai-generated: readyToSend (olcrtc#26).
+func (p *streamTransport) readyToSend(frame []byte) bool {
+	return p.limiter.Ready(len(frame))
 }
 
 // forceKeepalive emits a clean, fully-decodable VP8 keepalive keyframe at a
@@ -117,6 +133,13 @@ func (w *writerState) drainDatagram() bool {
 	for {
 		select {
 		case frame := <-w.p.datagram:
+			// ai-generated: the rate check (olcrtc#26). The lossy lane rides
+			// the same track as the bulk data and counts against the same
+			// ceiling, so it waits for the bucket like the bulk data does.
+			if !w.p.readyToSend(frame) {
+				w.pendingDatagram = frame
+				return false
+			}
 			sample := w.batchDatagramSampleFrom(w.p.datagram, frame)
 			w.idleTicks = 0
 			if !w.writeSample(sample) {
@@ -181,6 +204,14 @@ func (w *writerState) drainData() {
 			hdr := w.p.epochHeader()
 			_ = w.writeSample(hdr[:])
 		}
+		return
+	}
+	// ai-generated: the rate check (olcrtc#26). The frame stays queued until
+	// the bucket has room for it, which is what keeps the whole track under
+	// the rate the relay tolerates. The idle counter is left alone: there is
+	// data to send, so this is not an idle tick.
+	if !w.p.readyToSend(frame.data) {
+		w.pendingData = frame
 		return
 	}
 	w.idleTicks = 0
@@ -284,6 +315,13 @@ func (p *streamTransport) peerWriterPump(out chan *packetBuffer, done <-chan str
 				}
 			}
 			if frame == nil {
+				continue
+			}
+			// ai-generated: the rate check (olcrtc#26). Every peer pump and
+			// the writer loop share one bucket, because the relay meters the
+			// publisher, not the writer.
+			if !p.readyToSend(frame.data) {
+				pending = frame
 				continue
 			}
 			if !p.canBatch(frame.data) {

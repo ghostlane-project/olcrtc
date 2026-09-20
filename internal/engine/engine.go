@@ -129,6 +129,18 @@ type PeerResetter interface {
 	ResetPeer()
 }
 
+// PublishRateLimited is implemented by engines whose service polices how fast
+// one participant may publish. A transport that publishes media asks its
+// session for the ceiling and keeps what it writes under it; an engine that
+// does not implement this, or that returns 0, is left unpaced and the relay
+// itself decides what it takes.
+//
+// ai-generated: this interface (olcrtc#26).
+type PublishRateLimited interface {
+	// PublishRateLimit is the ceiling in bytes a second, or 0 for none.
+	PublishRateLimit() int
+}
+
 // VideoTrackCapable is implemented by engines that can exchange video tracks.
 type VideoTrackCapable interface {
 	AddVideoTrack(track webrtc.TrackLocal) error

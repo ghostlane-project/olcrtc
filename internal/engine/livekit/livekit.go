@@ -43,6 +43,26 @@ const (
 	roomReadyTimeout = 60 * time.Second
 	roomReadyPoll    = 50 * time.Millisecond
 
+	// ai-generated: publishRateLimit and this comment (olcrtc#26).
+	// publishRateLimit is what a participant of this engine's service may
+	// publish, in bytes a second, before the service acts on it.
+	//
+	// WB Stream removes a participant - its room-manager calling LiveKit's
+	// RemoveParticipant, which arrives here as PARTICIPANT_REMOVED - about
+	// 40 s after its published video passes roughly 12 Mbit/s. Measured
+	// against a WB room on 2026-09-20 with a probe publishing a fixed rate:
+	// 9.6 and 10.8 Mbit/s of sample ran 3 min untouched, 12 Mbit/s was
+	// removed after 45 s and 24 Mbit/s after 43 s, while a 20 s burst at
+	// 24 Mbit/s followed by a quiet minute was not, so what the service
+	// judges is a sustained rate and not a total. The gate's server, which
+	// pushes ~22 Mbit/s under six parallel downloads, was removed
+	// mid-transfer in three of five CI runs.
+	//
+	// The value below leaves the measured boundary a margin and is still
+	// several times what the tunnel needs: the release gate's floor is
+	// 2 Mbit/s and the transports reach 5 Mbit/s of goodput under it.
+	publishRateLimit = 1_200_000
+
 	// ai-generated: connectTimeout and the reasoning for it (ghostlane#38).
 	// connectTimeout bounds one join in the SDK: the signalling socket, the
 	// JoinResponse and the peer connection reaching connected all run on
@@ -585,6 +605,10 @@ func (s *Session) DatagramCanSend() bool {
 	room := s.currentRoom()
 	return room != nil && room.publisherReady()
 }
+
+// PublishRateLimit is the ceiling a transport on this engine keeps its media
+// under; see publishRateLimit. ai-generated: this method (olcrtc#26).
+func (s *Session) PublishRateLimit() int { return publishRateLimit }
 
 // Close terminates the session.
 func (s *Session) Close() error {

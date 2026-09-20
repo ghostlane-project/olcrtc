@@ -57,6 +57,23 @@ func NewEngineVideoSession(sess engine.Session) (*EngineVideoSession, error) {
 	return &EngineVideoSession{session: sess, vt: vt}, nil
 }
 
+// PublishRateLimit forwards the ceiling the engine's service polices, 0 when
+// it polices none. ai-generated: this method (olcrtc#26).
+func (v *EngineVideoSession) PublishRateLimit() int {
+	return PublishRateLimit(v.session)
+}
+
+// PublishRateLimit reads the ceiling a session declares, in bytes a second,
+// and returns 0 for a session that declares none. ai-generated: this
+// function (olcrtc#26).
+func PublishRateLimit(session any) int {
+	limited, ok := session.(engine.PublishRateLimited)
+	if !ok {
+		return 0
+	}
+	return limited.PublishRateLimit()
+}
+
 // Connect brings up the underlying engine session.
 func (v *EngineVideoSession) Connect(ctx context.Context) error {
 	if err := v.session.Connect(ctx); err != nil {

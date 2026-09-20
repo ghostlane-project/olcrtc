@@ -12,7 +12,7 @@ func newStubPeerSession(t *testing.T, epoch uint32) *peerSession {
 
 	out := make(chan *packetBuffer, 1)
 
-	rt, err := startKCP(out, nil, buildEpochHeader(0, epoch))
+	rt, err := startKCP(out, nil, buildEpochHeader(0, epoch), 0)
 	if err != nil {
 		t.Fatalf("startKCP() error = %v", err)
 	}
