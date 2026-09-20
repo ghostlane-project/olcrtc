@@ -122,7 +122,7 @@ For one migration cycle the strict loader accepts the deprecated fields `link`, 
 
 Current builds use the OLC2 encrypted record layer. Directional HKDF-SHA256 keys, distinct data/control AEAD associated data and a shared 64-record replay window make it incompatible with the old record format. There is no legacy decoder fallback.
 
-`seichannel` and `videochannel` use OLVC frame version 5, which adds a per-fragment checksum so a damaged fragment is retransmitted instead of acknowledged. Older frames are rejected by magic or version checks. Upgrade both tunnel endpoints together.
+`seichannel` and `videochannel` use OLVC frame version 5, which adds a per-fragment checksum so a damaged fragment is retransmitted instead of acknowledged. Older frames are rejected by magic or version checks. Upgrade both tunnel endpoints together. Within version 5, `seichannel` keeps several messages in flight towards a peer whose hello announces ordered delivery, and falls back to one at a time for any other peer.
 
 ## Required minimum
 

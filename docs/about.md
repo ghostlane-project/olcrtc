@@ -124,6 +124,8 @@ OLC2 has no v1 fallback. Builds that use the old record format cannot connect to
 
 The shared OLVC video frame format used by `seichannel` and `videochannel` is version 5. It carries sender role, session binding, per-fragment ACK data, a per-fragment checksum and a whole-message CRC. A fragment that fails its own checksum is never acknowledged, so it is retransmitted instead of being lost with the message. Older frames are rejected by magic or version checks, so old video transport builds are incompatible.
 
+Within version 5 a sender may keep several messages in flight at once. A hello announces the feature, a stream fragment carries the sender's stream id and floor next to the fragmentation fields, and the receiver delivers messages in the order they were queued. A peer whose hello announces nothing gets one message at a time, which is what a build without the feature can reassemble, so old and new peers still talk.
+
 `smux` runs on top of the encrypted `muxconn`. The first smux stream is occupied by the handshake and the control protocol:
 
 ```text
