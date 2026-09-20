@@ -42,6 +42,12 @@ var rigKey = []byte("01234567890123456789012345678901")
 type rigLink struct {
 	server *rigServer
 	gate   atomic.Bool
+	// peerSeen is transport.PeerObserver: whether anything in the room has
+	// sent a frame. newRig starts it true - somebody is in the room - so a
+	// test has to empty the room to get one.
+	//
+	// ai-generated: the field and PeerSeen (the port of olcrtc#39).
+	peerSeen atomic.Bool
 
 	mu          sync.Mutex
 	onReconnect func()
@@ -90,7 +96,11 @@ func (l *rigLink) WatchConnection(ctx context.Context) { <-ctx.Done() }
 func (l *rigLink) CanSend() bool                       { return l.gate.Load() }
 func (l *rigLink) Features() transport.Features        { return transport.Features{} }
 func (l *rigLink) ResetPeer()                          {}
-func (l *rigLink) ControlCanSend() bool                { return l.gate.Load() }
+
+// PeerSeen implements transport.PeerObserver.
+func (l *rigLink) PeerSeen() bool { return l.peerSeen.Load() }
+
+func (l *rigLink) ControlCanSend() bool { return l.gate.Load() }
 
 func (l *rigLink) Reconnect(reason string) {
 	l.mu.Lock()
@@ -310,6 +320,7 @@ func newRig(t *testing.T, tune func(*Client)) *rig {
 	close(ready)
 	link := &rigLink{server: server, requests: make(chan string, 16), peerReady: ready}
 	link.gate.Store(true)
+	link.peerSeen.Store(true)
 	name := "reconnect-rig-" + t.Name()
 	transport.Register(name, func(context.Context, transport.Config) (transport.Transport, error) {
 		return link, nil
@@ -372,13 +383,18 @@ func (r *rig) waitRequest(reason string, within time.Duration) {
 }
 
 // loseSession ends the session from the server's side and waits for the
-// client to give it up and ask the provider for a new connection.
+// client to give it up and ask the provider for a new connection. The notice
+// the server sends is the graceful close of a server whose own provider has
+// rebuilt: a session that is over, not a room that is, so the client gives
+// the session up and stays in the room.
+//
+// ai-generated: the reason (the port of olcrtc#39).
 func (r *rig) loseSession() {
 	r.t.Helper()
 	if err := r.server.closeSession(); err != nil {
 		r.t.Fatalf("closeSession() error = %v", err)
 	}
-	r.waitRequest(reconnectLiveness, 2*time.Second)
+	r.waitRequest(reconnectPeerClose, 2*time.Second)
 }
 
 // An engine may hold its send gate closed until its reconnect callback
@@ -499,7 +515,7 @@ func TestCallbackInsideTheRequestOwnsTheRecovery(t *testing.T) {
 	first := r.sessionID()
 	r.link.mu.Lock()
 	r.link.onRequest = func(reason string) {
-		if reason == reconnectLiveness {
+		if reason == reconnectPeerClose {
 			r.link.callback()
 		}
 	}
@@ -526,7 +542,7 @@ func TestLateSessionDeathLeavesTheReplacementAlone(t *testing.T) {
 	r.waitNewSession(first, 2*time.Second)
 	second := r.sessionID()
 
-	r.client.onSessionDeath(r.ctx, Config{}, r.cancel, dead)
+	r.client.onSessionDeath(r.ctx, Config{}, r.cancel, dead, reconnectLiveness)
 	if got := r.sessionID(); got != second || !r.client.sessionEstablished() {
 		t.Fatalf("session after a late death of the one it replaced = %q (established=%v), want %q",
 			got, r.client.sessionEstablished(), second)
@@ -605,7 +621,7 @@ func TestDeathBehindALiveCallbackKeepsItsRecovery(t *testing.T) {
 	run, gen := r.client.recovery.take(r.ctx)
 	defer r.client.recovery.release(gen)
 
-	r.client.onSessionDeath(r.ctx, Config{}, r.cancel, nil)
+	r.client.onSessionDeath(r.ctx, Config{}, r.cancel, nil, reconnectLiveness)
 
 	select {
 	case reason := <-r.link.requests:
@@ -698,25 +714,36 @@ func TestOnlyARefusalEndsTheRound(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		err  error
-		want roundResult
+		// empty says the classifier found nothing in the room; a refusal
+		// outranks it, since the refusal came from someone who is there.
+		// ai-generated: the field and the last three cases (port of #39).
+		empty bool
+		want  roundResult
 	}{
-		{"rejected", handshake.ErrRejected, roundRefused},
-		{"protocol version", handshake.ErrProtocolVersion, roundRefused},
-		{"frame too large", handshake.ErrFrameTooLarge, roundSilent},
-		{"unexpected message", handshake.ErrUnexpectedMessage, roundSilent},
-		{"challenge mismatch", handshake.ErrChallengeMismatch, roundSilent},
-		{"nobody answered", errRigGateClosed, roundSilent},
+		{name: "rejected", err: handshake.ErrRejected, want: roundRefused},
+		{name: "protocol version", err: handshake.ErrProtocolVersion, want: roundRefused},
+		{name: "frame too large", err: handshake.ErrFrameTooLarge, want: roundSilent},
+		{name: "unexpected message", err: handshake.ErrUnexpectedMessage, want: roundSilent},
+		{name: "challenge mismatch", err: handshake.ErrChallengeMismatch, want: roundSilent},
+		{name: "nobody answered", err: errRigGateClosed, want: roundSilent},
+		{name: "empty room", err: errRigGateClosed, empty: true, want: roundEmpty},
+		{name: "empty room and a refusal", err: handshake.ErrRejected, empty: true, want: roundRefused},
+		{name: "peer there but silent", err: errRigGateClosed, want: roundSilent},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			wrapped := fmt.Errorf("handshake client: %w", tc.err)
-			if got := handshakeOutcome(live, wrapped); got != tc.want {
+			classified := error(wrapped)
+			if tc.empty {
+				classified = fmt.Errorf("%w: %w", ErrNoPeer, wrapped)
+			}
+			if got := handshakeOutcome(live, wrapped, classified); got != tc.want {
 				t.Fatalf("handshakeOutcome(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
 	}
 	stopped, cancel := context.WithCancel(context.Background())
 	cancel()
-	if got := handshakeOutcome(stopped, handshake.ErrRejected); got != roundStopped {
+	if got := handshakeOutcome(stopped, handshake.ErrRejected, handshake.ErrRejected); got != roundStopped {
 		t.Fatalf("handshakeOutcome() after a takeover = %v, want roundStopped", got)
 	}
 }

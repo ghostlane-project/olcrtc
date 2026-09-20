@@ -126,6 +126,7 @@ func runClient(
 		URL: cfg.URL, Token: cfg.Token, ProviderToken: cfg.ProviderToken,
 		Liveness: liveness, Traffic: traffic,
 		UDPDisabled: cfg.UDPDisabled, UDPMaxFlows: cfg.UDPMaxFlows, Direct: direct,
+		EndOnEmptyRoom: cfg.EndOnEmptyRoom,
 	})
 	if err != nil {
 		return fmt.Errorf("client: %w", err)

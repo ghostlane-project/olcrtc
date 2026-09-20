@@ -165,6 +165,11 @@ func (r *Runtime) run(ctx context.Context, gen *runGeneration) {
 		cfg := gen.cfg
 		cfg.RoomURL = profile.RoomID
 		cfg.OnSessionOpen = func(sessionID string) { r.notifySessionOpened(gen, profile.RoomID, sessionID) }
+		// A room nobody is in ends this run so the next one is tried; a room
+		// whose peer is merely silent is retried in place, as before.
+		//
+		// ai-generated: EndOnEmptyRoom (the port of olcrtc#39).
+		cfg.EndOnEmptyRoom = true
 		return r.runner(ctx, cfg, onReady)
 	})
 	gen.cancel()

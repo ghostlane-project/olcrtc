@@ -982,7 +982,7 @@ func TestLivenessFallbackReestablishesSession(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	// Drive the real path: a liveness reconnect hands the rebuild to the
 	// provider and arms the fallback.
-	c.onSessionDeath(ctx, Config{}, cancel, nil)
+	c.onSessionDeath(ctx, Config{}, cancel, nil, reconnectLiveness)
 
 	select {
 	case <-ln.sentCh:

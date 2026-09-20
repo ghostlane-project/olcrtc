@@ -47,6 +47,10 @@ const (
 	// reconnectHandshake asks the provider for a new connection after the
 	// handshakes over the one it gave went unanswered. ai-generated (olcrtc#19).
 	reconnectHandshake = "handshake"
+	// reconnectPeerClose is a control stream the peer closed on purpose: the
+	// same teardown a liveness death reports, noticed the moment it happens
+	// rather than a liveness window later. ai-generated (the port of olcrtc#39).
+	reconnectPeerClose = "peer-close"
 )
 
 const (
@@ -124,6 +128,12 @@ type Client struct {
 	// onSessionOpen hears each session id as the session is established;
 	// see Config.OnSessionOpen.
 	onSessionOpen SessionOpenFunc
+
+	// endOnEmptyRoom ends the run instead of retrying in a room nobody is
+	// in; see Config.EndOnEmptyRoom.
+	//
+	// ai-generated: the field (the port of olcrtc#39).
+	endOnEmptyRoom bool
 
 	// peerNoIPv6 latches once the exit answers "host unreachable" for an
 	// IPv6 literal. A dual-stack host tries IPv6 first for nearly every
@@ -219,6 +229,17 @@ type Config struct {
 	// established: on the initial connect and after every reconnect. A host
 	// that cannot read the log learns of a room handover this way.
 	OnSessionOpen SessionOpenFunc
+	// EndOnEmptyRoom makes Run return once a reconnect handshake fails with
+	// nothing in the room having sent a frame while it ran - the shape of a
+	// room whose server has been retired. Set it when something above the
+	// client has another room to try, as a supervisor walking a room list
+	// has; leave it off, the default, when this room is the only one, since
+	// then the client giving up leaves nobody retrying (olcrtc#19). A peer
+	// that is in the room but silent, or one that refuses this client, is
+	// never an empty room and is retried either way.
+	//
+	// ai-generated: the field (the port of olcrtc#39).
+	EndOnEmptyRoom bool
 }
 
 // Run starts the client with the given configuration.
@@ -253,7 +274,7 @@ func RunWithAddress(ctx context.Context, cfg Config, onReady func(actualAddr str
 		udpFlows: make(map[uint64]clientUDPFlow), udpFlowIndex: make(map[clientUDPFlowKey]uint64),
 		udpDisabled: cfg.UDPDisabled, maxUDPFlows: normalizeMaxUDPFlows(cfg.UDPMaxFlows),
 		rules: cfg.Direct, dialer: protect.NewDialer(cfg.Resolver),
-		onSessionOpen: cfg.OnSessionOpen,
+		onSessionOpen: cfg.OnSessionOpen, endOnEmptyRoom: cfg.EndOnEmptyRoom,
 	}
 	if exchanger, ok := cfg.Resolver.(protect.Exchanger); ok {
 		client.exchanger = exchanger

@@ -1,5 +1,5 @@
-// ai-generated: the whole file (tests for the closed-by-peer fast path and the
-// IPv6 latch).
+// ai-generated: the whole file (tests for the graceful close, the empty room
+// and the IPv6 latch).
 package client
 
 import (
@@ -8,68 +8,122 @@ import (
 	"net"
 	"testing"
 	"time"
-
-	"github.com/xtaci/smux"
-
-	"github.com/openlibrecommunity/olcrtc/internal/control"
-	"github.com/openlibrecommunity/olcrtc/internal/runtime"
-	"github.com/openlibrecommunity/olcrtc/internal/tunnelcore"
 )
 
-// A peer that closes the control stream on purpose - the server retiring the
-// room - ends the session at once, so a supervisor can move to the next room.
-// The alternative was the reconnect path: a liveness fallback and three
-// handshakes against a room that said it was leaving, about a minute.
-func TestControlClosedByPeerEndsTheSession(t *testing.T) {
-	a, b := net.Pipe()
-	defer func() {
-		_ = a.Close()
-		_ = b.Close()
-	}()
-	serverSess, err := smux.Server(a, testSmuxCfg())
-	if err != nil {
-		t.Fatalf("smux.Server() error = %v", err)
+// A peer that closes the control stream on purpose ends that session at
+// once, without the liveness window a silent drop costs - and leaves the room
+// alone. The notice says a session is over, not a room: our own server sends
+// exactly this one when its provider rebuilt underneath it and when its
+// liveness gave up on a client, and in both it is still in the room and
+// answers the next handshake. Whether the room is worth keeping is decided by
+// that handshake, not by the notice (see TestAnEmptyRoomEndsTheRunWhenAsked).
+//
+// ai-generated: this test replaces the one that asserted the run was ended
+// (the port of olcrtc#39, resolved against olcrtc#19).
+func TestGracefulCloseDropsTheSessionAndKeepsTheRoom(t *testing.T) {
+	r := newRig(t, func(c *Client) {
+		c.livenessFallback = 5 * time.Second // long: the ask must come from the close
+		c.handshakeTimeout = time.Second
+	})
+	first := r.sessionID()
+
+	start := time.Now()
+	r.loseSession() // the close, and the ask it causes, with reason peer-close
+	if took := time.Since(start); took > 2*time.Second {
+		t.Fatalf("the client took %v to act on a graceful close; it waited for something", took)
 	}
-	defer func() { _ = serverSess.Close() }()
-	clientSess, err := smux.Client(b, testSmuxCfg())
-	if err != nil {
-		t.Fatalf("smux.Client() error = %v", err)
+	if r.ctx.Err() != nil {
+		t.Fatal("a close that ends one session ended the whole run")
 	}
-	defer func() { _ = clientSess.Close() }()
 
-	peerStreamCh := make(chan *smux.Stream, 1)
-	go func() {
-		stream, acceptErr := serverSess.AcceptStream()
-		if acceptErr == nil {
-			peerStreamCh <- stream
-		}
-	}()
-	stream, err := clientSess.OpenStream()
-	if err != nil {
-		t.Fatalf("OpenStream() error = %v", err)
-	}
-	peerStream := <-peerStreamCh
+	// The server is back on the connection the provider rebuilt, as one whose
+	// own provider reconnected is, and the client picks the room up again.
+	r.server.answerNew()
+	r.link.callback()
+	r.waitNewSession(first, 2*time.Second)
+}
 
-	liveness := control.Config{Interval: 10 * time.Millisecond, Timeout: 100 * time.Millisecond, Failures: 2}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	c := &Client{sessionID: "sid-retired", health: runtime.NewHealthTracker(nil)}
-	c.health.RecordSession("sid-retired")
-	c.startControlLoop(ctx, Config{Liveness: liveness}, cancel, stream)
+// A room nobody is in is the one failure the client cannot outwait, so a
+// caller that has other rooms gets the run ended and moves on. The round
+// stops at the first empty attempt: the other four would each spend a whole
+// handshake timeout learning the same thing.
+//
+// ai-generated: the whole test (the port of olcrtc#39).
+func TestAnEmptyRoomEndsTheRunWhenAsked(t *testing.T) {
+	r := newRig(t, func(c *Client) {
+		c.endOnEmptyRoom = true
+		c.livenessFallback = 5 * time.Second
+		c.handshakeTimeout = 200 * time.Millisecond
+		c.retryDelay = 10 * time.Millisecond
+	})
+	r.link.peerSeen.Store(false) // the room emptied when the server was retired
+	r.server.stopAnswering()
+	r.loseSession()
+	before := r.server.sessions.Load()
 
-	peerCtx, peerCancel := context.WithCancel(context.Background())
-	defer peerCancel()
-	go func() { _ = control.Run(peerCtx, peerStream, liveness) }()
-
-	// The server's own goodbye: the close notification it sends before it exits.
-	tunnelcore.NotifyControlClose(peerStream)
-
+	r.link.callback()
 	select {
-	case <-ctx.Done():
+	case <-r.ctx.Done():
 	case <-time.After(3 * time.Second):
-		t.Fatal("session was not ended after the peer closed the control stream")
+		t.Fatal("the run did not end on a room nobody is in")
 	}
-	c.waitGoroutines()
+	if got := int(r.server.sessions.Load() - before); got != 1 {
+		t.Fatalf("handshake attempts at an empty room = %d, want the first one alone", got)
+	}
+}
+
+// The same empty room, for a client that is the only one there is: it keeps
+// asking the provider rather than ending the run, which is olcrtc#19's
+// invariant and the default.
+//
+// ai-generated: the whole test (the port of olcrtc#39).
+func TestAnEmptyRoomIsRetriedWhenThereIsNowhereElse(t *testing.T) {
+	r := newRig(t, func(c *Client) {
+		c.livenessFallback = 20 * time.Millisecond
+		c.handshakeTimeout = 100 * time.Millisecond
+		c.retryDelay = 10 * time.Millisecond
+	})
+	first := r.sessionID()
+	r.link.peerSeen.Store(false)
+	r.server.stopAnswering()
+	r.loseSession()
+
+	r.link.callback()
+	r.waitRequest(reconnectHandshake, 3*time.Second)
+	if r.ctx.Err() != nil {
+		t.Fatal("the run ended at an empty room the client had no alternative to")
+	}
+	// And it is still the client that comes back when the room refills.
+	r.link.peerSeen.Store(true)
+	r.server.answerNew()
+	r.link.callback()
+	r.waitNewSession(first, 2*time.Second)
+}
+
+// A peer that is in the room but never answers is not an empty room: it is
+// retried in place even for a client that has other rooms, because the next
+// hello may well be the one it answers.
+//
+// ai-generated: the whole test (the port of olcrtc#39).
+func TestASilentPeerIsNotAnEmptyRoom(t *testing.T) {
+	r := newRig(t, func(c *Client) {
+		c.endOnEmptyRoom = true
+		c.livenessFallback = 20 * time.Millisecond
+		c.handshakeTimeout = 100 * time.Millisecond
+		c.retryDelay = 10 * time.Millisecond
+	})
+	first := r.sessionID()
+	r.server.stopAnswering() // present (peerSeen stays true), answering nothing
+	r.loseSession()
+
+	r.link.callback()
+	r.waitRequest(reconnectHandshake, 3*time.Second)
+	if r.ctx.Err() != nil {
+		t.Fatal("the run ended on a peer that is in the room and silent")
+	}
+	r.server.answerNew()
+	r.link.callback()
+	r.waitNewSession(first, 2*time.Second)
 }
 
 func TestNoteConnectFailureLatchesMissingIPv6(t *testing.T) {
