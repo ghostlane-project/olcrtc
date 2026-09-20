@@ -108,6 +108,11 @@ type Session struct {
 	relayCount  uint64
 	relayWake   chan struct{}
 	relayTiming relayTiming
+	// askVideo stands in for the session's RequestVideo in tests; nil means
+	// the real one. See requestPeerVideo.
+	//
+	// ai-generated: this field.
+	askVideo func(ctx context.Context, jSess *j.Session) error
 	// peerQueues holds one bounded queue per addressed peer, so a client that
 	// cannot drain its share does not hold the room's other clients behind
 	// it. peerWake is buffered(1): "some peer queue has data".
