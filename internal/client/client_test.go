@@ -1015,7 +1015,7 @@ func TestLivenessFallbackSkipsWhenSessionIsBack(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	c.armFallback(ctx, Config{}, cancel, c.recovery.generation())
+	c.armFallback(ctx, Config{}, cancel, c.recovery.generation(), false)
 	c.waitGoroutines()
 
 	ln.mu.Lock()
