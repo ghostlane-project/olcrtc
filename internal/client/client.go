@@ -205,10 +205,13 @@ type HealthFunc func(control.Status)
 
 // SessionOpenFunc is called each time a tunnel session is established - on the
 // initial connect and after every reconnect - with the server-assigned session
-// id. It runs on the connect path, so it must return promptly.
+// id. It runs on the connect path and under the client's reconnect lock, so it
+// must return promptly: everything this client would do to recover from the
+// next outage waits behind it, and on the reconnect path so does the
+// provider's own callback.
 //
 // ai-generated: the session-open hook (this type, Config.OnSessionOpen and
-// notifySessionOpen).
+// notifySessionOpen); the note on the lock is from the review of olcrtc#39.
 type SessionOpenFunc func(sessionID string)
 
 // Config holds runtime configuration for [Run], [RunWithReady], and [RunWithAddress].

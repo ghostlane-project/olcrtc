@@ -237,6 +237,10 @@ failover:
 
 The order of profiles and the room parameters must be compatible on the server and the client. Active smux streams do not migrate between profiles; new connections can recover on the next profile.
 
+The config file is re-read at every advance, so profiles added or removed while a session was live take effect the moment it ends, without a restart. The supervisor looks in the new list for the profile that just ran and takes the one after it; a profile the list no longer holds means the window rolled past it, and the walk continues at the head without counting a completed pass. An invalid profile is skipped with a warning rather than failing the reload, and a reload that errors or comes back empty keeps the last good list.
+
+A client running under the supervisor gives up on a room nobody is in - its handshake fails and nothing in the room sent a frame while it ran - so the supervisor can move to the next profile. A peer that is in the room and silent, and a single-profile config, are retried for as long as olcrtc runs.
+
 ## mode: gen
 
 `gen` is kept for providers that implement room creation via an API.
