@@ -31,7 +31,6 @@ type KnownFailure struct{ Cell, Issue, Why string }
 var knownFailures = []KnownFailure{ //nolint:gochecknoglobals // edited by hand as issues open and close; tests swap it
 	{"engine-linux/jitsi/seichannel/*/S0", issues + "9", "a 10 MiB pull through Jitsi kills the tunnel"},
 	{"engine-linux/jitsi/datachannel/mobile/S2", issues + "15", "six parallel pulls collapse into SCTP retransmissions"},
-	{"engine-linux/wbstream/seichannel/*/S0", issues + "16", "a 5 MiB push does not fit S0's 5 minutes"},
 }
 
 // knownFailure is the entry of the list a cell id matches, the first one if
