@@ -375,9 +375,11 @@ func (s *Session) AddVideoTrack(track webrtc.TrackLocal) error {
 	if pc == nil {
 		return nil
 	}
-	if _, err := pc.AddTrack(track); err != nil {
+	sender, err := pc.AddTrack(track)
+	if err != nil {
 		return fmt.Errorf("add track: %w", err)
 	}
+	s.drainSenderRTCP(sender)
 	return nil
 }
 

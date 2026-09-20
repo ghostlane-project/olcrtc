@@ -9,6 +9,7 @@ import (
 	"time"
 
 	pioninterceptor "github.com/pion/interceptor"
+	"github.com/pion/interceptor/pkg/nack"
 	"github.com/pion/interceptor/pkg/twcc"
 	"github.com/pion/webrtc/v4"
 	"github.com/zarazaex69/j"
@@ -134,17 +135,9 @@ func newSettingEngine(resolver protect.Lookup) (webrtc.SettingEngine, error) {
 	return settings, nil
 }
 
-// newConferenceAPI builds the conference PeerConnection API. pion's default
-// interceptors stay off: the report ones probe the DTLS transport on a tick
-// and flood the log until DTLS is up. The transport-cc feedback generator is
-// the one JVB cannot do without. Its bandwidth estimator for an endpoint runs
-// on that feedback: without any it takes the time since its first packet as
-// the round trip, cuts the estimate by a fifth every second from 3 s on to
-// its 30 kbps floor, and stops forwarding the endpoint any video above that,
-// so a tunnel direction goes dark mid-transfer (issue #12). The generator
-// starts on the first tagged packet, which cannot arrive before DTLS.
+// newConferenceAPI builds the conference PeerConnection API.
 //
-// ai-generated: the media engine and the transport-cc feedback generator.
+// ai-generated: the media engine and the interceptor registry.
 func newConferenceAPI(resolver protect.Lookup) (*webrtc.API, error) {
 	settings, err := newSettingEngine(resolver)
 	if err != nil {
@@ -154,17 +147,49 @@ func newConferenceAPI(resolver protect.Lookup) (*webrtc.API, error) {
 	if err = media.RegisterDefaultCodecs(); err != nil {
 		return nil, fmt.Errorf("register codecs: %w", err)
 	}
-	registry := &pioninterceptor.Registry{}
-	err = webrtc.ConfigureTWCCSenderWithOptions(media, registry,
-		twcc.WithLoggerFactory(logger.NewPionLoggerFactory()))
+	registry, err := newConferenceInterceptors(media)
 	if err != nil {
-		return nil, fmt.Errorf("transport-cc feedback: %w", err)
+		return nil, err
 	}
 	return webrtc.NewAPI(
 		webrtc.WithSettingEngine(settings),
 		webrtc.WithMediaEngine(media),
 		webrtc.WithInterceptorRegistry(registry),
 	), nil
+}
+
+// newConferenceInterceptors is what the conference PeerConnection runs. pion's
+// default set stays off: the report ones probe the DTLS transport on a tick
+// and flood the log until DTLS is up.
+//
+// The transport-cc feedback generator is the one JVB cannot do without. Its
+// bandwidth estimator for an endpoint runs on that feedback: without any it
+// takes the time since its first packet as the round trip, cuts the estimate
+// by a fifth every second from 3 s on to its 30 kbps floor, and stops
+// forwarding the endpoint any video above that, so a tunnel direction goes
+// dark mid-transfer (issue #12). The generator starts on the first tagged
+// packet, which cannot arrive before DTLS.
+//
+// The NACK responder sends again what the bridge says it did not get. On a
+// meet.ffmuc.net bridge that lost 5-10% of what each endpoint sent it, JVB
+// asked and asked again: 4127 requests in a 75 s run, none of them answered,
+// and the frames those packets belonged to never reassembled at the peer
+// (issue #14). With the responder the same bridge asked 410 times in 32 s,
+// every ask settled by the packet coming back.
+//
+// ai-generated: the whole function.
+func newConferenceInterceptors(media *webrtc.MediaEngine) (*pioninterceptor.Registry, error) {
+	registry := &pioninterceptor.Registry{}
+	responder, err := nack.NewResponderInterceptor(engine.NackResponderOptions()...)
+	if err != nil {
+		return nil, fmt.Errorf("nack responder: %w", err)
+	}
+	registry.Add(responder)
+	if err = webrtc.ConfigureTWCCSenderWithOptions(media, registry,
+		twcc.WithLoggerFactory(logger.NewPionLoggerFactory())); err != nil {
+		return nil, fmt.Errorf("transport-cc feedback: %w", err)
+	}
+	return registry, nil
 }
 
 // negotiatePC applies Jicofo's offer in ordered stages. Trickle draining starts
@@ -295,10 +320,12 @@ func (s *Session) addVideoTransceivers(pc *webrtc.PeerConnection) (bool, error) 
 		if wantsRemote {
 			direction = webrtc.RTPTransceiverDirectionSendrecv
 		}
-		_, err := pc.AddTransceiverFromTrack(track, webrtc.RTPTransceiverInit{Direction: direction})
+		transceiver, err := pc.AddTransceiverFromTrack(track, webrtc.RTPTransceiverInit{Direction: direction})
 		if err != nil {
 			addErr = fmt.Errorf("add track: %w", err)
+			return
 		}
+		s.drainSenderRTCP(transceiver.Sender())
 	})
 	return hasLocalTracks, addErr
 }
@@ -329,10 +356,24 @@ func (s *Session) addVideoOrKeepaliveTrack(
 	if err != nil {
 		return nil, fmt.Errorf("create keepalive track: %w", err)
 	}
-	if _, err := pc.AddTrack(keepaliveTrack); err != nil {
+	sender, err := pc.AddTrack(keepaliveTrack)
+	if err != nil {
 		return nil, fmt.Errorf("add keepalive track: %w", err)
 	}
+	s.drainSenderRTCP(sender)
 	return keepaliveTrack, nil
+}
+
+// drainSenderRTCP reads and discards the RTCP the bridge sends about one of
+// our tracks. The read is what drives the interceptor chain: without it the
+// NACK responder never sees a retransmission request.
+//
+// ai-generated: the whole function (olcrtc#14).
+func (s *Session) drainSenderRTCP(sender *webrtc.RTPSender) {
+	if sender == nil {
+		return
+	}
+	s.goLaunch(func() { engine.DrainRTCP(sender) })
 }
 
 func (s *Session) wantsVideoReceive() bool {
