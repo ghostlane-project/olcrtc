@@ -114,7 +114,7 @@ func (l *dataLane) flush(p *streamTransport, write func([]byte) bool) bool {
 	acked := l.sendAcks(p, write)
 	sent := l.send(p, now, write)
 	if l.seen != nil {
-		if share, changed := l.frames.judge(&l.seen.delivery, p.batchSize); changed {
+		if share, changed := l.frames.judge(&l.seen.delivery, p.fullPackets()); changed {
 			l.resize(p)
 			logger.Infof("vp8channel: %s: %d%% of pushed packets answered, %s", l.name, int(share*100), l.frameNote())
 		}
@@ -180,7 +180,7 @@ func (l *dataLane) watch(p *streamTransport, now int64) bool {
 		conn.hold(cmp.Or(p.probeEvery, defaultProbeEvery))
 		l.sift()
 		frames := ""
-		if l.frames.halve(p.batchSize) {
+		if l.frames.halve(p.fullPackets()) {
 			l.resize(p)
 			frames = ", " + l.frameNote()
 		}
@@ -238,11 +238,21 @@ func (p *streamTransport) fullRate() float64 {
 	return float64(sample) * float64(time.Second) / float64(p.frameInterval)
 }
 
+// fullPackets is how many KCP packets an uncapped sample carries: the batch
+// size, or what fits in a sample's payload, whichever is smaller. The frame
+// cap is a share of this, so the batch size alone would put it out by the
+// ratio between the two: with the app's numbers a sample holds 43 packets,
+// not 64.
+func (p *streamTransport) fullPackets() int {
+	room := (defaultMaxPayloadSize - epochHdrLen - len(kcpBatchMagic)) / (batchLenLen + kcpMTU + wireCRCLen)
+	return max(min(p.batchSize, room), 1)
+}
+
 // send writes the next queued packet, batched with those behind it as far as
 // the transport batches and the cap allows, notes when it carried the first
 // unanswered push, and reports whether a sample went out.
 func (l *dataLane) send(p *streamTransport, now int64, write func([]byte) bool) bool {
-	limit := cmp.Or(l.frames.limit, p.batchSize)
+	limit := cmp.Or(l.frames.limit, p.fullPackets())
 	if allow := l.pace.allow(now); allow >= 0 {
 		if allow == 0 {
 			queued := l.pending != nil || len(l.out) > 0
