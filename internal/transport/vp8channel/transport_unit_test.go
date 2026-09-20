@@ -744,9 +744,13 @@ func TestReorderBufferReleasesAGapThatOutlastsTheHold(t *testing.T) {
 	if got := pushedSeqs(b, seq(12)); got != nil {
 		t.Fatalf("delivered %v past a gap at once", got)
 	}
-	time.Sleep(200 * time.Millisecond)
-	if got := pushedSeqs(b, seq(13)); len(got) != 2 || got[0] != 12 || got[1] != 13 {
-		t.Fatalf("after the hold: delivered %v, want [12 13] past the lost 11", got)
+	time.Sleep(reorderHold / 2)
+	if got := pushedSeqs(b, seq(13)); got != nil {
+		t.Fatalf("delivered %v half way through the hold, want the gap kept for a repair", got)
+	}
+	time.Sleep(reorderHold)
+	if got := pushedSeqs(b, seq(14)); len(got) != 3 || got[0] != 12 || got[2] != 14 {
+		t.Fatalf("after the hold: delivered %v, want [12 13 14] past the lost 11", got)
 	}
 }
 
