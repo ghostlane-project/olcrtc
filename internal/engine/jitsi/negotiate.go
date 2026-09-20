@@ -51,6 +51,8 @@ func (s *Session) completeJingleSetup(ctx context.Context, jSess *j.Session) err
 	needBridge := s.onData != nil || s.onPeerData != nil
 	wantVideo := s.shouldRequestVideo()
 	sctpBridge := (needBridge || wantVideo) && jSess.ColibriWS == ""
+	// The receiver constraints JVB needs before it forwards any video now
+	// go with every bridge this session opens; see openBridge.
 
 	// ai-generated: this call. A test build (olcrtc_testhooks) may hold either
 	// bridge back here for the gate's late-server scenario; empty otherwise.
@@ -69,14 +71,6 @@ func (s *Session) completeJingleSetup(ctx context.Context, jSess *j.Session) err
 	if sctpBridge {
 		if err := s.openBridgeSCTP(ctx, jSess); err != nil {
 			return err
-		}
-	}
-
-	// JVB only forwards video after the bridge is open and RequestVideo has
-	// established receiver constraints.
-	if wantVideo {
-		if err := jSess.RequestVideo(ctx, 720); err != nil {
-			logger.Debugf("jitsi: request video: %v", err)
 		}
 	}
 

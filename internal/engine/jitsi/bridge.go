@@ -70,8 +70,48 @@ func (s *Session) openBridge(
 	s.peerEndpoint.Store(nil)
 	s.peerVideoSSRC.Store(0)
 	s.markBridgeReady()
-	logger.Infof("jitsi: bridge open %s (endpoints=%v)", transport, jSess.Endpoints())
+	s.requestPeerVideo(ctx, jSess)
+	logger.Infof("jitsi: bridge open %s (endpoints=%v)", transport, endpointList(jSess))
 	return nil
+}
+
+// endpointList is the room's other occupants, for the log, and nothing at
+// all for a session with no connection behind it.
+//
+// ai-generated: this helper.
+func endpointList(jSess *j.Session) []string {
+	if jSess == nil || jSess.Conn == nil {
+		return nil
+	}
+	return jSess.Endpoints()
+}
+
+// videoMaxHeight is the height the receiver constraints ask for. The
+// transports carry bytes, not pictures, so any layer will do; what matters
+// is that a constraint is there at all.
+const videoMaxHeight = 720
+
+// requestPeerVideo establishes the receiver constraints on the bridge that
+// was just opened. JVB forwards a participant's video only to an endpoint
+// that asked for it, and the ask goes over the bridge, so every bridge needs
+// it: the first one and the one a rejoin opens. Without it a rejoin came up
+// with a live conference, a live bridge and no video at all, and the tunnel
+// never carried a byte again (#9).
+//
+// ai-generated: this method and its call in openBridge.
+func (s *Session) requestPeerVideo(ctx context.Context, jSess *j.Session) {
+	if !s.shouldRequestVideo() {
+		return
+	}
+	ask := s.askVideo
+	if ask == nil {
+		ask = func(ctx context.Context, sess *j.Session) error {
+			return sess.RequestVideo(ctx, videoMaxHeight)
+		}
+	}
+	if err := ask(ctx, jSess); err != nil {
+		logger.Debugf("jitsi: request video: %v", err)
+	}
 }
 
 // Send queues a broadcast bridge frame, waiting for room in the queue.
