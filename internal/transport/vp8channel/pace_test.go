@@ -34,21 +34,28 @@ func TestPaceHalvesTheBusiestSecondAndGrowsBack(t *testing.T) {
 	if grow(now + second) {
 		t.Fatal("grow() raised the cap before the interval passed")
 	}
-	if !grow(now+3*second) || s.rate != float64(200<<10)*9/8 {
-		t.Fatalf("cap after one step = %.0f, want an eighth more", s.rate)
+	if !grow(now+3*second) || s.rate != float64(200<<10)*5/4 {
+		t.Fatalf("cap after one step = %.0f, want a quarter more", s.rate)
 	}
+	capped := s.rate
 	// Dark while writing well under the cap: not this lane's doing.
 	s.wrote(now+4*second, 100<<10)
-	if s.slow(now+4*second, s.sentRate(now+4*second), 1<<20) || s.rate != float64(200<<10)*9/8 {
-		t.Fatalf("cap after going dark quiet = %.0f, want it kept", s.rate)
+	if s.slow(now+4*second, s.sentRate(now+4*second), 1<<20) || s.rate != capped {
+		t.Fatalf("cap after going dark quiet = %.0f, want it kept at %.0f", s.rate, capped)
 	}
-	// Dark again while writing more than the cap allows on paper.
-	s.wrote(now+5*second, 300<<10)
-	if !s.slow(now+5*second, s.sentRate(now+5*second), 1<<20) || s.rate != float64(200<<10)*9/16 {
-		t.Fatalf("cap after going dark capped = %.0f, want half of the cap", s.rate)
+	// Dark while keeping to the cap: the cap is not what took the path
+	// down, and halving it again only ratchets the lane down.
+	s.wrote(now+5*second, int(capped))
+	if s.slow(now+5*second, s.sentRate(now+5*second), 1<<20) || s.rate != capped {
+		t.Fatalf("cap after going dark at the cap = %.0f, want it kept at %.0f", s.rate, capped)
+	}
+	// Dark again while writing well over what the cap allows.
+	s.wrote(now+6*second, 400<<10)
+	if !s.slow(now+6*second, s.sentRate(now+6*second), 1<<20) || s.rate != capped/2 {
+		t.Fatalf("cap after going dark over the cap = %.0f, want half of %.0f", s.rate, capped)
 	}
 	s.held = true
-	if !s.grow(now+7*second, 2*time.Second, s.rate) || s.rate != 0 {
+	if !s.grow(now+8*second, 2*time.Second, s.rate) || s.rate != 0 {
 		t.Fatalf("cap = %.0f at the lane's full rate, want it lifted", s.rate)
 	}
 }
