@@ -336,11 +336,10 @@ func TestDataLaneGoingDarkHoldsPushesAndKeepsProbing(t *testing.T) {
 	if want := tr.fullPackets() / 2; lane.frames.limit != want {
 		t.Fatalf("frames %d going dark, want half of a full one (%d)", lane.frames.limit, want)
 	}
-	snd, _ := kcpWindow()
 	select {
 	case segments := <-windows:
-		if segments >= snd {
-			t.Fatalf("KCP send window %d going dark, want it under the default %d", segments, snd)
+		if segments >= tr.sendWindow {
+			t.Fatalf("KCP send window %d going dark, want it under the transport's %d", segments, tr.sendWindow)
 		}
 	default:
 		t.Fatal("going dark left the KCP send window alone")
@@ -406,6 +405,32 @@ func TestServerPeerLaneKeepsAQueueForAnswers(t *testing.T) {
 	}
 	if sess.data.conn.acks == nil {
 		t.Fatal("the peer's lane has no queue for what answers the peer")
+	}
+}
+
+// TestDataLaneNeverAsksForMoreWindowThanTheTransportRunsWith: the publish
+// limiter sets the transport's send window, a round trip of the ceiling for a
+// paced writer (olcrtc#26), and a lane only ever asks for less than that.
+func TestDataLaneNeverAsksForMoreWindowThanTheTransportRunsWith(t *testing.T) {
+	paced := newStreamTransport(&limitedVideoStream{fakeVideoStream: &fakeVideoStream{canSend: true}, limit: 1 << 20},
+		nil, transport.Config{ChannelID: "paced-lane"}, Options{FPS: 60, BatchSize: 64})
+	if paced.sendWindow != kcpSendWindow(true) {
+		t.Fatalf("a paced transport runs with %d segments, want %d", paced.sendWindow, kcpSendWindow(true))
+	}
+	windows := make(chan int, 4)
+	lane := &dataLane{
+		out: make(chan *packetBuffer, 4), conn: func() *kcpConn { return nil },
+		window: func(segments int) { windows <- segments }, name: "paced-lane",
+	}
+	lane.resize(paced)
+	if segments := <-windows; segments != paced.sendWindow {
+		t.Fatalf("an uncapped lane asked for %d segments, want the transport's %d", segments, paced.sendWindow)
+	}
+	lane.frames.limit = minFramePackets
+	lane.resize(paced)
+	if segments := <-windows; segments >= paced.sendWindow {
+		t.Fatalf("a capped lane asked for %d segments, want fewer than the transport's %d",
+			segments, paced.sendWindow)
 	}
 }
 
