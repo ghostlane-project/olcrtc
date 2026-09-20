@@ -52,6 +52,17 @@ const (
 const (
 	defaultLivenessFallback = 30 * time.Second
 
+	// maxRecoveryPause and maxRecoveryBackoff bound the wait between rounds
+	// of reconnect handshakes. Each consecutive round that ends without a
+	// session doubles the fallback window, so a server that is gone, or one
+	// that refuses this client, is still retried for as long as the tunnel
+	// runs, but at a few rounds an hour instead of one every minute or two:
+	// on Jitsi every round asks for a MUC rejoin, and nothing there ever
+	// stops the asking (olcrtc#19, review of #20). The shift is bounded so
+	// it cannot run off the end of the duration.
+	maxRecoveryPause   = 5 * time.Minute
+	maxRecoveryBackoff = 8
+
 	// defaultShutdownGrace bounds how long shutdown waits for tracked
 	// goroutines after they have been told to stop.
 	//
@@ -106,6 +117,9 @@ type Client struct {
 	recovery         recovery
 	handshakeTimeout time.Duration
 	retryDelay       time.Duration
+	// failedRounds counts the rounds of handshakes since the last session,
+	// which is what recoveryPause backs off on. ai-generated (olcrtc#19).
+	failedRounds atomic.Int32
 
 	// parked counts the requests waiting for a session that is not there
 	// (tunnelWhenReady, waitSessionReady). With a tun2socks in front every
