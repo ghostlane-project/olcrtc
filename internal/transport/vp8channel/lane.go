@@ -250,7 +250,9 @@ func (p *streamTransport) fullRate() float64 {
 // size, or what fits in a sample's payload, whichever is smaller. The frame
 // cap is a share of this, so the batch size alone would put it out by the
 // ratio between the two: with the app's numbers a sample holds 43 packets,
-// not 64.
+// not 64. A sample's size is defaultMaxPayloadSize, the one publishBurstBytes
+// (olcrtc#26) measures the publisher's bucket in; this reads the same number
+// in packets.
 func (p *streamTransport) fullPackets() int {
 	room := (defaultMaxPayloadSize - epochHdrLen - len(kcpBatchMagic)) / (batchLenLen + kcpMTU + wireCRCLen)
 	return max(min(p.batchSize, room), 1)
