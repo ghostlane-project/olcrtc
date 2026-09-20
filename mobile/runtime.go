@@ -165,15 +165,33 @@ func (r *Runtime) run(ctx context.Context, gen *runGeneration) {
 		cfg := gen.cfg
 		cfg.RoomURL = profile.RoomID
 		cfg.OnSessionOpen = func(sessionID string) { r.notifySessionOpened(gen, profile.RoomID, sessionID) }
-		// A room nobody is in ends this run so the next one is tried; a room
-		// whose peer is merely silent is retried in place, as before.
+		// A room nobody is in ends this run so the next one is tried, but
+		// only while there is a next one: with a single room, giving up
+		// would end the generation and leave the host holding a tunnel it
+		// did not ask to lose, which is what the runtime did before failover
+		// and what a host without its own retry loop still expects. The
+		// count is read here, at the start of this room's run, so a room the
+		// host appends is in force from the next start on; a room whose peer
+		// is merely silent is retried in place either way.
 		//
-		// ai-generated: EndOnEmptyRoom (the port of olcrtc#39).
-		cfg.EndOnEmptyRoom = true
+		// ai-generated: EndOnEmptyRoom and the count (the port of olcrtc#39;
+		// the count is from the review).
+		cfg.EndOnEmptyRoom = r.roomCount() > 1
 		return r.runner(ctx, cfg, onReady)
 	})
 	gen.cancel()
 	r.finish(gen, err)
+}
+
+// roomCount is how many rooms the host is offering right now. It answers
+// whether a room that turns out to be empty is worth giving up on: with one
+// room there is nowhere to give up to.
+//
+// ai-generated: the whole function (review of olcrtc#39).
+func (r *Runtime) roomCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.defaults.rooms())
 }
 
 // profilesSnapshot is the supervisor's view of the room list: the primary
