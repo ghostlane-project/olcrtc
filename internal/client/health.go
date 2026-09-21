@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/xtaci/smux"
@@ -20,8 +21,18 @@ func (c *Client) startControlLoop(
 	stream *smux.Stream,
 ) {
 	controlCtx, stop := context.WithCancel(ctx)
+	// The peer is told we are leaving on this stream, once, whoever gets
+	// there first: the watcher inside control.Run when a stop cancels the
+	// context, or the teardown below when it ends the session itself. Once
+	// makes the second caller wait for the first, so nothing closes the
+	// transport out from under a notice that is still on its way.
+	var notified sync.Once
+	notify := func() {
+		notified.Do(func() { tunnelcore.NotifyControlClose(stream) })
+	}
 	c.sessMu.Lock()
 	c.controlStop = stop
+	c.controlNotify = notify
 	c.sessMu.Unlock()
 	pingInterval := cfg.Liveness.Interval
 	if pingInterval <= 0 {
@@ -29,6 +40,7 @@ func (c *Client) startControlLoop(
 	}
 	runner := tunnelcore.ControlRunner{
 		Transport: c.ln, Config: cfg.Liveness, Health: c.health,
+		BeforeClose: notify,
 		LogFields: func() string {
 			c.sessMu.RLock()
 			defer c.sessMu.RUnlock()
@@ -109,20 +121,28 @@ func (c *Client) notifyLinkHealth(unhealthy bool) {
 }
 
 func (c *Client) shutdown() {
+	c.sessMu.RLock()
+	notify := c.controlNotify
+	c.sessMu.RUnlock()
+	// Before anything is closed, and synchronously: a notice still in flight
+	// when the transport goes is a notice the server never reads.
+	if notify != nil {
+		notify()
+	}
 	c.sessMu.Lock()
 	pair := c.pair
-	controlStream := c.controlStrm
 	controlStop := c.controlStop
 	session := c.session
 	controlSession := c.controlSess
 	conn := c.conn
 	controlConn := c.controlConn
 	c.pair = nil
+	controlStream := c.controlStrm
 	c.controlStrm, c.controlStop = nil, nil
+	c.controlNotify = nil
 	c.session, c.controlSess = nil, nil
 	c.conn, c.controlConn = nil, nil
 	c.sessMu.Unlock()
-	tunnelcore.NotifyControlClose(controlStream)
 	if controlStop != nil {
 		controlStop()
 	}
