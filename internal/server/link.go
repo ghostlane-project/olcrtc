@@ -235,10 +235,10 @@ func (s *Server) closePeerRouting(teardown peerRoutingTeardown) {
 		s.onClose(teardown.sessionID, "reconnect")
 		s.trackPeerClose(teardown.sessionID, "reconnect")
 	}
-	for _, peer := range teardown.peers {
+	s.closePeers(teardown.peers, func(peer *peerSession) {
 		s.closePeerSession(peer, "reconnect")
 		s.retirePeer(peer.peerID) // ai-generated: the transport outlives a provider reconnect
-	}
+	})
 	s.closeAllUDPFlows()
 }
 
@@ -349,9 +349,9 @@ func (s *Server) closeSession() {
 		s.onClose(oldSessionID, "closed")
 		s.trackPeerClose(oldSessionID, "closed")
 	}
-	for _, peer := range peers {
+	s.closePeers(peers, func(peer *peerSession) {
 		s.closePeerSession(peer, "closed")
-	}
+	})
 	s.closeAllUDPFlows()
 }
 

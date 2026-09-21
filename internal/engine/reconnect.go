@@ -67,6 +67,10 @@ type Reconnector struct {
 
 	queueOnce sync.Once
 	queue     chan struct{}
+	// queued counts every request that reached the queue, so a drain after a
+	// successful attempt can tell one raised before it from one raised
+	// during it.
+	queued atomic.Uint64
 
 	onReconnect     atomic.Pointer[func()]
 	shouldReconnect atomic.Pointer[func() bool]
@@ -146,6 +150,7 @@ func (r *Reconnector) Request(closed, reconnecting bool) ReconnectRequest {
 	}
 	select {
 	case r.reconnectQueue() <- struct{}{}:
+		r.queued.Add(1)
 		return ReconnectQueued
 	default:
 		return ReconnectCoalesced
@@ -189,9 +194,10 @@ func (r *Reconnector) handleRequestAttempt(ctx context.Context, done <-chan stru
 			r.reconnectLimitReached()
 			return true
 		}
+		seen := r.queued.Load()
 		err := r.reconnect(ctx)
 		if err == nil {
-			r.Drain()
+			r.dropRequestsOlderThan(seen)
 			return false
 		}
 		r.reportError(err)
@@ -212,10 +218,11 @@ func (r *Reconnector) handleFailureAttempts(ctx context.Context, done <-chan str
 			return true
 		}
 		backoff := reconnectBackoff(failures)
+		seen := r.queued.Load()
 		err := r.reconnect(ctx)
 		if err == nil || r.isExpectedNonFailure(err) {
 			r.resetFailures()
-			r.Drain()
+			r.dropRequestsOlderThan(seen)
 			return false
 		}
 		r.reportError(err)
@@ -330,6 +337,22 @@ func (r *Reconnector) reconnectQueue() chan struct{} {
 }
 
 // Drain removes coalesced requests after a successful reconnect.
+// dropRequestsOlderThan empties the queue unless something asked again while
+// the attempt was running.
+//
+// A reconnect callback is not instant - the server's closes every peer of the
+// session it is replacing - and a provider event raised inside that window is
+// about a room this attempt never saw. Draining unconditionally threw it away
+// and the engine stayed pointed at a room that had moved (#31).
+//
+// ai-generated: the whole function.
+func (r *Reconnector) dropRequestsOlderThan(seen uint64) bool {
+	if r.queued.Load() != seen {
+		return false
+	}
+	return r.Drain()
+}
+
 func (r *Reconnector) Drain() bool {
 	drained := false
 	for {
