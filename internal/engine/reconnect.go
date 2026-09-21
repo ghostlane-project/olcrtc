@@ -346,11 +346,11 @@ func (r *Reconnector) reconnectQueue() chan struct{} {
 // and the engine stayed pointed at a room that had moved (#31).
 //
 // ai-generated: the whole function.
-func (r *Reconnector) dropRequestsOlderThan(seen uint64) bool {
+func (r *Reconnector) dropRequestsOlderThan(seen uint64) {
 	if r.queued.Load() != seen {
-		return false
+		return
 	}
-	return r.Drain()
+	r.Drain()
 }
 
 func (r *Reconnector) Drain() bool {
