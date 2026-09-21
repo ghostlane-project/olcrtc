@@ -117,6 +117,8 @@ jobs:
     name: Gate plan (dry run)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      live: ${{ steps.scope.outputs.live }}
     defaults:
       run:
         shell: bash
@@ -124,6 +126,64 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
+          # The whole history, so the step below can see what this branch
+          # changed against proofkit.
+          fetch-depth: 0
+
+      # The live gate holds the real rooms for most of an hour and only one
+      # runs at a time across the repository, so a branch that cannot change
+      # what the engine does must not take that slot. Today four branches in
+      # flight meant two gates were cancelled by the queue and had to be run
+      # again by hand.
+      #
+      # Conservative on purpose: anything under internal/gate is engine
+      # behaviour as far as the gate is concerned, and only Go tests, Markdown
+      # and the docs tree are ever skipped. proofkit itself always runs.
+      #
+      # ai-generated: the whole step.
+      - name: Decide whether the live gate can tell this branch anything
+        id: scope
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" = "refs/heads/proofkit" ]; then
+            echo 'live=true' >> "$GITHUB_OUTPUT"
+            echo 'The live gate runs: this is proofkit.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          base=$(git merge-base origin/proofkit HEAD 2>/dev/null || true)
+          if [ -z "$base" ]; then
+            echo 'live=true' >> "$GITHUB_OUTPUT"
+            echo 'The live gate runs: this branch has no common history with proofkit.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          changed=$(git diff --name-only "$base" HEAD)
+          live=false
+          while IFS= read -r file; do
+            case "$file" in
+              '') continue ;;
+              internal/gate/*) live=true ;;
+              *.md|docs/*) continue ;;
+              *_test.go) continue ;;
+              *) live=true ;;
+            esac
+          done <<EOF
+          $changed
+          EOF
+          echo "live=$live" >> "$GITHUB_OUTPUT"
+          if [ "$live" = true ]; then
+            echo 'The live gate runs: this branch changes the engine.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo 'The live gate did not run: every file this branch changes is a Go test, Markdown or under docs/, none of which can change what the engine does on a real relay. The gate runs on the push that merges this branch.'
+              echo
+              echo '<details><summary>What changed</summary>'
+              echo
+              echo '```text'
+              echo "$changed"
+              echo '```'
+              echo '</details>'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Set up Go
         uses: actions/setup-go@v7
@@ -187,7 +247,11 @@ jobs:
     # minutes those jobs take, and a job skipped because a dependency failed
     # is reported as skipped, not as a pass.
     needs: [gate-plan, hygiene, lint, test]
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # The fork rule, and gate-plan's verdict on whether this branch can change
+    # what a real relay sees (see there).
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      && needs.gate-plan.outputs.live == 'true'
     runs-on: ubuntu-latest
     # The job holds the secrets: its token only reads the repository, and
     # checkout leaves no credential in .git/config for the test's children.
