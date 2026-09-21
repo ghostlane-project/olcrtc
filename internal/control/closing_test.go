@@ -55,10 +55,6 @@ func TestRunTellsThePeerBeforeItClosesTheStream(t *testing.T) {
 }
 
 func TestANoticeThatNeverReturnsStillLetsTheStreamGo(t *testing.T) {
-	previous := closeNoticeBudget
-	closeNoticeBudget = 50 * time.Millisecond
-	t.Cleanup(func() { closeNoticeBudget = previous })
-
 	a, _ := controlPair(t)
 	closed := make(chan string, 2)
 	stuck := make(chan struct{})
@@ -78,7 +74,7 @@ func TestANoticeThatNeverReturnsStillLetsTheStreamGo(t *testing.T) {
 		if got != "closed" {
 			t.Fatalf("event = %q, want %q", got, "closed")
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(closeNoticeBudget + 2*time.Second):
 		t.Fatal("a notice that never returned held the stream open")
 	}
 }

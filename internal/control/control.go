@@ -213,7 +213,7 @@ func Run(ctx context.Context, rw io.ReadWriteCloser, cfg Config) error {
 // closeNoticeBudget bounds Config.BeforeClose. Long enough for one frame on a
 // link that still works, short enough that a link that does not cannot hold
 // the stream open while everything above it waits for the close.
-var closeNoticeBudget = 1500 * time.Millisecond
+const closeNoticeBudget = 1500 * time.Millisecond
 
 func announceClosing(notify func()) {
 	if notify == nil {
