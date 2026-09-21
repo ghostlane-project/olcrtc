@@ -46,6 +46,8 @@ type memMember struct {
 	reconnect atomic.Pointer[func()]
 	// deaf drops everything forwarded to this member.
 	deaf atomic.Bool
+	// bytesOut counts what this member has written into the room.
+	bytesOut atomic.Int64
 }
 
 func (m *memMember) Connect(context.Context) error { return nil }
@@ -78,6 +80,7 @@ func (m *memMember) Reconnect(string) {
 }
 
 func (m *memMember) write(sample []byte) bool {
+	m.bytesOut.Add(int64(len(sample)))
 	m.room.mu.Lock()
 	targets := make([]*memMember, 0, len(m.room.members))
 	for other := range m.room.members {
@@ -128,6 +131,19 @@ func newMemRoom(t *testing.T) (string, *memRoom) {
 		return tr, nil
 	})
 	return name, room
+}
+
+// serverMember is the room's server side, the one whose writes every client
+// reads.
+func (r *memRoom) serverMember() *memMember {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for m := range r.members {
+		if m.tr == r.server.Load() {
+			return m
+		}
+	}
+	return nil
 }
 
 func (r *memRoom) clients() []*memMember {
