@@ -59,9 +59,15 @@ func measureAfterAClientVanishes(t *testing.T, blackout time.Duration) int64 {
 	}
 
 	const clients = 4
+	stops := make([]func(), 0, clients)
+	t.Cleanup(func() {
+		for _, stop := range stops {
+			stop()
+		}
+	})
 	for i := range clients {
 		addr, stop := startRoomClient(t.Context(), t, name, "vanishing-"+strconv.Itoa(i))
-		defer stop()
+		stops = append(stops, stop)
 		go func() { _ = echoThrough(addr, echo, 16*1024*1024) }()
 	}
 
