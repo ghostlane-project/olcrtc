@@ -133,9 +133,12 @@ type Session struct {
 	localEpoch      atomic.Uint32
 	peerEpoch       atomic.Uint32
 	peerEndpoint    atomic.Pointer[string]
-	peerEpochMu     sync.Mutex
-	peerEpochs      map[string]uint32
-	peerVideoSSRC   atomic.Uint32
+	// peerEndpointSeen is when a frame last arrived from the latched
+	// endpoint, in unix nanoseconds; see broadcastTarget.
+	peerEndpointSeen atomic.Int64
+	peerEpochMu      sync.Mutex
+	peerEpochs       map[string]uint32
+	peerVideoSSRC    atomic.Uint32
 	// sourceOwners is which endpoint owns which source, as the session's
 	// stanzas announce them: the bridge's own, which the peerVideoSSRC
 	// latch skips, and the peers', which tell the latch when the source

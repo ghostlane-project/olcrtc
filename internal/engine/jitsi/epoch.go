@@ -202,6 +202,7 @@ func (s *Session) latchPeerEndpoint(from string) {
 	if from == "" {
 		return
 	}
+	s.peerEndpointSeen.Store(time.Now().UnixNano())
 	cur := s.peerEndpoint.Load()
 	if cur == nil {
 		s.peerEndpoint.CompareAndSwap(nil, &from)

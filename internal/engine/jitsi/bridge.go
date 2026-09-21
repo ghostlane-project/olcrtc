@@ -114,6 +114,37 @@ func (s *Session) requestPeerVideo(ctx context.Context, jSess *j.Session) {
 	}
 }
 
+// peerLatchFresh is how long the latched endpoint is trusted as a
+// destination after the last frame from it. The control plane speaks every
+// control.DefaultInterval (10 s), so three intervals of silence means
+// something is wrong with the peer, not with the clock - and the old
+// behaviour, a frame the bridge hands to the whole room, is the safe thing
+// to fall back to while the session sorts itself out.
+const peerLatchFresh = 30 * time.Second
+
+// broadcastTarget is where a frame that belongs to no peer queue goes.
+//
+// On the server it is the room: the server has many clients and its
+// broadcasts are for all of them. On a client it is the one endpoint it has
+// latched - the server's - because the bridge hands a frame addressed to ""
+// to every endpoint in the room, so each client's upload also lands in every
+// other client's receive queue on the bridge, where it is dropped after
+// taking up room in a buffer of about 2 MB (#25). The server never latches
+// an endpoint (it takes the peer path instead), so it is unaffected.
+//
+// ai-generated: the whole function.
+func (s *Session) broadcastTarget() string {
+	ep := s.peerEndpoint.Load()
+	if ep == nil {
+		return ""
+	}
+	if seen := s.peerEndpointSeen.Load(); seen == 0 ||
+		time.Since(time.Unix(0, seen)) > peerLatchFresh {
+		return ""
+	}
+	return *ep
+}
+
 // Send queues a broadcast bridge frame, waiting for room in the queue.
 func (s *Session) Send(data []byte) error {
 	if s.closed.Load() {
@@ -218,7 +249,7 @@ func (s *Session) sendLoop() {
 			if !ok {
 				return
 			}
-			s.sendBridgeFrame("", data)
+			s.sendBridgeFrame(s.broadcastTarget(), data)
 		case <-s.peerWake:
 			retry = s.drainPeerQueuesRetry()
 		case <-retry:
@@ -276,7 +307,7 @@ func (s *Session) drainPeerQueues() bool {
 			}
 			select {
 			case data := <-s.sendQueue:
-				s.sendBridgeFrame("", data)
+				s.sendBridgeFrame(s.broadcastTarget(), data)
 			default:
 			}
 		}
