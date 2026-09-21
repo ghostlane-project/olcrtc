@@ -40,7 +40,8 @@ const (
 	// cap throughput: 512 KB, the same figure the goolom engine uses. That
 	// is thirty-two full messages, under a second at 5 Mbit/s, and many poll
 	// intervals at any rate a relay carries.
-	bridgeBacklogHighWater = 512 * 1024
+	// 512 KB until #15: see relayWindow, which this sits on top of.
+	bridgeBacklogHighWater = 256 * 1024
 	bridgeBacklogPoll      = 5 * time.Millisecond
 )
 
