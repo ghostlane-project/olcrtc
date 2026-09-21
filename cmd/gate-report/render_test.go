@@ -87,7 +87,7 @@ func TestRenderMarksKnownCellsWithTheirIssue(t *testing.T) {
 func TestIssueRefIsTheURLsNumberOrTheTextAsItIs(t *testing.T) {
 	for in, want := range map[string]string{
 		"https://github.com/ghostlane-project/olcrtc/issues/12": "[#12](https://github.com/ghostlane-project/olcrtc/issues/12)",
-		"https://github.com/example/fake/issues/latest":       "https://github.com/example/fake/issues/latest",
+		"https://github.com/example/fake/issues/latest":         "https://github.com/example/fake/issues/latest",
 		"olcrtc#12":                      "olcrtc#12",
 		"http://example.invalid/12":      "http://example.invalid/12",
 		"https://example.invalid/a|b/12": `https://example.invalid/a\|b/12`,
