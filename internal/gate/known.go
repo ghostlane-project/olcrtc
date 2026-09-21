@@ -14,7 +14,11 @@ import (
 // ErrCellFailed: the entry logs the cell instead of failing its subtest.
 var ErrKnownFailure = errors.New("known failure")
 
-// issues is where the engine's issues are.
+// issues is where the engine's issues are. Kept with the list empty: the
+// next entry writes issues + "<number>", and a constant that comes back with
+// every entry is not one to delete with the last one.
+//
+//nolint:unused // the list is empty today; every entry uses this.
 const issues = "https://github.com/romanpodpriatov/olcrtc/issues/"
 
 // KnownFailure is a cell that fails every run until the issue that tracks it
