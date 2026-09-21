@@ -29,7 +29,6 @@ type KnownFailure struct{ Cell, Issue, Why string }
 // that will not open, the server never comes up, its cells never run, and a
 // cell that never ran is never known, so configuration stays blocking.
 var knownFailures = []KnownFailure{ //nolint:gochecknoglobals // edited by hand as issues open and close; tests swap it
-	{"engine-linux/jitsi/datachannel/mobile/S2", issues + "15", "six parallel pulls collapse into SCTP retransmissions"},
 }
 
 // knownFailure is the entry of the list a cell id matches, the first one if
