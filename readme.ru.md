@@ -22,7 +22,7 @@ app -> SOCKS5 -> olcrtc cnc -> WebRTC/SFU сервис -> olcrtc srv -> инте
 основная; имя ветки осталось от прежнего названия проекта и менять его пока
 дороже, чем оставить, потому что на него завязаны сборки и пины. `master` -
 нетронутая копия upstream и ничего из перечисленного не содержит. Именно эту
-ветку линкует [Ghostlane](https://github.com/romanpodpriatov/ghostlane) на всех
+ветку линкует [Ghostlane](https://github.com/ghostlane-project/ghostlane) на всех
 платформах - для этого почти всё ниже и сделано: релей должен отличать своих
 пользователей друг от друга, а телефон - не сервер.
 
@@ -66,7 +66,7 @@ IPv6-only оператору, и NAT64 в App Review.
 ## Установка в один клик
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/romanpodpriatov/olcrtc/proofkit/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ghostlane-project/olcrtc/proofkit/install.sh | bash
 ```
 
 Ставит Podman, если его нет, клонирует ветку `proofkit` этого форка, собирает бинарник в контейнере, задаёт несколько вопросов (сервер или клиент, провайдер, транспорт, комната, ключ) и запускает. Запусти скрипт один раз на сервере (режим `srv`) и один раз на клиенте (режим `cnc`) - им нужны одинаковые room ID и ключ шифрования.
@@ -101,15 +101,15 @@ mage mobile  # gomobile bindings (Android)
 - Основной клиент:
   - [owenewans/owenclave](https://github.com/owenewans/owenclave) - Android-клиент прокси (форк exclave). Поддерживает все распространённые протоколы (vless, hysteria2, mieru, trojan, vmess, tuic, shadowsocks, socks ...) плюс `olcrtc`, формат URI `olcrtc://` и подписки
 - Клиент этого форка:
-  - [romanpodpriatov/ghostlane](https://github.com/romanpodpriatov/ghostlane) - Ghostlane, форк olcbox из списка ниже. Kotlin Multiplatform/Compose для Android, iOS, macOS, Windows и Linux; olcRTC рядом с VLESS Reality, VLESS поверх TLS, Hysteria2 и XHTTP - тот клиент, ради которого сделано всё перечисленное выше
+  - [ghostlane-project/ghostlane](https://github.com/ghostlane-project/ghostlane) - Ghostlane, форк olcbox из списка ниже. Kotlin Multiplatform/Compose для Android, iOS, macOS, Windows и Linux; olcRTC рядом с VLESS Reality, VLESS поверх TLS, Hysteria2 и XHTTP - тот клиент, ради которого сделано всё перечисленное выше
 - Клиенты сообщества:
   - [venterum/veil](https://github.com/venterum/veil) - V2Ray/Xray клиент для Android (форк v2rayNG), Material 3. Протоколы: VMess, VLESS, Shadowsocks, Trojan, SOCKS, WireGuard, Hysteria2 + `olcrtc`
   - [alananisimov/olcbox](https://github.com/alananisimov/olcbox) - Мультиплатформенный UI-клиент (Android, iOS, macOS, Windows, Linux). Kotlin Multiplatform/Compose. Все провайдеры (Jitsi, Telemost, WB Stream, Jazz), все транспорты, split tunneling, режимы TUN/proxy
 
 ## Сообщество
 
-- Issues и вопросы: [github.com/romanpodpriatov/olcrtc/issues](https://github.com/romanpodpriatov/olcrtc/issues)
-- Приложение на этом движке: [github.com/romanpodpriatov/ghostlane](https://github.com/romanpodpriatov/ghostlane)
+- Issues и вопросы: [github.com/ghostlane-project/olcrtc/issues](https://github.com/ghostlane-project/olcrtc/issues)
+- Приложение на этом движке: [github.com/ghostlane-project/ghostlane](https://github.com/ghostlane-project/ghostlane)
 - Как участвовать: [CONTRIBUTING.md](CONTRIBUTING.md) · Как сообщить об уязвимости: [SECURITY.md](SECURITY.md)
 
 Каналы апстрима принадлежат заархивированному проекту, этот форк там не

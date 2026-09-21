@@ -9,7 +9,7 @@ reports are treated as the most important work in the queue.
 **Please do not open a public issue.**
 
 Use GitHub's private vulnerability reporting:
-<https://github.com/romanpodpriatov/olcrtc/security/advisories/new>
+<https://github.com/ghostlane-project/olcrtc/security/advisories/new>
 
 It is private between you and the maintainers, takes attachments, and becomes a
 published advisory crediting you once a fix ships. If you cannot use it, open an
@@ -38,7 +38,7 @@ it manages, and anything it ships in a release.
 Out of scope, though worth telling us about anyway: the meeting services the
 engine speaks to (Jitsi deployments, Yandex Telemost, WB Stream), the operators
 of relays you connect through, and the applications that embed this engine other
-than [Ghostlane](https://github.com/romanpodpriatov/ghostlane).
+than [Ghostlane](https://github.com/ghostlane-project/ghostlane).
 
 ## Disclosure
 

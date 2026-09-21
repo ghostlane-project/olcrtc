@@ -4,7 +4,7 @@ olcRTC is maintained as part of the Ghostlane project. The authoritative
 governance document, including roles, how decisions are made and how maintainers
 are added, lives in the application repository:
 
-<https://github.com/romanpodpriatov/ghostlane/blob/main/GOVERNANCE.md>
+<https://github.com/ghostlane-project/ghostlane/blob/main/GOVERNANCE.md>
 
 What is specific to this repository:
 
@@ -23,4 +23,4 @@ What is specific to this repository:
 
 Funding, including the statement that maintainers and contributors may be paid
 from project funds, is described once for both repositories:
-<https://github.com/romanpodpriatov/ghostlane/blob/main/FUNDING.md>
+<https://github.com/ghostlane-project/ghostlane/blob/main/FUNDING.md>

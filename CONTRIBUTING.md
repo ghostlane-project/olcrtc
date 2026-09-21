@@ -1,7 +1,7 @@
 # Contributing
 
 Patches, bug reports and reviews are welcome, and none of them needs permission
-first. This is the engine behind [Ghostlane](https://github.com/romanpodpriatov/ghostlane);
+first. This is the engine behind [Ghostlane](https://github.com/ghostlane-project/ghostlane);
 `docs/` is the manual and `AGENTS.md` describes how the repository is laid out.
 
 ## Before a large change
@@ -57,6 +57,6 @@ is offered under it, and section 3 carries the patent grant that goes with it.
 ## Being paid
 
 Contributors may be compensated from project funds for substantial work; see
-[FUNDING.md](https://github.com/romanpodpriatov/ghostlane/blob/main/FUNDING.md)
+[FUNDING.md](https://github.com/ghostlane-project/ghostlane/blob/main/FUNDING.md)
 in the application repository, which carries the funding policy for both
 projects. Nothing about contributing depends on it.

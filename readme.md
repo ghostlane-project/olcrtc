@@ -17,18 +17,18 @@ app -> SOCKS5 -> olcrtc cnc -> WebRTC/SFU service -> olcrtc srv -> internet
 
 ## The project
 
-olcRTC is maintained as part of **[Ghostlane](https://github.com/romanpodpriatov/ghostlane)**,
+olcRTC is maintained as part of **[Ghostlane](https://github.com/ghostlane-project/ghostlane)**,
 an open-source VPN client for Android, iOS, macOS, Windows and Linux. This
 repository is the transport engine; the application repository is where the
 project's governance, funding policy and community documents live:
 
 | | |
 | --- | --- |
-| What the application is | [ghostlane/README.MD](https://github.com/romanpodpriatov/ghostlane/blob/main/README.MD) |
+| What the application is | [ghostlane/README.MD](https://github.com/ghostlane-project/ghostlane/blob/main/README.MD) |
 | How the project is run | [GOVERNANCE.md](GOVERNANCE.md) |
 | How to contribute | [CONTRIBUTING.md](CONTRIBUTING.md) |
 | Reporting a vulnerability | [SECURITY.md](SECURITY.md) |
-| Funding, and who holds the money | [ghostlane/FUNDING.md](https://github.com/romanpodpriatov/ghostlane/blob/main/FUNDING.md) |
+| Funding, and who holds the money | [ghostlane/FUNDING.md](https://github.com/ghostlane-project/ghostlane/blob/main/FUNDING.md) |
 | Licence and upstream attribution | [LICENSE](LICENSE), [NOTICE](NOTICE) |
 
 The engine is under active maintenance: changes are exercised by a release gate
@@ -42,7 +42,7 @@ which is now archived. The work is on the **`proofkit`** branch, the default
 here; that name is left over from the project's former one and is kept because
 builds and pins point at it, not because the project is still called that.
 `master` is an untouched copy of upstream and carries none of it. This branch is
-the engine [Ghostlane](https://github.com/romanpodpriatov/ghostlane) links on
+the engine [Ghostlane](https://github.com/ghostlane-project/ghostlane) links on
 every platform, which is what most of the additions below are for: a relay has
 to tell its users apart, and a phone is not a server.
 
@@ -85,7 +85,7 @@ Display-name dictionaries are embedded. Set optional YAML field `data` to a dire
 ## One-click install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/romanpodpriatov/olcrtc/proofkit/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ghostlane-project/olcrtc/proofkit/install.sh | bash
 ```
 
 Installs Podman if missing, clones this fork's `proofkit` branch, builds the binary in a container, asks a few questions (server or client, provider, transport, room, key) and starts it. Run it once on the server (mode `srv`) and once on the client (mode `cnc`) - they need the same room ID and encryption key.
@@ -120,15 +120,15 @@ mage mobile  # gomobile bindings (Android)
 - Main client: 
   - [owenewans/owenclave](https://github.com/owenewans/owenclave) - Android proxy client (fork of exclave). Supports all common protocols (vless, hysteria2, mieru, trojan, vmess, tuic, shadowsocks, socks ...) plus `olcrtc`, the `olcrtc://` URI format and subscriptions
 - This fork's client:
-  - [romanpodpriatov/ghostlane](https://github.com/romanpodpriatov/ghostlane) - Ghostlane, a fork of olcbox below. Kotlin Multiplatform/Compose for Android, iOS, macOS, Windows and Linux; olcRTC beside VLESS Reality, VLESS over TLS, Hysteria2 and XHTTP, and the client the additions above are built for
+  - [ghostlane-project/ghostlane](https://github.com/ghostlane-project/ghostlane) - Ghostlane, a fork of olcbox below. Kotlin Multiplatform/Compose for Android, iOS, macOS, Windows and Linux; olcRTC beside VLESS Reality, VLESS over TLS, Hysteria2 and XHTTP, and the client the additions above are built for
 - Community clients:
   - [venterum/veil](https://github.com/venterum/veil) - V2Ray/Xray client for Android (fork of v2rayNG), Material 3. Protocols: VMess, VLESS, Shadowsocks, Trojan, SOCKS, WireGuard, Hysteria2 + `olcrtc`
   - [alananisimov/olcbox](https://github.com/alananisimov/olcbox) - Multiplatform UI client (Android, iOS, macOS, Windows, Linux). Kotlin Multiplatform/Compose. All providers (Jitsi, Telemost, WB Stream, Jazz), all transports, split tunneling, TUN/proxy modes
 
 ## Community
 
-- Issues and questions: [github.com/romanpodpriatov/olcrtc/issues](https://github.com/romanpodpriatov/olcrtc/issues)
-- The application built on this engine: [github.com/romanpodpriatov/ghostlane](https://github.com/romanpodpriatov/ghostlane)
+- Issues and questions: [github.com/ghostlane-project/olcrtc/issues](https://github.com/ghostlane-project/olcrtc/issues)
+- The application built on this engine: [github.com/ghostlane-project/ghostlane](https://github.com/ghostlane-project/ghostlane)
 - How to contribute: [CONTRIBUTING.md](CONTRIBUTING.md) · Reporting a vulnerability: [SECURITY.md](SECURITY.md)
 
 Upstream's own channels belong to the archived project and are not where this

@@ -17,7 +17,7 @@ if [ ! -t 0 ]; then
         exit 1
     fi
     tmp=$(mktemp -t olcrtc-install.XXXXXX)
-    curl -fsSL https://raw.githubusercontent.com/romanpodpriatov/olcrtc/proofkit/install.sh -o "$tmp"
+    curl -fsSL https://raw.githubusercontent.com/ghostlane-project/olcrtc/proofkit/install.sh -o "$tmp"
     chmod +x "$tmp"
     exec bash "$tmp" "$@" < /dev/tty
 fi
@@ -26,7 +26,7 @@ echo "t.me/openlibrecommunity"
 
 RUN_ID=$(tr -dc 'a-z0-9' </dev/urandom | head -c 8)
 IMAGE_NAME="docker.io/library/golang:1.26-alpine3.22"
-REPO_URL="https://github.com/romanpodpriatov/olcrtc.git"
+REPO_URL="https://github.com/ghostlane-project/olcrtc.git"
 BRANCH="proofkit"
 NO_CACHE=0
 

@@ -19,7 +19,7 @@ var ErrKnownFailure = errors.New("known failure")
 // every entry is not one to delete with the last one.
 //
 //nolint:unused // the list is empty today; every entry uses this.
-const issues = "https://github.com/romanpodpriatov/olcrtc/issues/"
+const issues = "https://github.com/ghostlane-project/olcrtc/issues/"
 
 // KnownFailure is a cell that fails every run until the issue that tracks it
 // is fixed. Cell is a cell id pattern in which "*" is exactly one whole

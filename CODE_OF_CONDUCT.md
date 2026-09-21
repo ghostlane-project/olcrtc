@@ -63,7 +63,7 @@ and security advisories of the `olcrtc` and `ghostlane` repositories.
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
 reported to the maintainers listed in
-[MAINTAINERS.md](https://github.com/romanpodpriatov/ghostlane/blob/main/MAINTAINERS.md).
+[MAINTAINERS.md](https://github.com/ghostlane-project/ghostlane/blob/main/MAINTAINERS.md).
 The private channel described in [SECURITY.md](SECURITY.md) may be used for a
 report that should not be public.
 

@@ -53,8 +53,8 @@ func TestRenderGolden(t *testing.T) {
 // ai-generated: a known cell names its issue, passed or failed, and the
 // line under the table says the known failures fail no gate.
 func TestRenderMarksKnownCellsWithTheirIssue(t *testing.T) {
-	const issue9, issue15 = "https://github.com/romanpodpriatov/olcrtc/issues/9",
-		"https://github.com/romanpodpriatov/olcrtc/issues/15"
+	const issue9, issue15 = "https://github.com/ghostlane-project/olcrtc/issues/9",
+		"https://github.com/ghostlane-project/olcrtc/issues/15"
 	want := strings.Join([]string{
 		"### Gate: local target, engine 850aa5f9, app 1.0.431",
 		"",
@@ -86,7 +86,7 @@ func TestRenderMarksKnownCellsWithTheirIssue(t *testing.T) {
 
 func TestIssueRefIsTheURLsNumberOrTheTextAsItIs(t *testing.T) {
 	for in, want := range map[string]string{
-		"https://github.com/romanpodpriatov/olcrtc/issues/12": "[#12](https://github.com/romanpodpriatov/olcrtc/issues/12)",
+		"https://github.com/ghostlane-project/olcrtc/issues/12": "[#12](https://github.com/ghostlane-project/olcrtc/issues/12)",
 		"https://github.com/example/fake/issues/latest":       "https://github.com/example/fake/issues/latest",
 		"olcrtc#12":                      "olcrtc#12",
 		"http://example.invalid/12":      "http://example.invalid/12",
