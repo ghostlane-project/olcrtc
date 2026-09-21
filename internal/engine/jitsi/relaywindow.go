@@ -52,12 +52,20 @@ import (
 // every mark sent before, so a late echo of one is out of its range.
 
 const (
-	// relayWindow is 1 MiB of frames, ~1.4 MB of EndpointMessage JSON at
-	// the JVB (base64 and the wrapper), under the ~2 MB it holds for one
-	// receiver with room for its own messages. It still covers the ~5.5
-	// Mbit/s a relay carries over a round trip of more than a second, the
-	// sender's own backlog included, so it costs no throughput.
-	relayWindow = 1 << 20
+	// relayWindow is 512 KiB of frames, ~700 KB of EndpointMessage JSON at
+	// the JVB (base64 and the wrapper), well under the ~2 MB it holds for
+	// one receiver. It still covers the ~5.5 Mbit/s a relay carries over a
+	// round trip of more than a second, so on a path that works it costs no
+	// throughput.
+	//
+	// It was 1 MiB, chosen against the bridge's own buffer alone. What that
+	// left out is the path: with bridgeBacklogHighWater on top, up to ~1.5 MB
+	// of payload could be outstanding, which is a fraction of a second on a
+	// clean leg and seconds of queue on a lossy one - and seconds of queue is
+	// where SCTP's retransmission backoff takes over from anything we decide
+	// (#15: 115k T3-rtx and a control round trip of 1.3-2.5 s from a GitHub
+	// runner, where the same cell passes from a datacentre).
+	relayWindow = 512 << 10
 	// relayMarkEvery keeps the sender's view within an eighth of the window
 	// of the truth, for one ~100-byte message a mark.
 	relayMarkEvery = relayWindow / 8
