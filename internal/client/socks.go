@@ -114,12 +114,24 @@ func (c *Client) handleSocks5(ctx context.Context, conn net.Conn) {
 // tunnelWhenReady carries a CONNECT through the tunnel once the session is
 // up, waiting for it when it is not — as one of at most maxParkedRequests.
 func (c *Client) tunnelWhenReady(ctx context.Context, conn net.Conn, job connectJob) {
+	prep := c.prepareTunnel(ctx, job)
+	if prep.stream == nil {
+		job.fail(conn, prep.reply)
+		return
+	}
+	defer func() { _ = prep.stream.Close() }()
+	c.pumpTunnel(ctx, conn, prep.stream, job)
+}
+
+// prepareTunnel waits for the session, opens a stream and has the exit dial
+// the target, without touching the client's own connection: the caller
+// decides whether this tunnel is the one that carries the CONNECT.
+func (c *Client) prepareTunnel(ctx context.Context, job connectJob) tunnelPrep {
 	// Refused before parking: with the exit known to have no IPv6 route a
 	// stream for an IPv6 literal can only come back unreachable, after a
 	// round trip, and a dual-stack host sends one per connection.
 	if isIPv6Literal(job.host) && c.noIPv6Route() {
-		job.fail(conn, replyHostUnreachable(job.host))
-		return
+		return tunnelPrep{reply: replyHostUnreachable(job.host)}
 	}
 	readyCtx, cancel := context.WithTimeout(ctx, c.readyTimeout())
 	defer cancel()
@@ -140,20 +152,17 @@ func (c *Client) tunnelWhenReady(ctx context.Context, conn net.Conn, job connect
 				parked = false
 				c.unpark()
 			}
-			c.tunnel(ctx, conn, session, job)
-			return
+			return c.openTunnel(session, job)
 		}
 		if !parked {
 			if !c.park() {
-				job.fail(conn, replyNetworkUnreachable(job.host))
-				return
+				return tunnelPrep{reply: replyNetworkUnreachable(job.host)}
 			}
 			parked = true
 		}
 		select {
 		case <-readyCtx.Done():
-			job.fail(conn, replyHostUnreachable(job.host))
-			return
+			return tunnelPrep{reply: replyHostUnreachable(job.host)}
 		case <-ready:
 		}
 	}

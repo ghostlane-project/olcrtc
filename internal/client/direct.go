@@ -120,9 +120,33 @@ func (c *Client) sniffThenRoute(ctx context.Context, conn net.Conn, job connectJ
 		return
 	}
 	job.replied = true
+	// The tunnel is made ready while the client is given its window to name
+	// a destination. A protocol where the server speaks first says nothing,
+	// and without this it paid the whole window before anything was dialed -
+	// under hev the SOCKS target is an address, so that was every SSH, SMTP,
+	// IMAP or database connection (#35). Nothing here touches the client's
+	// connection: the sniff owns its first bytes.
+	//
+	// ai-generated: the race and its handover.
+	prepCtx, cancelPrep := context.WithCancel(ctx)
+	defer cancelPrep()
+	prepared := make(chan tunnelPrep, 1)
+	// A copy: the sniff rewrites job.host and job.head under the preparation,
+	// and the exit was asked to dial the address the client gave.
+	prepJob := job
+	go func() { prepared <- c.prepareTunnel(prepCtx, prepJob) }()
+
 	host, head := sniffHead(conn)
 	job.head = head
 	if host != "" && c.rules.MatchDomain(host) {
+		// The direct path won. Whatever the tunnel has by now is closed as
+		// soon as it lands, here rather than left to the session.
+		cancelPrep()
+		go func() {
+			if prep := <-prepared; prep.stream != nil {
+				_ = prep.stream.Close()
+			}
+		}()
 		given := job.host
 		job.host = host
 		c.dialDirect(ctx, conn, job, reasonSniffed, given)
@@ -131,7 +155,13 @@ func (c *Client) sniffThenRoute(ctx context.Context, conn net.Conn, job connectJ
 	if host != "" {
 		logger.Debugf("sniffed %s for %s:%d: not a direct name", host, job.host, job.port)
 	}
-	c.tunnelWhenReady(ctx, conn, job)
+	prep := <-prepared
+	if prep.stream == nil {
+		job.fail(conn, prep.reply)
+		return
+	}
+	defer func() { _ = prep.stream.Close() }()
+	c.pumpTunnel(ctx, conn, prep.stream, job)
 }
 
 // sniffHead reads the client's first bytes for up to sniffTimeout, or until
