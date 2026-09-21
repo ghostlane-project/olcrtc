@@ -105,9 +105,12 @@ type Client struct {
 	controlSess *smux.Session
 	controlStrm *smux.Stream
 	controlStop context.CancelFunc
-	sessMu      sync.RWMutex
-	reconnectMu sync.Mutex
-	health      *runtime.HealthTracker
+	// controlNotify tells the peer this side is leaving, on the control
+	// stream of the current session, once; see startControlLoop.
+	controlNotify func()
+	sessMu        sync.RWMutex
+	reconnectMu   sync.Mutex
+	health        *runtime.HealthTracker
 
 	// controlLastPong is independent corroboration for the transport's fast
 	// peer-restart heuristic, not a second session reconnect detector.

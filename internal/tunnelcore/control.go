@@ -33,11 +33,16 @@ type ControlRunner struct {
 	// SendStalled reports that the data plane stopped sending; see
 	// control.Config.
 	SendStalled func() bool
+	// BeforeClose tells the peer this side is leaving, while the stream is
+	// still open; see control.Config.BeforeClose. Nil leaves the peer to
+	// find out through liveness.
+	BeforeClose func()
 }
 
 // Run blocks until the control stream stops, then invokes OnDeath unless ctx was canceled.
 func (r ControlRunner) Run(ctx context.Context, stream *smux.Stream) {
 	cfg := r.tunedConfig()
+	cfg.BeforeClose = r.BeforeClose
 	err := control.Run(ctx, stream, cfg)
 	if ctx.Err() != nil {
 		return
