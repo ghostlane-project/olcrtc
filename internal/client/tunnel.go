@@ -51,22 +51,39 @@ func (j connectJob) open(conn net.Conn, outbound io.Writer) bool {
 	return true
 }
 
-func (c *Client) tunnel(ctx context.Context, conn net.Conn, session *smux.Session, job connectJob) {
+// tunnelPrep is a tunnel made ready for one CONNECT: a stream the exit has
+// acknowledged, or the SOCKS reply the failure deserves.
+//
+// ai-generated: split out of tunnelWhenReady so the sniff can race it (#35).
+type tunnelPrep struct {
+	stream *smux.Stream
+	reply  []byte
+}
+
+// openTunnel opens a stream on session and has the exit dial the target. The
+// client's own connection is not touched: what comes back is a tunnel ready
+// to carry the CONNECT, or the reply its failure deserves.
+//
+// ai-generated: split out of tunnel() so the sniff can race it (#35).
+func (c *Client) openTunnel(session *smux.Session, job connectJob) tunnelPrep {
 	stream, err := session.OpenStream()
 	if err != nil {
 		logger.Warnf("OpenStream failed: %v", err)
-		job.fail(conn, replyHostUnreachable(job.host))
-		return
+		return tunnelPrep{reply: replyHostUnreachable(job.host)}
 	}
-	defer func() { _ = stream.Close() }()
 	logger.Infof("sid=%d tunnel to %s:%d", stream.ID(), job.host, job.port)
 	if err := c.sendConnectRequest(stream, job.host, job.port); err != nil {
 		logger.Warnf("sid=%d connect failed: %v", stream.ID(), err)
 		c.noteConnectFailure(err, job.host)
-		job.fail(conn, replyForConnectError(err, job.host))
-		return
+		_ = stream.Close()
+		return tunnelPrep{reply: replyForConnectError(err, job.host)}
 	}
 	c.noteConnectSuccess(job.host)
+	return tunnelPrep{stream: stream}
+}
+
+// pumpTunnel carries one CONNECT over a stream openTunnel prepared.
+func (c *Client) pumpTunnel(ctx context.Context, conn net.Conn, stream *smux.Stream, job connectJob) {
 	if !job.open(conn, stream) {
 		return
 	}
