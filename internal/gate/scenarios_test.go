@@ -446,18 +446,20 @@ func planned(target Target, clients ...string) []string {
 // the local target's jitsi/datachannel with both flavours.
 func TestScenariosApplyWhereTheSpecRunsThem(t *testing.T) {
 	lt, err := NewLocalTarget(LocalOptions{WorkDir: t.TempDir(), JitsiHosts: []string{"meet.example.invalid"},
-		Providers: []string{"jitsi", "telemost"}, Transports: []string{"datachannel", "vp8channel"}})
+		Providers: []string{"jitsi", "telemost", "salutejazz"}, Transports: []string{"datachannel", "vp8channel"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := make([]string, 0, 20)
+	want := make([]string, 0, 30)
 	want = append(want, "jitsi/datachannel/cli/S0", "jitsi/datachannel/mobile/S0", "jitsi/vp8channel/cli/S0",
-		"jitsi/vp8channel/mobile/S0", "telemost/vp8channel/cli/S0", "telemost/vp8channel/mobile/S0")
+		"jitsi/vp8channel/mobile/S0", "telemost/vp8channel/cli/S0", "telemost/vp8channel/mobile/S0",
+		"salutejazz/datachannel/cli/S0", "salutejazz/datachannel/mobile/S0")
 	for _, id := range []string{"S1", "S2", "S3", "S4", "S5"} {
-		want = append(want, "jitsi/datachannel/mobile/"+id, "telemost/vp8channel/mobile/"+id)
+		want = append(want, "jitsi/datachannel/mobile/"+id, "telemost/vp8channel/mobile/"+id,
+			"salutejazz/datachannel/mobile/"+id)
 	}
 	want = append(want, "jitsi/datachannel/cli/S6", "jitsi/datachannel/mobile/S6",
-		"jitsi/datachannel/mobile/S7", "telemost/vp8channel/mobile/S7")
+		"jitsi/datachannel/mobile/S7", "telemost/vp8channel/mobile/S7", "salutejazz/datachannel/mobile/S7")
 	if got := planned(lt, "cli", "mobile"); !slices.Equal(got, want) {
 		t.Fatalf("local plan:\n%q\nwant\n%q", got, want)
 	}

@@ -51,9 +51,10 @@ const (
 
 // Provider and transport names, as the engine's YAML spells them.
 const (
-	providerJitsi    = "jitsi"
-	providerTelemost = "telemost"
-	providerWBStream = "wbstream"
+	providerJitsi      = "jitsi"
+	providerTelemost   = "telemost"
+	providerWBStream   = "wbstream"
+	providerSaluteJazz = "salutejazz"
 
 	transportData  = "datachannel"
 	transportVideo = "videochannel"
@@ -83,10 +84,18 @@ const (
 	bridgeDelayEnv = "OLCRTC_TEST_BRIDGE_DELAY"
 )
 
+// localProviders is every provider the local target carries, in the order a
+// default run walks them (-olcrtc.gate-providers).
+func localProviders() []string {
+	return []string{providerJitsi, providerTelemost, providerWBStream, providerSaluteJazz}
+}
+
 // transportsOf is which transports a provider carries (amendment A1, the
 // engine's real E2E expectations, confirmed live on 2026-09-18). Telemost
 // drops SCTP, so no datachannel, and seichannel fails there by design; WB
-// guests cannot publish data, so no datachannel there either.
+// guests cannot publish data, so no datachannel there either. SaluteJazz is
+// the other way round: it admits a guest to the room's data channels and
+// never to a media track, so datachannel alone.
 func transportsOf(provider string) []string {
 	switch provider {
 	case providerJitsi:
@@ -95,6 +104,8 @@ func transportsOf(provider string) []string {
 		return []string{transportVP8, transportVideo}
 	case providerWBStream:
 		return []string{transportVP8, transportVideo, transportSEI}
+	case providerSaluteJazz:
+		return []string{transportData}
 	default:
 		return nil
 	}
@@ -126,7 +137,10 @@ type LocalTarget struct {
 	pairs      []Pair
 	jitsiHosts []string
 	probe      func(ctx context.Context, host string) bool
-	linkWait   time.Duration
+	// saluteJazzRoom makes a fresh SaluteJazz room (SaluteJazzRoom; tests
+	// swap it).
+	saluteJazzRoom func(ctx context.Context) (string, error)
+	linkWait       time.Duration
 
 	buildMu sync.Mutex
 	binary  string
@@ -152,7 +166,7 @@ func NewLocalTarget(opts LocalOptions) (*LocalTarget, error) {
 	if err != nil {
 		return nil, err
 	}
-	t := &LocalTarget{opts: opts, pairs: pairs, probe: ProbeHTTPS, linkWait: linkBudget}
+	t := &LocalTarget{opts: opts, pairs: pairs, probe: ProbeHTTPS, saluteJazzRoom: SaluteJazzRoom, linkWait: linkBudget}
 	if slices.Contains(opts.Providers, providerJitsi) {
 		if t.jitsiHosts, err = JitsiHosts(opts.Instances, opts.JitsiHosts); err != nil {
 			return nil, err
@@ -305,11 +319,18 @@ func (t *LocalTarget) endpoint(ctx context.Context, p Pair) (Endpoint, error) {
 }
 
 // room is where the pair's server goes: a fresh room on a Jitsi host that
-// answers, or the pool entry of the run in the form its provider joins by.
+// answers, a fresh SaluteJazz room, or the pool entry of the run in the form
+// its provider joins by.
 func (t *LocalTarget) room(ctx context.Context, provider string) (string, error) {
 	switch provider {
 	case providerJitsi:
 		return JitsiRoom(ctx, t.jitsiHosts, t.probe)
+	case providerSaluteJazz:
+		room, err := t.saluteJazzRoom(ctx)
+		if err != nil {
+			return "", fmt.Errorf("salutejazz: %w", err)
+		}
+		return room, nil
 	case providerTelemost:
 		entry, err := PoolRoom(t.opts.TelemostRooms, t.opts.RunNumber)
 		if err != nil {

@@ -78,7 +78,7 @@ var (
 		"olcrtc:// link for the link target; else "+envLink+", which keeps it out of the process list")
 	gateDir = flag.String("olcrtc.gate-dir", "gate-artifacts",
 		"where the report and the scrubbed logs go; a relative path is taken from the module root")
-	gateProviders  = flag.String("olcrtc.gate-providers", "jitsi,telemost,wbstream", "providers for the local target")
+	gateProviders  = flag.String("olcrtc.gate-providers", strings.Join(localProviders(), ","), "providers for the local target")
 	gateTransports = flag.String(flagTransports, allTransports,
 		"transports for the local target; left alone, those the providers carry and this build links "+
 			"(videochannel runs only when named)")
@@ -567,6 +567,24 @@ func unreported(rep Report) []string {
 		}
 	}
 	return out
+}
+
+// ai-generated: left at its default, -olcrtc.gate-providers runs every
+// provider the local target carries, in the target's own order, so a provider
+// added to the support table joins the default run (the CI runs the default).
+func TestDefaultProvidersAreEveryOneTheLocalTargetCarries(t *testing.T) {
+	def := flag.Lookup("olcrtc.gate-providers").DefValue
+	if got := splitList(def); !slices.Equal(got, localProviders()) {
+		t.Fatalf("default providers %q, want %q", got, localProviders())
+	}
+	for _, p := range localProviders() {
+		if transportsOf(p) == nil {
+			t.Fatalf("%s is in the default run but carries no transport", p)
+		}
+	}
+	if !slices.Contains(localProviders(), "salutejazz") {
+		t.Fatal("salutejazz is not in the default run")
+	}
 }
 
 func TestPickFlavourIsTheBuildsOwn(t *testing.T) {

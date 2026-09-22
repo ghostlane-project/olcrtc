@@ -230,6 +230,7 @@ jobs:
     # (amendment A7). GATE_TELEMOST_ROOMS and GATE_WBSTREAM_ROOMS (pools of
     # room ids or URLs, comma-separated) and GATE_WBSTREAM_TOKEN are
     # required; GATE_JITSI_HOSTS is optional, empty means the instance list.
+    # Jitsi and SaluteJazz rooms are made fresh per pair and need no secret.
     #
     # Fork rule: GitHub gives a pull request from a fork no secrets, so this
     # job does not run for one. It shows as skipped and gate-plan's summary

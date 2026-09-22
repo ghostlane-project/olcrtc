@@ -3,6 +3,7 @@ package gate
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -46,6 +47,16 @@ debug: true
 		!strings.Contains(wb, "vp8: { fps: 60, batch_size: 64 }") {
 		t.Fatalf("wbstream config:\n%s", wb)
 	}
+	// ai-generated: a SaluteJazz room reference is one quoted scalar, colon
+	// and all, and the server joins it anonymously: no token.
+	sj := RenderServerConfig(Endpoint{Provider: "salutejazz", Transport: "datachannel", Room: "fakecode1:fakepass1",
+		Key: key, Channel: "gate-000000000004", DNS: "8.8.8.8:53"}, "")
+	if !strings.Contains(sj, "auth: { provider: salutejazz }\n") ||
+		!strings.Contains(sj, `room: { id: "fakecode1:fakepass1", channel: "gate-000000000004" }`) ||
+		!strings.Contains(sj, "net: { transport: datachannel, ") || strings.Contains(sj, "vp8:") ||
+		strings.Contains(sj, "sei:") {
+		t.Fatalf("salutejazz config:\n%s", sj)
+	}
 }
 
 // TestRenderedConfigsPassTheEnginesOwnLoader loads each rendered config the
@@ -60,6 +71,8 @@ func TestRenderedConfigsPassTheEnginesOwnLoader(t *testing.T) {
 		{Provider: "wbstream", Transport: "vp8channel", Room: "fake-wb-room-1", Channel: "gate-000000000003",
 			DNS: "8.8.8.8:53", VP8FPS: 30, VP8Batch: 16},
 		{Provider: "wbstream", Transport: "seichannel", Room: "fake-wb-room-1", DNS: "8.8.8.8:53"},
+		{Provider: "salutejazz", Transport: "datachannel", Room: "fakecode1:fakepass1", Channel: "gate-000000000005",
+			DNS: "8.8.8.8:53"},
 	} {
 		ep.Key = key
 		token := ""
@@ -117,7 +130,7 @@ func TestWaitForLine(t *testing.T) {
 func TestLocalTargetPairsFollowTheSupportTable(t *testing.T) {
 	lt, err := NewLocalTarget(LocalOptions{
 		WorkDir: t.TempDir(), JitsiHosts: []string{"meet.example.invalid"},
-		Providers:  []string{"jitsi", "telemost", "wbstream"},
+		Providers:  []string{"jitsi", "telemost", "wbstream", "salutejazz"},
 		Transports: []string{"datachannel", "videochannel", "seichannel", "vp8channel"},
 	})
 	if err != nil {
@@ -127,6 +140,7 @@ func TestLocalTargetPairsFollowTheSupportTable(t *testing.T) {
 		{"jitsi", "datachannel"}, {"jitsi", "videochannel"}, {"jitsi", "seichannel"}, {"jitsi", "vp8channel"},
 		{"telemost", "videochannel"}, {"telemost", "vp8channel"},
 		{"wbstream", "videochannel"}, {"wbstream", "seichannel"}, {"wbstream", "vp8channel"},
+		{"salutejazz", "datachannel"},
 	}
 	if got := lt.Pairs(); !slices.Equal(got, want) {
 		t.Fatalf("Pairs = %v\nwant %v", got, want)
@@ -152,16 +166,17 @@ func TestLocalTargetRefusesAPlanItCannotRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, opts := range map[string]LocalOptions{
-		"only an unsupported pair":   {Providers: []string{"telemost"}, Transports: []string{"datachannel"}},
-		"a provider left with none":  {Providers: []string{"jitsi", "telemost"}, Transports: []string{"datachannel"}},
-		"a transport nobody carries": {Providers: []string{"wbstream"}, Transports: []string{"datachannel", "vp8channel"}},
-		"an unknown provider":        {Providers: []string{"skype"}, Transports: []string{"vp8channel"}},
-		"an unknown transport":       {Providers: []string{"jitsi"}, Transports: []string{"smokechannel"}},
-		"a provider twice":           {Providers: []string{"jitsi", "jitsi"}, Transports: []string{"vp8channel"}},
-		"no provider":                {Transports: []string{"vp8channel"}},
-		"no transport":               {Providers: []string{"jitsi"}},
-		"no jitsi host":              {Providers: []string{"jitsi"}, Transports: []string{"datachannel"}, JitsiHosts: []string{" "}},
-		"no work directory":          {Providers: []string{"telemost"}, Transports: []string{"vp8channel"}},
+		"only an unsupported pair":    {Providers: []string{"telemost"}, Transports: []string{"datachannel"}},
+		"a provider left with none":   {Providers: []string{"jitsi", "telemost"}, Transports: []string{"datachannel"}},
+		"a transport nobody carries":  {Providers: []string{"wbstream"}, Transports: []string{"datachannel", "vp8channel"}},
+		"salutejazz carries no media": {Providers: []string{"salutejazz"}, Transports: []string{"vp8channel"}},
+		"an unknown provider":         {Providers: []string{"skype"}, Transports: []string{"vp8channel"}},
+		"an unknown transport":        {Providers: []string{"jitsi"}, Transports: []string{"smokechannel"}},
+		"a provider twice":            {Providers: []string{"jitsi", "jitsi"}, Transports: []string{"vp8channel"}},
+		"no provider":                 {Transports: []string{"vp8channel"}},
+		"no transport":                {Providers: []string{"jitsi"}},
+		"no jitsi host":               {Providers: []string{"jitsi"}, Transports: []string{"datachannel"}, JitsiHosts: []string{" "}},
+		"no work directory":           {Providers: []string{"telemost"}, Transports: []string{"vp8channel"}},
 	} {
 		if name != "no work directory" {
 			opts.WorkDir = t.TempDir()
@@ -240,6 +255,41 @@ func TestLocalTargetEndpointsAreFreshPerPair(t *testing.T) {
 		if fresh := first.Room != second.Room; fresh != (p.Provider == "jitsi") {
 			t.Fatalf("%s: fresh room %t, want a fresh one on jitsi alone", p, fresh)
 		}
+	}
+}
+
+// ai-generated: SaluteJazz has no pool. Every pair gets a room of its own from
+// the provider's anonymous create call, as a Jitsi pair does, and a create
+// that fails is a server that did not come up: named, and tried once more,
+// as a provider's refusal is.
+func TestLocalTargetMintsAFreshSaluteJazzRoomPerPair(t *testing.T) {
+	lt, err := NewLocalTarget(LocalOptions{WorkDir: t.TempDir(), Providers: []string{"salutejazz"},
+		Transports: []string{"datachannel"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lt.saluteJazzRoom == nil {
+		t.Fatal("no room maker: a salutejazz pair would have no room")
+	}
+	minted := 0
+	lt.saluteJazzRoom = func(context.Context) (string, error) {
+		minted++
+		return fmt.Sprintf("fakecode%d:fakepass%d", minted, minted), nil
+	}
+	p := Pair{"salutejazz", "datachannel"}
+	first, err1 := lt.endpoint(context.Background(), p)
+	second, err2 := lt.endpoint(context.Background(), p)
+	if err1 != nil || err2 != nil {
+		t.Fatalf("%v, %v", err1, err2)
+	}
+	if first.Room != "fakecode1:fakepass1" || second.Room != "fakecode2:fakepass2" || minted != 2 {
+		t.Fatalf("rooms %q and %q after %d creates, want one fresh room per pair", first.Room, second.Room, minted)
+	}
+	down := errors.New("create meeting: status 503")
+	lt.saluteJazzRoom = func(context.Context) (string, error) { return "", down }
+	_, err = lt.room(context.Background(), "salutejazz")
+	if !errors.Is(err, down) || !strings.HasPrefix(err.Error(), "salutejazz: ") || !retryable(err) {
+		t.Fatalf("a failed create: err = %v, want it named, wrapped and tried once more", err)
 	}
 }
 
