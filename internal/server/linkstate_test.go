@@ -37,9 +37,14 @@ type linkStub struct {
 	observe func() LinkState
 	during  LinkState
 
+	// rebuildOnce/onRebuild run a test's hook once from inside a rebuild;
+	// see duringRebuild.
+	rebuildOnce sync.Once
+
 	mu         sync.Mutex
 	onEnded    func(string)
 	onRejoined func()
+	onRebuild  func()
 	asked      []string
 }
 
@@ -54,9 +59,29 @@ func (l *linkStub) Send([]byte) error                   { return nil }
 func (l *linkStub) Close() error                        { return nil }
 func (l *linkStub) CanSend() bool                       { return true }
 func (l *linkStub) WatchConnection(ctx context.Context) { <-ctx.Done() }
-func (l *linkStub) Features() transport.Features        { return transport.Features{} }
 func (l *linkStub) SetShouldReconnect(func() bool)      {}
 func (l *linkStub) ResetPeer()                          {}
+
+// Features is asked for the payload cap to size a smux session with, which
+// is the one call a rebuild makes on a transport this plain. duringRebuild
+// hangs a hook on it, so a test can land something in the middle of a
+// rebuild without a sleep to time it.
+func (l *linkStub) Features() transport.Features {
+	l.mu.Lock()
+	hook := l.onRebuild
+	l.mu.Unlock()
+	if hook != nil {
+		l.rebuildOnce.Do(hook)
+	}
+	return transport.Features{}
+}
+
+// duringRebuild arms fn to run once, from inside the next rebuild.
+func (l *linkStub) duringRebuild(fn func()) {
+	l.mu.Lock()
+	l.onRebuild = fn
+	l.mu.Unlock()
+}
 
 func (l *linkStub) SetEndedCallback(cb func(string)) {
 	l.mu.Lock()
@@ -114,8 +139,9 @@ type linkRig struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	err    error
-	// stopped records the ended callback asking the run to stop. It does
-	// not cancel ctx, so a test can still drive the link afterwards.
+	// stopped records the ended callback asking the run to stop. It
+	// cancels ctx as the cancel Run passes does, because what the state
+	// does after an end depends on that cancellation.
 	stopped atomic.Bool
 }
 
@@ -139,7 +165,10 @@ func newLinkRig(t *testing.T, link *linkStub) *linkRig {
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	rig := &linkRig{srv: srv, link: link, ctx: ctx, cancel: cancel}
-	rig.err = srv.bringUpLink(ctx, Config{Transport: name}, func() { rig.stopped.Store(true) })
+	rig.err = srv.bringUpLink(ctx, Config{Transport: name}, func() {
+		rig.stopped.Store(true)
+		cancel()
+	})
 	t.Cleanup(func() {
 		cancel()
 		srv.shutdown()
@@ -235,5 +264,26 @@ func TestLinkStateIsDownWhileTheCarrierSessionIsRebuilt(t *testing.T) {
 
 	if got := rig.srv.LinkState(); got != LinkUp {
 		t.Fatalf("after the rebuild /stats reports %q, want %q", got, LinkUp)
+	}
+}
+
+// TestLinkStateStaysDownWhenTheSessionEndsDuringARebuild pins the ordering
+// between the two: a rebuild is past the callback's own guard before the end
+// arrives, and tearing peers down takes long enough for one to land there.
+// The terminal down has to survive it.
+func TestLinkStateStaysDownWhenTheSessionEndsDuringARebuild(t *testing.T) {
+	rig := newLinkRig(t, &linkStub{})
+	if rig.err != nil {
+		t.Fatalf("bringUpLink() error = %v", rig.err)
+	}
+	rig.link.duringRebuild(func() { rig.link.end("the carrier ended the session") })
+
+	rig.link.rejoin()
+
+	if !rig.stopped.Load() {
+		t.Fatal("the end never landed inside the rebuild")
+	}
+	if got := rig.srv.LinkState(); got != LinkDown {
+		t.Fatalf("a rebuild that outlived the end reports %q, want %q", got, LinkDown)
 	}
 }

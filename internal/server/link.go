@@ -53,10 +53,13 @@ func (s *Server) bringUpLink(ctx context.Context, cfg Config, cancel context.Can
 	if err := ln.Connect(ctx); err != nil {
 		return fmt.Errorf("failed to connect link: %w", err)
 	}
-	// Joined, with the smux session over it already installed above: a
-	// client could pair now. A join that fails returns instead and leaves
-	// /stats reporting connecting, which is the whole point of the field -
-	// a room that is gone must not read like a server one can reach.
+	// Connect returned nil: the carrier session is joined, which is what a
+	// client needs to pair - over the session installed just above on the
+	// single-session path, over a peer session built on demand on a
+	// peer-routing transport, where nothing is installed at this point. A
+	// join that fails returns instead and leaves /stats reporting
+	// connecting, which is the whole point of the field: a room that is
+	// gone must not read like a server one can reach.
 	s.setLinkState(LinkUp)
 	logger.Infof("Link connected")
 	s.logPeersLine()
@@ -146,7 +149,17 @@ func (s *Server) handleReconnect(ctx context.Context) {
 	// the smux session over it has been reinstalled. A reinstall that
 	// fails still leaves the session joined - what the serve loop retries
 	// then is the session, not the room.
-	defer s.setLinkState(LinkUp)
+	//
+	// The ctx check is the ordering, not a shortcut: a rebuild passes the
+	// callback's own guard and then spends time tearing peers down, so an
+	// end that arrives inside that window would otherwise have its
+	// terminal down overwritten by this defer. Whatever ends the run
+	// cancels ctx first.
+	defer func() {
+		if ctx.Err() == nil {
+			s.setLinkState(LinkUp)
+		}
+	}()
 	if s.peerLn != nil {
 		s.reinstallPeerRouting(ctx)
 		return
