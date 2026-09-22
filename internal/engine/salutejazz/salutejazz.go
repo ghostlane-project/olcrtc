@@ -310,6 +310,12 @@ type Session struct {
 
 	joinTimeout time.Duration
 
+	// lifecycleMu is held across the two steps that decide who owns a
+	// connection attempt: Connect reads the terminated flag and publishes
+	// its attempt under it, Close raises the flag and takes the attempt
+	// away under it. One of the two always sees the other.
+	lifecycleMu sync.Mutex
+
 	closeCh      chan struct{}
 	closeOnce    sync.Once
 	closed       atomic.Bool
@@ -324,6 +330,12 @@ type Session struct {
 	// join-response, rtc:config and rtc:offer, in that order. Tests set it
 	// before Connect.
 	onJoinPayload func(event string)
+
+	// beforePublish runs in the instant before a connection attempt is
+	// published on the session, which is where Close and Connect race for
+	// ownership of it. Tests set it before Connect to land a Close in that
+	// window every time instead of hoping for it.
+	beforePublish func()
 }
 
 // New creates a SaluteJazz engine session.
@@ -373,21 +385,21 @@ func New(_ context.Context, cfg engine.Config) (engine.Session, error) {
 // once the publisher lane is open, which is when the session can carry
 // bytes.
 func (s *Session) Connect(ctx context.Context) error {
-	if s.terminated.Load() {
-		return ErrSessionClosed
-	}
-	s.closed.Store(false)
-
 	api, err := newWebRTCAPI(s.resolver)
 	if err != nil {
 		return err
 	}
 	gen := newGeneration(api)
-	s.cur.Store(gen)
+	if s.beforePublish != nil {
+		s.beforePublish()
+	}
+	if !s.publishGeneration(gen) {
+		return ErrSessionClosed
+	}
 
 	conn, err := s.dialWebSocket(gen)
 	if err != nil {
-		s.teardown(gen)
+		s.abandon(gen)
 		return err
 	}
 	s.goLaunch(func() { s.readLoop(gen, conn) })
@@ -395,14 +407,44 @@ func (s *Session) Connect(ctx context.Context) error {
 	s.goLaunch(func() { s.negotiate(gen) })
 
 	if err := s.sendJoin(gen); err != nil {
-		s.teardown(gen)
+		s.abandon(gen)
 		return err
 	}
 	if err := s.awaitLanes(ctx, gen); err != nil {
-		s.teardown(gen)
+		s.abandon(gen)
 		return err
 	}
 	return s.abortIfTerminated(gen)
+}
+
+// publishGeneration makes gen the session's live connection attempt, unless
+// the session has been closed. It reports whether the session took it.
+//
+// Close raises the terminated flag and takes the live attempt away under the
+// same lock, so the two cannot pass each other: either Close finds this
+// attempt and ends it, or this publish is refused and the attempt is never
+// dialled. Reading the flag and publishing as two steps left a Close that
+// landed between them with nothing to end, and the attempt went on to dial
+// and join behind a closed session - a participant the connector kept in the
+// room until the join timed out.
+func (s *Session) publishGeneration(gen *generation) bool {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if s.terminated.Load() {
+		return false
+	}
+	s.closed.Store(false)
+	s.cur.Store(gen)
+	return true
+}
+
+// abandon ends a connection attempt Connect is giving up on and takes it off
+// the session. Every accessor reads the live attempt through s.cur, so one
+// that has been torn down must not be left answering for a session that has
+// none. A later attempt that has already replaced it is left alone.
+func (s *Session) abandon(gen *generation) {
+	s.teardown(gen)
+	s.cur.CompareAndSwap(gen, nil)
 }
 
 // awaitLanes waits for the publisher channel that carries the byte stream.
@@ -428,18 +470,17 @@ func (s *Session) abortIfTerminated(gen *generation) error {
 	if !s.terminated.Load() {
 		return nil
 	}
-	s.teardown(gen)
+	s.abandon(gen)
 	return ErrSessionClosed
 }
 
 // Close terminates the session and releases its resources. The connector
 // has no leave frame: the SFU drops a participant on its own ping timeout.
 func (s *Session) Close() error {
-	s.terminated.Store(true)
-	s.closed.Store(true)
+	gen := s.terminate()
 	s.closeOnce.Do(func() { close(s.closeCh) })
 
-	if gen := s.cur.Swap(nil); gen != nil {
+	if gen != nil {
 		s.teardown(gen)
 	}
 	s.stopLaunching()
@@ -454,6 +495,16 @@ func (s *Session) Close() error {
 	case <-time.After(pcCloseTimeout):
 	}
 	return nil
+}
+
+// terminate marks the session gone for good and takes the live connection
+// attempt away, under the lock Connect publishes an attempt with.
+func (s *Session) terminate() *generation {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	s.terminated.Store(true)
+	s.closed.Store(true)
+	return s.cur.Swap(nil)
 }
 
 // teardown ends one generation: its goroutines stop, the socket it dialled

@@ -906,3 +906,72 @@ func marshalPacket(t *testing.T, packet *livekit.DataPacket) []byte {
 	}
 	return frame
 }
+
+// TestCloseEndsAnAttemptItNeverSaw pins the window the Task 3 re-review
+// found: Connect reads the terminated flag and publishes its connection
+// attempt in two steps, and a Close that lands between them sees no attempt
+// to end while Connect sees no close to obey. The attempt went on to dial,
+// join, and hold a participant in the room until the join timed out.
+func TestCloseEndsAnAttemptItNeverSaw(t *testing.T) {
+	url, fake := newFakeConnector(t)
+	sess, err := New(context.Background(), engine.Config{
+		URL: url, Token: "passw0rd", Name: "window",
+		Extra: map[string]string{"roomID": "abc123"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sj := sess.(*Session)
+	sj.joinTimeout = 2 * time.Second
+	// Close lands inside the window, every run.
+	sj.beforePublish = func() { _ = sess.Close() }
+
+	start := time.Now()
+	if err := sess.Connect(context.Background()); !errors.Is(err, ErrSessionClosed) {
+		t.Fatalf("connect = %v, want %v", err, ErrSessionClosed)
+	}
+	if took := time.Since(start); took > time.Second {
+		t.Fatalf("connect took %s: it waited out the join instead of seeing the close", took)
+	}
+	if dials := fake.dialsSeen(); dials != 0 {
+		t.Fatalf("%d clients reached the connector behind a closed session", dials)
+	}
+	if joins := fake.joins(); len(joins) != 0 {
+		t.Fatalf("%d joins reached the connector behind a closed session", len(joins))
+	}
+	if gen := sj.current(); gen != nil {
+		t.Fatal("a closed session still points at a connection attempt")
+	}
+}
+
+// TestAGivenUpConnectLeavesNoAttemptBehind pins the second finding: every
+// accessor on this session reads the live attempt through s.cur, so a
+// Connect that tore its own attempt down has to take it off the session
+// too. What was left behind answered for a connection that no longer
+// existed - an identity, a roster, a confirmed peer binding.
+func TestAGivenUpConnectLeavesNoAttemptBehind(t *testing.T) {
+	url, fake := newFakeConnector(t)
+	release := fake.holdJoins()
+	t.Cleanup(release)
+
+	sess, err := New(context.Background(), engine.Config{
+		URL: url, Token: "passw0rd", Name: "givenup",
+		Extra: map[string]string{"roomID": "abc123"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sess.Close() })
+	sj := sess.(*Session)
+	sj.joinTimeout = 300 * time.Millisecond
+
+	if err := sess.Connect(context.Background()); !errors.Is(err, ErrJoinTimeout) {
+		t.Fatalf("connect = %v, want %v", err, ErrJoinTimeout)
+	}
+	if gen := sj.current(); gen != nil {
+		t.Fatalf("a failed connect left an attempt behind (torn down = %v)", gen.isDone())
+	}
+	if id := sj.LocalPeerID(); id != "" {
+		t.Fatalf("a session with no live attempt reports the peer id %q", id)
+	}
+}
