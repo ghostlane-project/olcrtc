@@ -49,7 +49,7 @@ func TestIssueRejectsMalformedRoomReferences(t *testing.T) {
 
 func TestCreateRoomReturnsCodeAndPassword(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" || r.URL.Path != "/room/create-meeting" {
+		if r.Method != http.MethodPost || r.URL.Path != "/room/create-meeting" {
 			t.Errorf("%s %s", r.Method, r.URL.Path)
 		}
 		_, _ = w.Write([]byte(`{"roomId":"zzz999","password":"pw123456","url":"https://salutejazz.ru/zzz999?psw=x"}`))

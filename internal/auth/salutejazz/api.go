@@ -54,24 +54,28 @@ type createMeetingReply struct {
 
 // createMeetingRequest is the exact body the official web client sends to
 // provision an anonymous room (captured live, see the design spec §2.1).
+//
+// Every //nolint:tagliatelle below is the same exception: the upstream
+// SaluteJazz API uses camelCase JSON keys, not the snake_case this repo
+// otherwise requires.
 type createMeetingRequest struct {
 	Title                             string   `json:"title"`
-	GuestEnabled                      bool     `json:"guestEnabled"`                      //nolint:tagliatelle // upstream SaluteJazz API uses camelCase
-	LobbyEnabled                      bool     `json:"lobbyEnabled"`                      //nolint:tagliatelle // upstream SaluteJazz API uses camelCase
-	ServerVideoRecordAutoStartEnabled bool     `json:"serverVideoRecordAutoStartEnabled"` //nolint:tagliatelle // upstream SaluteJazz API uses camelCase
-	SipEnabled                        bool     `json:"sipEnabled"`                        //nolint:tagliatelle // upstream SaluteJazz API uses camelCase
-	ModeratorEmails                   []string `json:"moderatorEmails"`                   //nolint:tagliatelle // upstream SaluteJazz API uses camelCase
-	SummarizationEnabled              bool     `json:"summarizationEnabled"`              //nolint:tagliatelle // upstream SaluteJazz API uses camelCase
+	GuestEnabled                      bool     `json:"guestEnabled"`                      //nolint:tagliatelle
+	LobbyEnabled                      bool     `json:"lobbyEnabled"`                      //nolint:tagliatelle
+	ServerVideoRecordAutoStartEnabled bool     `json:"serverVideoRecordAutoStartEnabled"` //nolint:tagliatelle
+	SIPEnabled                        bool     `json:"sipEnabled"`                        //nolint:tagliatelle
+	ModeratorEmails                   []string `json:"moderatorEmails"`                   //nolint:tagliatelle
+	SummarizationEnabled              bool     `json:"summarizationEnabled"`              //nolint:tagliatelle
 	Interpretation                    any      `json:"interpretation"`
-	Room3DEnabled                     bool     `json:"room3dEnabled"` //nolint:tagliatelle // upstream SaluteJazz API uses camelCase
-	Room3DScene                       string   `json:"room3dScene"`   //nolint:tagliatelle // upstream SaluteJazz API uses camelCase
+	Room3DEnabled                     bool     `json:"room3dEnabled"` //nolint:tagliatelle
+	Room3DScene                       string   `json:"room3dScene"`   //nolint:tagliatelle
 }
 
 // splitRoomRef splits a "<code>:<password>" room reference at the first
 // colon. Both halves must match roomPartRE; a missing colon, an empty half,
 // extra colons (the password half then fails the charset check), or
 // uppercase letters are all rejected as a malformed room reference.
-func splitRoomRef(ref string) (code, password string, err error) {
+func splitRoomRef(ref string) (string, string, error) {
 	// Never interpolate ref (or either half of it) into the returned error:
 	// the password half is a credential, and this error is logged by
 	// callers several layers up (engineconn -> builtin -> Logf). A static
@@ -81,7 +85,7 @@ func splitRoomRef(ref string) (code, password string, err error) {
 	if i < 0 {
 		return "", "", fmt.Errorf("%w: expected \"<code>:<password>\"", auth.ErrRoomIDRequired)
 	}
-	code, password = ref[:i], ref[i+1:]
+	code, password := ref[:i], ref[i+1:]
 	if !roomPartRE.MatchString(code) || !roomPartRE.MatchString(password) {
 		return "", "", fmt.Errorf("%w: malformed room reference", auth.ErrRoomIDRequired)
 	}
@@ -146,7 +150,7 @@ func (p Provider) createMeeting(ctx context.Context, client *http.Client) (strin
 		GuestEnabled:                      true,
 		LobbyEnabled:                      false,
 		ServerVideoRecordAutoStartEnabled: false,
-		SipEnabled:                        false,
+		SIPEnabled:                        false,
 		ModeratorEmails:                   []string{},
 		SummarizationEnabled:              false,
 		Interpretation:                    nil,
