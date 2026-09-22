@@ -33,6 +33,7 @@ import (
 //	(*fakeSFU).joins()                      every join seen: its payload and group
 //	(*fakeSFU).holdJoins() -> release       stall the join answer, for a race
 //	(*fakeSFU).holdDials() -> release       stall the upgrade, before any frame
+//	(*fakeSFU).refuseJoins(code, message)   answer every join with an error
 //	(*fakeSFU).dialsSeen()                  how many clients have reached it
 //	(*fakeSFU).liveSockets()                sockets still open on its side
 //	(*fakeSFU).dropAll()                    close every fake-side socket
@@ -81,6 +82,8 @@ type fakeSFU struct {
 	// upgrade itself.
 	joinGate chan struct{}
 	dialGate chan struct{}
+	// refusal, while non-nil, is the error every join is answered with.
+	refusal *serverError
 }
 
 func newFakeConnector(t *testing.T) (string, *fakeSFU) {
@@ -151,6 +154,22 @@ func (f *fakeSFU) holdDials() func() {
 	return func() { once.Do(func() { close(gate) }) }
 }
 
+// refuseJoins answers every join with an error frame instead of a
+// join-response, the way the connector refuses a room it will not admit a
+// client to. The reply echoes that join's own requestId, as every server
+// reply in the capture echoes the requestId of the frame it answers.
+func (f *fakeSFU) refuseJoins(code, message string) {
+	f.mu.Lock()
+	f.refusal = &serverError{Code: code, Message: message}
+	f.mu.Unlock()
+}
+
+func (f *fakeSFU) joinRefusal() *serverError {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.refusal
+}
+
 // dialsSeen is how many clients have reached the connector endpoint,
 // counted before the upgrade so a held dial is visible.
 func (f *fakeSFU) dialsSeen() int {
@@ -207,11 +226,9 @@ func (f *fakeSFU) dropAll() {
 	}
 }
 
-// sendError delivers a server error frame to every connected peer. It is
-// part of the fake's documented surface, driven by the reconnect and
-// fatal-error cover.
-//
-//nolint:unused // driven by the reconnect and fatal-error tests
+// sendError delivers a server error frame to every connected peer, under a
+// requestId of the connector's own: an error that answers nothing the client
+// sent.
 func (f *fakeSFU) sendError(code, message string) {
 	for _, peer := range f.snapshot() {
 		_ = peer.write(eventError, map[string]any{"code": code, "message": message})
@@ -242,16 +259,22 @@ func (f *fakeSFU) fail(what string, err error) {
 
 // join registers a peer in its room and hands it a distinct identity, the
 // way the SFU hands every participant its own participantId.
-func (f *fakeSFU) join(peer *fakePeer, room string, frame fakeIn) {
+func (f *fakeSFU) join(peer *fakePeer, room string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.seen = append(f.seen, seenJoin{payload: string(frame.Payload), group: frame.GroupID})
 	f.seq++
 	peer.id = "fakepart-" + strconv.Itoa(f.seq)
 	peer.room = room
 	peer.group = "fakegroup-" + room
 	f.peers = append(f.peers, peer)
 	f.rooms[room] = append(f.rooms[room], peer)
+}
+
+// noteJoin records a join frame as it arrived, admitted or refused.
+func (f *fakeSFU) noteJoin(frame fakeIn) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.seen = append(f.seen, seenJoin{payload: string(frame.Payload), group: frame.GroupID})
 }
 
 func (f *fakeSFU) roomPeers(room string) []*fakePeer {
@@ -402,7 +425,13 @@ func (p *fakePeer) handle(frame fakeIn) error {
 		if frame.GroupID != "" {
 			p.fake.fail("join", errGroupOnJoin)
 		}
-		p.fake.join(p, frame.RoomID, frame)
+		p.fake.noteJoin(frame)
+		if refusal := p.fake.joinRefusal(); refusal != nil {
+			p.room = frame.RoomID
+			return p.reply(frame.RequestID, eventError,
+				map[string]any{"code": refusal.Code, "message": refusal.Message})
+		}
+		p.fake.join(p, frame.RoomID)
 		p.fake.awaitJoinGate()
 		if err := p.write(eventJoinResponse, p.joinResponse()); err != nil {
 			return err
@@ -697,13 +726,20 @@ func (p *fakePeer) pcLocked(target string) *webrtc.PeerConnection {
 	return p.subPC
 }
 
-// write sends one server frame with the keys the capture shows for that
-// event: a join-response carries none of the session ids, a media-out
-// carries both, an error frame carries the group only.
+// write sends one server frame under a requestId of its own, the way the
+// connector sends what no client asked for.
 func (p *fakePeer) write(event string, payload any) error {
+	return p.reply(uuid.NewString(), event, payload)
+}
+
+// reply sends one server frame under the requestId it answers. The keys are
+// the ones the capture shows for that event: a join-response carries none of
+// the session ids, a media-out carries both, an error frame carries the
+// group only.
+func (p *fakePeer) reply(requestID, event string, payload any) error {
 	frame := map[string]any{
 		"event":     event,
-		"requestId": uuid.NewString(),
+		"requestId": requestID,
 		"roomId":    p.room,
 	}
 	switch event {

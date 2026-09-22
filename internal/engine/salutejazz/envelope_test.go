@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"regexp"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -973,5 +975,268 @@ func TestAGivenUpConnectLeavesNoAttemptBehind(t *testing.T) {
 	}
 	if id := sj.LocalPeerID(); id != "" {
 		t.Fatalf("a session with no live attempt reports the peer id %q", id)
+	}
+}
+
+// TestReconnectRejoinsWithRefreshedCredentials drives a drop end to end: the
+// link dies, the session asks its caller for fresh credentials, joins the
+// room again from scratch and reports the reconnect on the callback that was
+// registered once, before any of it.
+func TestReconnectRejoinsWithRefreshedCredentials(t *testing.T) {
+	url, fake := newFakeConnector(t)
+	var refreshes atomic.Int64
+	s, err := New(context.Background(), engine.Config{URL: url, Token: "passw0rd",
+		Name: "r", Extra: map[string]string{"roomID": "abc123"},
+		Refresh: func(context.Context) (engine.Credentials, error) {
+			refreshes.Add(1)
+			return engine.Credentials{URL: url, Token: "passw0rd",
+				Extra: map[string]string{"roomID": "abc123"}}, nil
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.WatchConnection(ctx)
+
+	reconnected := make(chan struct{}, 1)
+	s.SetReconnectCallback(func() { reconnected <- struct{}{} })
+	if err := s.Connect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	first := s.(*Session).localIdentity()
+
+	fake.dropAll() // close every fake-side socket
+	select {
+	case <-reconnected:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("no reconnect after drop (fake: %s)", fake.lastError())
+	}
+	if refreshes.Load() == 0 {
+		t.Fatal("Refresh was not called")
+	}
+	// The rejoin is a join of its own: a fresh handshake under a new
+	// identity, carrying no group id from the attempt it replaces.
+	joins := fake.joins()
+	if len(joins) != 2 {
+		t.Fatalf("joins = %d, want 2", len(joins))
+	}
+	for i, join := range joins {
+		if join.group != "" {
+			t.Fatalf("join %d carried a group id %q", i, join.group)
+		}
+	}
+	if id := s.(*Session).localIdentity(); id == "" || id == first {
+		t.Fatalf("identity after the rejoin = %q, before = %q", id, first)
+	}
+	if failure := fake.lastError(); failure != "" {
+		t.Fatalf("fake SFU error: %s", failure)
+	}
+}
+
+// TestEndedReasonOnServerErrorEvent covers the verdict a session cannot
+// reconnect its way out of: the connector says the room is gone, and a
+// rejoin would only ask the same question again. The agent's respawn loop
+// is what rejoins, into the room the ring sync has moved to.
+func TestEndedReasonOnServerErrorEvent(t *testing.T) {
+	url, fake := newFakeConnector(t)
+	s, err := New(context.Background(), engine.Config{URL: url, Token: "p",
+		Name: "e", Extra: map[string]string{"roomID": "abc123"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	ended := make(chan string, 1)
+	s.SetEndedCallback(func(r string) { ended <- r })
+	_ = s.Connect(context.Background())
+	fake.sendError("ROOM_NOT_FOUND", "room is gone")
+	select {
+	case r := <-ended:
+		if !strings.Contains(r, "ROOM_NOT_FOUND") {
+			t.Fatalf("reason %q", r)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no ended callback")
+	}
+	// A session that has ended asks for nothing more.
+	if request := s.(*Session).queueReconnect(); request != engine.ReconnectRejected {
+		t.Fatalf("a reconnect was queued after the room was gone: %v", request)
+	}
+}
+
+// TestAJoinRefusalEndsTheSessionAndStopsRetrying covers the other half of
+// the verdict: the refusal arrives as the answer to our own join, under that
+// join's requestId. Whatever the code says, our access to the room is gone,
+// the Connect waiting on it is released at once rather than sitting out the
+// join timeout, and nothing is retried.
+func TestAJoinRefusalEndsTheSessionAndStopsRetrying(t *testing.T) {
+	url, fake := newFakeConnector(t)
+	fake.refuseJoins("FORBIDDEN", "not allowed in this room")
+
+	sess, err := New(context.Background(), engine.Config{
+		URL: url, Token: "passw0rd", Name: "refused",
+		Extra: map[string]string{"roomID": "abc123"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sess.Close() })
+	sj := sess.(*Session)
+	sj.joinTimeout = 20 * time.Second
+	ended := make(chan string, 1)
+	sess.SetEndedCallback(func(r string) { ended <- r })
+
+	start := time.Now()
+	if err := sess.Connect(context.Background()); err == nil {
+		t.Fatal("connect succeeded against a connector that refused the join")
+	}
+	if took := time.Since(start); took > 5*time.Second {
+		t.Fatalf("connect took %s: it waited out the join instead of reading the refusal", took)
+	}
+	select {
+	case r := <-ended:
+		if !strings.Contains(r, "FORBIDDEN") {
+			t.Fatalf("reason %q", r)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no ended callback")
+	}
+	if request := sj.queueReconnect(); request != engine.ReconnectRejected {
+		t.Fatalf("a reconnect was queued after the join was refused: %v", request)
+	}
+	// Nor by the front door: a session that has ended does not join again,
+	// whoever asks it to.
+	if err := sess.Connect(context.Background()); !errors.Is(err, ErrSessionClosed) {
+		t.Fatalf("connect after the refusal = %v, want %v", err, ErrSessionClosed)
+	}
+	if joins := fake.joins(); len(joins) != 1 {
+		t.Fatalf("joins = %d, want the one that was refused", len(joins))
+	}
+}
+
+// TestAnErrorForAnotherRequestLeavesTheSessionAlone pins what the capture
+// shows: an error frame answers one request, under that request's id, and
+// the official client draws one for a feature it is not entitled to half a
+// second after joining - and stays in the room for the rest of the call. An
+// error this session did not ask for, and that names no room, ends nothing.
+func TestAnErrorForAnotherRequestLeavesTheSessionAlone(t *testing.T) {
+	url, fake := newFakeConnector(t)
+	sess := connectSession(t, url, "noisy")
+	ended := make(chan string, 1)
+	sess.SetEndedCallback(func(r string) { ended <- r })
+
+	fake.sendError("FORBIDDEN", "have no permission to view transcription")
+
+	select {
+	case reason := <-ended:
+		t.Fatalf("a per-request error ended the session: %s", reason)
+	case <-time.After(500 * time.Millisecond):
+	}
+	// The socket is still there - the connector answers a ping on it - and
+	// so is the lane.
+	if err := sess.pingOnce(); err != nil {
+		t.Fatalf("ping after the error frame: %v", err)
+	}
+	if !sess.CanSend() {
+		t.Fatal("the lane is gone after a per-request error")
+	}
+	if request := sess.queueReconnect(); request != engine.ReconnectQueued {
+		t.Fatalf("a live session refused a reconnect request: %v", request)
+	}
+}
+
+// TestReconnectKeepsDeliveringToTheSameCallbacks pins the other half of a
+// rejoin: it is a new connection attempt under a new identity, and the byte
+// stream has to come back on the callbacks the caller registered once,
+// before any of it.
+func TestReconnectKeepsDeliveringToTheSameCallbacks(t *testing.T) {
+	url, fake := newFakeConnector(t)
+	receiver, in := connectPeer(t, url, "receiver")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go receiver.WatchConnection(ctx)
+
+	reconnected := make(chan struct{}, 1)
+	receiver.SetReconnectCallback(func() { reconnected <- struct{}{} })
+	first := receiver.localIdentity()
+
+	receiver.Reconnect("a liveness probe said so")
+	select {
+	case <-reconnected:
+	case <-time.After(20 * time.Second):
+		t.Fatalf("no reconnect (fake: %s)", fake.lastError())
+	}
+	if id := receiver.localIdentity(); id == first {
+		t.Fatalf("the rejoin kept the identity %q", id)
+	}
+
+	sender := connectSession(t, url, "sender")
+	for _, s := range []*Session{sender, receiver} {
+		waitFor(t, 10*time.Second, "the roster to name the peer and both lanes to open", func() bool {
+			return len(s.remoteIdentities()) == 1 && s.CanSend() && s.DatagramCanSend()
+		})
+	}
+	if err := sender.SendTo(receiver.localIdentity(), []byte("after-the-rejoin")); err != nil {
+		t.Fatal(err)
+	}
+	got := receive(t, in, "the payload after the rejoin")
+	if string(got.payload) != "after-the-rejoin" || got.sender != sender.localIdentity() {
+		t.Fatalf("delivered %q from %q after the rejoin", got.payload, got.sender)
+	}
+	if failure := fake.lastError(); failure != "" {
+		t.Fatalf("fake SFU error: %s", failure)
+	}
+}
+
+// TestARefreshThatFailsIsRetriedNotFatal covers the credentials call on the
+// way back: it goes over the same network the session has just lost, so a
+// refresh that fails is the ordinary case, not a verdict. The attempt fails
+// with it, the supervisor backs off and asks again, and nothing about the
+// session has ended.
+func TestARefreshThatFailsIsRetriedNotFatal(t *testing.T) {
+	url, fake := newFakeConnector(t)
+	refused := errors.New("no credentials right now")
+	var refreshes atomic.Int64
+	sess, err := New(context.Background(), engine.Config{
+		URL: url, Token: "passw0rd", Name: "refresh",
+		Extra: map[string]string{"roomID": "abc123"},
+		Refresh: func(context.Context) (engine.Credentials, error) {
+			if refreshes.Add(1) == 1 {
+				return engine.Credentials{}, refused
+			}
+			return engine.Credentials{URL: url, Token: "passw0rd",
+				Extra: map[string]string{"roomID": "abc123"}}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sess.Close() })
+	ended := make(chan string, 1)
+	sess.SetEndedCallback(func(r string) { ended <- r })
+	reconnected := make(chan struct{}, 1)
+	sess.SetReconnectCallback(func() { reconnected <- struct{}{} })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go sess.WatchConnection(ctx)
+	if err := sess.Connect(context.Background()); err != nil {
+		t.Fatalf("connect: %v (fake: %s)", err, fake.lastError())
+	}
+
+	fake.dropAll()
+	select {
+	case <-reconnected:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("no reconnect after a refresh that failed (fake: %s)", fake.lastError())
+	}
+	if got := refreshes.Load(); got < 2 {
+		t.Fatalf("refreshes = %d, want the failed one and the one that worked", got)
+	}
+	select {
+	case reason := <-ended:
+		t.Fatalf("a refresh that failed ended the session: %s", reason)
+	default:
 	}
 }

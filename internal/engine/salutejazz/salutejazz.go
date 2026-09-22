@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -70,6 +71,10 @@ const (
 	// credentialKeyRoomID is the Extra key the auth provider puts the room
 	// code under.
 	credentialKeyRoomID = "roomID"
+
+	// codeNotFound is the one error code that says a room is gone without
+	// naming what is gone. See roomIsGone.
+	codeNotFound = "NOT_FOUND"
 
 	// webOrigin and webUserAgent are what the official web client sends on
 	// the connector handshake. The service sits behind a bot filter that
@@ -163,6 +168,12 @@ type generation struct {
 	identity atomic.Pointer[string]
 	group    atomic.Pointer[string]
 
+	// joinReqID is the requestId this attempt's join went out under. The
+	// connector answers a frame under the id that frame carried, so this is
+	// what tells the answer to our own join - a join-response, or an error
+	// refusing it - from a reply to anything else.
+	joinReqID atomic.Pointer[string]
+
 	subPC, pubPC     atomic.Pointer[webrtc.PeerConnection]
 	subRel, subLossy atomic.Pointer[webrtc.DataChannel]
 	pubRel, pubLossy atomic.Pointer[webrtc.DataChannel]
@@ -247,6 +258,8 @@ func (g *generation) isDone() bool {
 
 func (g *generation) groupID() string { return loadString(&g.group) }
 
+func (g *generation) joinRequestID() string { return loadString(&g.joinReqID) }
+
 func (g *generation) localIdentity() string { return loadString(&g.identity) }
 
 // remoteIdentities is everyone else the room has reported, sorted so a
@@ -321,6 +334,10 @@ type Session struct {
 	closed       atomic.Bool
 	terminated   atomic.Bool
 	reconnecting atomic.Bool
+	// ended latches the one verdict the caller is told about: a session that
+	// is over is over for one reason, and the attempts that unwind behind it
+	// must not report a second.
+	ended atomic.Bool
 
 	goMu     sync.Mutex
 	goClosed bool
@@ -427,10 +444,13 @@ func (s *Session) Connect(ctx context.Context) error {
 // landed between them with nothing to end, and the attempt went on to dial
 // and join behind a closed session - a participant the connector kept in the
 // room until the join timed out.
+//
+// A session that has ended refuses here too: the verdict that ended it was
+// about the room, and another join would only ask the same question again.
 func (s *Session) publishGeneration(gen *generation) bool {
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
-	if s.terminated.Load() {
+	if s.terminated.Load() || s.ended.Load() {
 		return false
 	}
 	s.closed.Store(false)
@@ -562,8 +582,18 @@ func (s *Session) Reconnect(reason string) {
 }
 
 // reconnect tears the current attempt down and joins again.
+//
+// The old attempt goes first and whole: its socket and both peer
+// connections. The SFU does not drop a participant when its connector
+// socket dies - it goes on relaying what the transport still carries - so a
+// rejoin that left the old peer connections up would be two participants of
+// ours in one room. Then the credentials are refreshed, and the rejoin is a
+// join from scratch: fresh ICE servers, a fresh publisher offer, and no
+// group id carried over from the attempt being replaced.
 func (s *Session) reconnect(ctx context.Context) error {
-	if s.terminated.Load() {
+	// A session that has ended is not reconnected. The verdict that ended
+	// it was about the room, and the room is what a rejoin would ask for.
+	if s.terminated.Load() || s.closed.Load() {
 		return ErrSessionClosed
 	}
 	s.reconnecting.Store(true)
@@ -572,6 +602,9 @@ func (s *Session) reconnect(ctx context.Context) error {
 	if gen := s.cur.Swap(nil); gen != nil {
 		s.teardown(gen)
 	}
+	if err := s.refreshCredentials(ctx); err != nil {
+		return err
+	}
 	if err := s.Connect(ctx); err != nil {
 		return err
 	}
@@ -579,13 +612,103 @@ func (s *Session) reconnect(ctx context.Context) error {
 	return nil
 }
 
-func (s *Session) queueReconnect() {
-	s.Request(s.closed.Load(), s.reconnecting.Load())
+// refreshCredentials asks the caller for the room credentials again, before
+// a rejoin.
+//
+// The connector URL is what the preconnect call hands out, and the official
+// client makes that call before every join: a rejoin on a stale URL can be
+// pointed at a node that no longer serves the room. The room code and its
+// password do not change, and a refresh that returns neither leaves them as
+// they were. A session created without the hook rejoins on what it has.
+func (s *Session) refreshCredentials(ctx context.Context) error {
+	if s.refresh == nil {
+		return nil
+	}
+	creds, err := s.refresh(ctx)
+	if err != nil {
+		return fmt.Errorf("salutejazz reconnect refresh: %w", err)
+	}
+	s.credMu.Lock()
+	defer s.credMu.Unlock()
+	engine.ApplyRefreshedCredentials(creds, &s.connectorURL, &s.pass,
+		map[string]*string{credentialKeyRoomID: &s.room})
+	return nil
 }
 
+// queueReconnect asks for a rejoin. The request is refused while the session
+// is closed - which a session that has ended is - while one is already in
+// flight, and whenever the caller's own policy says not to reconnect.
+func (s *Session) queueReconnect() engine.ReconnectRequest {
+	return s.Request(s.closed.Load(), s.reconnecting.Load())
+}
+
+// signalEnded ends the session for good, once. A session that has ended
+// asks for nothing more: the closed flag refuses every later reconnect
+// request, and one that is already queued is dropped.
 func (s *Session) signalEnded(reason string) {
+	if s.ended.Swap(true) {
+		return
+	}
 	s.closed.Store(true)
+	s.Drain()
+	logger.Warnf("salutejazz: session ended: %s", reason)
 	s.SignalEnded(reason)
+}
+
+// endAttempt ends the session on a verdict one connection attempt reached,
+// and takes that attempt down with it: a Connect still waiting on it must
+// not sit out the join timeout for a room that is gone. An attempt a later
+// one has already replaced ends alone - it speaks for a connection this
+// session has moved on from.
+func (s *Session) endAttempt(gen *generation, reason string) {
+	if gen != s.current() {
+		s.teardown(gen)
+		return
+	}
+	s.signalEnded(reason)
+	s.abandon(gen)
+}
+
+// roomIsGone reports whether an error code says the room this session joined
+// is not there any more. Such a verdict is terminal: the room code is issued
+// by the layer above, and the session it was issued for cannot get it back.
+//
+// The capture of the official client carries a single error frame, and that
+// one is scoped to the request it answers, so the shapes below are what this
+// engine treats as terminal rather than a vocabulary the service has
+// confirmed. An unfamiliar code never ends a session by itself.
+func roomIsGone(code string) bool {
+	if code == codeNotFound {
+		return true
+	}
+	for _, prefix := range []string{"ROOM_", "MEETING_"} {
+		if rest, found := strings.CutPrefix(code, prefix); found && isGoneState(rest) {
+			return true
+		}
+	}
+	return false
+}
+
+// isGoneState is the tail of a ROOM_/MEETING_ code that says the room is
+// over rather than merely unhappy.
+func isGoneState(state string) bool {
+	switch state {
+	case codeNotFound, "CLOSED", "ENDED", "FINISHED", "DELETED", "EXPIRED":
+		return true
+	default:
+		return false
+	}
+}
+
+// endedReason is the reason a verdict is reported to the caller under. Only
+// the code goes in: an error message from the connector names the
+// participant it was raised for, and a reason travels into the caller's
+// logs.
+func endedReason(what, code string) string {
+	if code == "" {
+		code = "no code"
+	}
+	return "salutejazz: " + what + " (" + code + ")"
 }
 
 func (s *Session) current() *generation { return s.cur.Load() }

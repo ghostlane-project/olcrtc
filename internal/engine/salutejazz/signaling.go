@@ -257,8 +257,12 @@ func (s *Session) sendMedia(gen *generation, payload mediaIn) error {
 // sendJoin is the first frame on the socket. The payload mimics the web
 // client's, and is the one frame that carries the room password: nothing
 // here or below logs it.
+//
+// The request id it goes out under is kept: the connector answers a frame
+// under the id that frame carried, so it is what identifies the answer to
+// this join - and an error refusing it - later on.
 func (s *Session) sendJoin(gen *generation) error {
-	return s.sendEnvelope(gen, eventJoin, joinRequest{
+	frame, err := s.envelope(gen, eventJoin, joinRequest{
 		Password:        s.password(),
 		ParticipantName: s.name,
 		SupportedFeatures: supportedFeatures{
@@ -269,6 +273,11 @@ func (s *Session) sendJoin(gen *generation) error {
 		},
 		IsSilent: false,
 	})
+	if err != nil {
+		return err
+	}
+	storeString(&gen.joinReqID, frame.RequestID)
+	return gen.writeJSON(frame)
 }
 
 // readLoop is the single reader. The connection is captured once: gorilla
@@ -302,7 +311,7 @@ func (s *Session) handleEnvelope(gen *generation, frame envIn) {
 	case eventMediaOut:
 		s.handleMediaOut(gen, frame.Payload)
 	case eventError:
-		s.handleServerError(frame.Payload)
+		s.handleServerError(gen, frame)
 	default:
 		logger.Debugf("salutejazz: event %s", frame.Event)
 	}
@@ -371,15 +380,37 @@ func (s *Session) deliverAnswer(gen *generation, desc *sdpDescription) {
 	}
 }
 
-// handleServerError reports what the connector refused. Which codes end a
-// session for good is decided on the reconnect path.
-func (s *Session) handleServerError(payload json.RawMessage) {
+// handleServerError decides what one error frame means for the session.
+//
+// The connector answers a frame under the requestId that frame carried, so
+// an error answering this attempt's join is a refusal of the join itself:
+// our access to the room is gone, whatever the code says, and a rejoin can
+// only ask the same question again. An error answering anything else is
+// scoped to that request - the capture has the official client drawing one
+// for a feature it is not entitled to moments after joining, and staying in
+// the room for the rest of the call - so among those only a code that says
+// the room itself is gone ends the session.
+//
+// Everything else is reported and nothing more. It does not end the session
+// and it does not reconnect by itself; a link that dies after one is a link
+// that died, and reconnects the ordinary way.
+func (s *Session) handleServerError(gen *generation, frame envIn) {
 	var failure serverError
-	if err := json.Unmarshal(payload, &failure); err != nil {
+	if err := json.Unmarshal(frame.Payload, &failure); err != nil {
 		logger.Warnf("salutejazz: server error frame: %v", err)
 		return
 	}
-	logger.Warnf("salutejazz: server error %s: %s", failure.Code, failure.Message)
+	code := strings.ToUpper(strings.TrimSpace(failure.Code))
+	switch {
+	case frame.RequestID != "" && frame.RequestID == gen.joinRequestID():
+		logger.Warnf("salutejazz: the connector refused the join: %s", code)
+		s.endAttempt(gen, endedReason("the connector refused the join", code))
+	case roomIsGone(code):
+		logger.Warnf("salutejazz: the connector says the room is gone: %s", code)
+		s.endAttempt(gen, endedReason("the room is gone", code))
+	default:
+		logger.Warnf("salutejazz: server error %s: %s", failure.Code, failure.Message)
+	}
 }
 
 // notifyJoin reports one handshake frame to the observer a test installed.
