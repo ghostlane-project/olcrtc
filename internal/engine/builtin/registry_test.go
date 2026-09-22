@@ -28,3 +28,19 @@ func TestEveryAuthProviderHasItsEngine(t *testing.T) {
 		}
 	}
 }
+
+// salutejazz's auth provider and engine must be wired into RegisterDefaults
+// in every build, the lean one (-tags olcrtc_lean) included: unlike wbstream,
+// its engine depends only on pion and the livekit/protocol wire types, never
+// the livekit SDK the lean build drops, so there is no reason to leave it out
+// of either tag set.
+func TestSaluteJazzRegistered(t *testing.T) {
+	builtin.RegisterDefaults()
+
+	if got := builtin.Available(); !slices.Contains(got, "salutejazz") {
+		t.Errorf("builtin.Available() = %v, want it to contain %q", got, "salutejazz")
+	}
+	if got := engine.Available(); !slices.Contains(got, "salutejazz") {
+		t.Errorf("engine.Available() = %v, want it to contain %q", got, "salutejazz")
+	}
+}
