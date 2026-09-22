@@ -72,7 +72,7 @@ Changes that belong upstream are prepared as pull requests against it — the
 
 ## Features
 
-- **Providers:** `jitsi`, `telemost`, `wbstream`
+- **Providers:** `jitsi`, `telemost`, `wbstream`, `salutejazz`
 - **Transports:** `datachannel`, `vp8channel`, `seichannel`, `videochannel`
 - **Platforms:** Linux, macOS, Windows, Android (gomobile), embeddable Go library
 - **Public Go packages:** `pkg/olcrtc/client`, `pkg/olcrtc/tunnel`, `pkg/olcrtc/engineconn`

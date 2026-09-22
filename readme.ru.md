@@ -53,7 +53,7 @@ IPv6-only оператору, и NAT64 в App Review.
 
 ## Возможности
 
-- **Провайдеры:** `jitsi`, `telemost`, `wbstream`
+- **Провайдеры:** `jitsi`, `telemost`, `wbstream`, `salutejazz`
 - **Транспорты:** `datachannel`, `vp8channel`, `seichannel`, `videochannel`
 - **Платформы:** Linux, macOS, Windows, Android (gomobile), встраиваемая Go-библиотека
 - **Публичные Go-пакеты:** `pkg/olcrtc/client`, `pkg/olcrtc/tunnel`, `pkg/olcrtc/engineconn`

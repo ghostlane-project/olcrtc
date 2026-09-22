@@ -252,8 +252,12 @@ func TestCloseDuringConnectTearsDownOnce(t *testing.T) {
 
 // TestClientFramesMatchTheCapturedShape pins the bytes this engine puts on
 // the connector. What the service sees has to be what its own web client
-// sends, field for field and in its order: the capture of that client is
-// where every literal below comes from.
+// sends, field for field and in its order, and the capture of that client is
+// where every field name and every field's place below comes from.
+//
+// The values are not. A room code, its password, a group id, a host address
+// and an ICE fragment are what one real call was, and this repository is
+// public: the values here are made up, with RFC 5737 for the address.
 func TestClientFramesMatchTheCapturedShape(t *testing.T) {
 	sess, err := New(context.Background(), engine.Config{
 		URL: "wss://example.invalid/connector", Token: "passw0rd", Name: "Spike Tester",
@@ -281,24 +285,24 @@ func TestClientFramesMatchTheCapturedShape(t *testing.T) {
 	}
 
 	// Everything after the join echoes the group id.
-	storeString(&gen.group, "8a7046f5-27b8-427a-abda-5ee6ceb2c205")
+	storeString(&gen.group, "00000000-0000-4000-8000-000000000000")
 
 	got = frameJSON(t, sj, gen, eventMediaIn, mediaIn{
 		Method:      methodAnswer,
 		Description: &sdpOut{SDP: "v=0\r\n", Type: sdpTypeAnswer},
 	})
 	want = `{"roomId":"abc123","payload":{"method":"rtc:answer","description":{"sdp":"v=0\r\n",` +
-		`"type":"answer"}},"event":"media-in","groupId":"8a7046f5-27b8-427a-abda-5ee6ceb2c205",` +
+		`"type":"answer"}},"event":"media-in","groupId":"00000000-0000-4000-8000-000000000000",` +
 		`"requestId":"REQ"}`
 	if got != want {
 		t.Fatalf("answer frame\n got %s\nwant %s", got, want)
 	}
 
-	mid, index, ufrag := "0", uint16(0), "+E5u"
+	mid, index, ufrag := "0", uint16(0), "abcd"
 	got = frameJSON(t, sj, gen, eventMediaIn, mediaIn{
 		Method: methodICE,
 		Candidates: []iceCandidate{{
-			Candidate:        "candidate:984223960 1 udp 2122260223 10.66.66.6 55404 typ host",
+			Candidate:        "candidate:1 1 udp 2122260223 192.0.2.10 50000 typ host",
 			SDPMid:           &mid,
 			SDPMLineIndex:    &index,
 			UsernameFragment: &ufrag,
@@ -306,9 +310,9 @@ func TestClientFramesMatchTheCapturedShape(t *testing.T) {
 		}},
 	})
 	want = `{"roomId":"abc123","payload":{"method":"rtc:ice","rtcIceCandidates":[{"candidate":` +
-		`"candidate:984223960 1 udp 2122260223 10.66.66.6 55404 typ host","sdpMid":"0",` +
-		`"sdpMLineIndex":0,"usernameFragment":"+E5u","target":"SUBSCRIBER"}]},"event":"media-in",` +
-		`"groupId":"8a7046f5-27b8-427a-abda-5ee6ceb2c205","requestId":"REQ"}`
+		`"candidate:1 1 udp 2122260223 192.0.2.10 50000 typ host","sdpMid":"0",` +
+		`"sdpMLineIndex":0,"usernameFragment":"abcd","target":"SUBSCRIBER"}]},"event":"media-in",` +
+		`"groupId":"00000000-0000-4000-8000-000000000000","requestId":"REQ"}`
 	if got != want {
 		t.Fatalf("ice frame\n got %s\nwant %s", got, want)
 	}
@@ -318,7 +322,7 @@ func TestClientFramesMatchTheCapturedShape(t *testing.T) {
 		PingReq: &pingRequest{Timestamp: 1790035953804, RTT: 0},
 	})
 	want = `{"roomId":"abc123","payload":{"method":"rtc:ping","ping_req":{"timestamp":1790035953804,` +
-		`"rtt":0}},"event":"media-in","groupId":"8a7046f5-27b8-427a-abda-5ee6ceb2c205","requestId":"REQ"}`
+		`"rtt":0}},"event":"media-in","groupId":"00000000-0000-4000-8000-000000000000","requestId":"REQ"}`
 	if got != want {
 		t.Fatalf("ping frame\n got %s\nwant %s", got, want)
 	}
@@ -1049,7 +1053,9 @@ func TestEndedReasonOnServerErrorEvent(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 	ended := make(chan string, 1)
 	s.SetEndedCallback(func(r string) { ended <- r })
-	_ = s.Connect(context.Background())
+	if err := s.Connect(context.Background()); err != nil {
+		t.Fatalf("connect: %v (fake: %s)", err, fake.lastError())
+	}
 	fake.sendError("ROOM_NOT_FOUND", "room is gone")
 	select {
 	case r := <-ended:

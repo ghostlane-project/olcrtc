@@ -394,7 +394,11 @@ func (s *Session) handleJoinResponse(gen *generation, payload json.RawMessage) {
 	if resp.ParticipantGroup.GroupID != "" {
 		storeString(&gen.group, resp.ParticipantGroup.GroupID)
 	}
-	logger.Debugf("salutejazz: joined as %s in meeting %s", resp.Participant.ParticipantID, resp.MeetingID)
+	// The two ids name a real meeting and a real participant in it. What is
+	// worth a log line is that the join was answered and that both arrived,
+	// not what they are.
+	logger.Debugf("salutejazz: joined, participant id %d chars, meeting id %d chars",
+		len(resp.Participant.ParticipantID), len(resp.MeetingID))
 	s.notifyJoin(eventJoinResponse)
 }
 
@@ -479,7 +483,9 @@ func (s *Session) handleServerError(gen *generation, frame envIn) {
 		logger.Warnf("salutejazz: the connector says the room is gone: %s", code)
 		s.endAttempt(gen, endedReason("the room is gone", code))
 	default:
-		logger.Warnf("salutejazz: server error %s: %s", failure.Code, failure.Message)
+		// The code only: a message from the connector names the participant
+		// it was raised for.
+		logger.Warnf("salutejazz: server error %s", code)
 	}
 }
 
