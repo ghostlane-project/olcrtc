@@ -59,7 +59,10 @@ func (s *Session) newPeerConnection(gen *generation, target string) (*webrtc.Pee
 		if candidate == nil {
 			return
 		}
-		if err := s.sendICE(gen, target, candidate.ToJSON()); err != nil {
+		// A candidate is gathered once the description it belongs to is set,
+		// so the fragment this reads is the one this candidate was gathered
+		// under.
+		if err := s.sendICE(gen, target, localICEUfrag(pc), candidate.ToJSON()); err != nil {
 			logger.Debugf("salutejazz: %s candidate: %v", target, err)
 		}
 	})
@@ -245,8 +248,10 @@ func (s *Session) wireChannel(gen *generation, dc *webrtc.DataChannel, publisher
 }
 
 // sendICE trickles one local candidate, one candidate per frame as the web
-// client sends them. The server takes an sdpMid even though it sends none.
-func (s *Session) sendICE(gen *generation, target string, candidate webrtc.ICECandidateInit) error {
+// client sends them. The server takes an sdpMid even though it sends none,
+// and it is given the ICE fragment the candidate was gathered under, as every
+// client frame in the capture carries one.
+func (s *Session) sendICE(gen *generation, target, ufrag string, candidate webrtc.ICECandidateInit) error {
 	mid := "0"
 	if candidate.SDPMid != nil && *candidate.SDPMid != "" {
 		mid = *candidate.SDPMid
@@ -261,10 +266,47 @@ func (s *Session) sendICE(gen *generation, target string, candidate webrtc.ICECa
 		SDPMLineIndex: &index,
 		Target:        target,
 	}
-	if candidate.UsernameFragment != nil && *candidate.UsernameFragment != "" {
-		out.UsernameFragment = candidate.UsernameFragment
+	if ufrag == "" && candidate.UsernameFragment != nil {
+		ufrag = *candidate.UsernameFragment
+	}
+	if ufrag != "" {
+		out.UsernameFragment = &ufrag
 	}
 	return s.sendMedia(gen, mediaIn{Method: methodICE, Candidates: []iceCandidate{out}})
+}
+
+// localICEUfrag is the ICE username fragment one peer connection gathers
+// under. pion leaves it out of ICECandidate.ToJSON - that renders the
+// candidate line, the mid and the m-line index and nothing else - so it is
+// read off the transport instead, which is where pion keeps the credentials
+// it put in the local description.
+//
+// Every step down to the ICE transport may be missing on a peer connection
+// that is being torn down, and a candidate is worth sending without the
+// fragment rather than not at all, so nothing here fails: it answers with
+// what it has.
+func localICEUfrag(pc *webrtc.PeerConnection) string {
+	if pc == nil {
+		return ""
+	}
+	sctp := pc.SCTP()
+	if sctp == nil {
+		return ""
+	}
+	dtls := sctp.Transport()
+	if dtls == nil {
+		return ""
+	}
+	ice := dtls.ICETransport()
+	if ice == nil {
+		return ""
+	}
+	params, err := ice.GetLocalParameters()
+	if err != nil {
+		logger.Debugf("salutejazz: local ICE parameters: %v", err)
+		return ""
+	}
+	return params.UsernameFragment
 }
 
 // addRemoteICE applies the candidates one rtc:ice frame carries.

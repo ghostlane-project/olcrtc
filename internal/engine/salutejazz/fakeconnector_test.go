@@ -31,6 +31,7 @@ import (
 //	(*fakeSFU).sawAnswer()                  the client's subscriber answer arrived
 //	(*fakeSFU).sawPublisherOffer()          the client's publisher offer arrived
 //	(*fakeSFU).joins()                      every join seen: its payload and group
+//	(*fakeSFU).clientICE()                  every candidate a client trickled
 //	(*fakeSFU).holdJoins() -> release       stall the join answer, for a race
 //	(*fakeSFU).holdDials() -> release       stall the upgrade, before any frame
 //	(*fakeSFU).holdForward() -> release     stall the relay, so a writer's own
@@ -51,6 +52,7 @@ import (
 var (
 	errGroupOnJoin = errors.New("join carried a group id")
 	errWrongGroup  = errors.New("frame carried the wrong group id")
+	errNoUfrag     = errors.New("candidate carried no usernameFragment")
 )
 
 const (
@@ -69,6 +71,14 @@ type seenJoin struct {
 	group   string
 }
 
+// seenCandidate is one client candidate as it arrived, projected to what a
+// test asks about it: which peer connection it belongs to, and the ICE
+// username fragment it was gathered under.
+type seenCandidate struct {
+	target string
+	ufrag  string
+}
+
 type fakeSFU struct {
 	mu       sync.Mutex
 	peers    []*fakePeer
@@ -78,6 +88,7 @@ type fakeSFU struct {
 	pubOffer bool
 	failure  string
 	seen     []seenJoin
+	trickled []seenCandidate
 	dials    int
 	live     int
 	// joinGate, while non-nil, stalls every join answer, dialGate the
@@ -319,6 +330,28 @@ func (f *fakeSFU) noteJoin(frame fakeIn) {
 	f.seen = append(f.seen, seenJoin{payload: string(frame.Payload), group: frame.GroupID})
 }
 
+// noteCandidate records one client candidate as it arrived.
+func (f *fakeSFU) noteCandidate(cand fakeCandidate) {
+	var ufrag string
+	if cand.UsernameFragment != nil {
+		ufrag = *cand.UsernameFragment
+	}
+	target := cand.Target
+	if target == "" {
+		target = targetSubscriber
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.trickled = append(f.trickled, seenCandidate{target: target, ufrag: ufrag})
+}
+
+// clientICE is every candidate a client has trickled, in arrival order.
+func (f *fakeSFU) clientICE() []seenCandidate {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]seenCandidate(nil), f.trickled...)
+}
+
 func (f *fakeSFU) roomPeers(room string) []*fakePeer {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -449,10 +482,11 @@ type fakeDesc struct {
 }
 
 type fakeCandidate struct {
-	Candidate     string  `json:"candidate"`
-	SDPMid        *string `json:"sdpMid"`        //nolint:tagliatelle // connector wire is camelCase
-	SDPMLineIndex *uint16 `json:"sdpMLineIndex"` //nolint:tagliatelle // connector wire is camelCase
-	Target        string  `json:"target"`
+	Candidate        string  `json:"candidate"`
+	SDPMid           *string `json:"sdpMid"`           //nolint:tagliatelle // connector wire is camelCase
+	SDPMLineIndex    *uint16 `json:"sdpMLineIndex"`    //nolint:tagliatelle // connector wire is camelCase
+	UsernameFragment *string `json:"usernameFragment"` //nolint:tagliatelle // connector wire is camelCase
+	Target           string  `json:"target"`
 }
 
 type fakePing struct {
@@ -573,6 +607,13 @@ func (p *fakePeer) handleMedia(media fakeMedia) error {
 		return p.answerPublisher(media.Description.SDP)
 	case methodICE:
 		for _, cand := range media.RTCIceCandidates {
+			// Every client rtc:ice in the capture carries the fragment its
+			// candidates were gathered under, so one that does not is a
+			// frame the service never sees from its own client.
+			if cand.UsernameFragment == nil || *cand.UsernameFragment == "" {
+				p.fake.fail("ice", errNoUfrag)
+			}
+			p.fake.noteCandidate(cand)
 			p.addICE(cand)
 		}
 		return nil

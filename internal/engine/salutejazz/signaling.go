@@ -121,8 +121,11 @@ type sdpDescription struct {
 
 // iceCandidate is one trickled candidate, in both directions. The server
 // sends an sdpMLineIndex without an sdpMid; both sides carry the target the
-// candidate belongs to. pion keeps the ufrag inside the candidate line and
-// leaves the field empty, so it is omitted rather than sent as null.
+// candidate belongs to. Every candidate the official client sends carries the
+// ICE fragment it was gathered under, which pion leaves out of
+// ICECandidate.ToJSON and sendICE reads off the transport; the server's own
+// candidates arrive without one, so the field is omitted rather than sent as
+// null.
 type iceCandidate struct {
 	Candidate        string  `json:"candidate"`
 	SDPMid           *string `json:"sdpMid"`                     //nolint:tagliatelle // connector wire is camelCase
