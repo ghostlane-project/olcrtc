@@ -46,8 +46,8 @@ import (
 //	                                        group id does not match the capture
 //
 // What it deliberately does not do: no preconnect (that is the auth
-// provider's HTTP call), no rtc:join, no participant bookkeeping beyond the
-// identities a room's peers need to address each other.
+// provider's HTTP call), no participant bookkeeping beyond the identities a
+// room's peers need to address each other.
 
 var (
 	errGroupOnJoin = errors.New("join carried a group id")
@@ -518,10 +518,17 @@ func (p *fakePeer) handle(frame fakeIn) error {
 		}); err != nil {
 			return err
 		}
+		// Who is already here reaches the joiner in its own rtc:join, and
+		// nowhere else: the roster updates the connector sends afterwards
+		// describe this participant to itself. Between rtc:config and
+		// rtc:offer is where the capture has it.
+		if err := p.sendMedia(methodJoin, map[string]any{"join": p.roomState()}); err != nil {
+			return err
+		}
 		if err := p.offerSubscriber(); err != nil {
 			return err
 		}
-		p.fake.broadcastParticipants(p.room, nil)
+		p.fake.announceJoin(p.room, p)
 		return nil
 	case eventMediaIn:
 		// Everything after the join echoes the group the join-response
@@ -539,11 +546,34 @@ func (p *fakePeer) handle(frame fakeIn) error {
 	}
 }
 
+// roomState is the rtc:join payload this peer is given: who else was already
+// in the room when it arrived. The real frame carries the room, this
+// participant, the ICE servers and the server's ping timeouts too; the roster
+// is the part an engine that carries bytes reads.
+func (p *fakePeer) roomState() map[string]any {
+	others := make([]any, 0)
+	for _, peer := range p.fake.roomPeers(p.room) {
+		if peer == p {
+			continue
+		}
+		others = append(others, rosterEntry(peer, "ACTIVE"))
+	}
+	return map[string]any{"otherParticipants": others}
+}
+
+// announceJoin tells the room about a participant that has just arrived. The
+// joiner is not among the recipients: it has been told who is here in its own
+// rtc:join, and it is what the others are being told about.
+func (f *fakeSFU) announceJoin(room string, joiner *fakePeer) {
+	f.broadcastParticipants(room, nil, joiner)
+}
+
 // broadcastParticipants sends the room roster to everyone in it, the way the
 // SFU does when the membership changes. gone, when set, is listed as
-// DISCONNECTED: that is how a participant leaves a LiveKit roster. A write
-// that fails is dropped - one dead socket does not concern the others.
-func (f *fakeSFU) broadcastParticipants(room string, gone *fakePeer) {
+// DISCONNECTED: that is how a participant leaves a LiveKit roster. skip, when
+// set, is left out of the recipients. A write that fails is dropped - one
+// dead socket does not concern the others.
+func (f *fakeSFU) broadcastParticipants(room string, gone, skip *fakePeer) {
 	peers := f.roomPeers(room)
 	roster := make([]any, 0, len(peers)+1)
 	for _, peer := range peers {
@@ -554,6 +584,9 @@ func (f *fakeSFU) broadcastParticipants(room string, gone *fakePeer) {
 	}
 	payload := map[string]any{"update": map[string]any{"participants": roster}}
 	for _, peer := range peers {
+		if peer == skip {
+			continue
+		}
 		_ = peer.sendMedia(methodParticipants, payload)
 	}
 }
@@ -574,7 +607,7 @@ func (f *fakeSFU) leave(peer *fakePeer) {
 	room := peer.room
 	f.mu.Unlock()
 	if room != "" {
-		f.broadcastParticipants(room, peer)
+		f.broadcastParticipants(room, peer, nil)
 	}
 }
 

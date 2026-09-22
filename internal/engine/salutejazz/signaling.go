@@ -84,13 +84,46 @@ type mediaPayload struct {
 	Description      *sdpDescription     `json:"description"`
 	RTCIceCandidates []iceCandidate      `json:"rtcIceCandidates"` //nolint:tagliatelle // connector wire is camelCase
 	PongResp         *pongResponse       `json:"pong_resp"`
+	Join             *roomState          `json:"join"`
 	Update           *participantsUpdate `json:"update"`
 }
 
-// participantsUpdate is what rtc:participants:update carries: the room's
-// roster, under an "update" object.
+// participantsUpdate is what rtc:participants:update carries: a roster
+// update, under an "update" object.
 type participantsUpdate struct {
 	Participants []participant `json:"participants"`
+}
+
+// roomState is the part of rtc:join this engine reads. The frame carries the
+// room, this participant, the ICE servers and the server's ping timeouts as
+// well; otherParticipants is the one list that says who was already in the
+// room when this session joined.
+type roomState struct {
+	OtherParticipants []participant `json:"otherParticipants"` //nolint:tagliatelle // connector wire is camelCase
+}
+
+// participantLeft is the payload of a participant-left event: the participant
+// the connector is reporting gone.
+//
+// The capture has no such frame - its room held one participant - so the two
+// shapes read here are the two the connector uses for a participant id
+// elsewhere: the bare field, as the envelope carries it, and the participant
+// object join-response answers with. A frame that matches neither leaves the
+// roster alone, and the identity a later roster update reports DISCONNECTED
+// removes it anyway.
+type participantLeft struct {
+	ParticipantID string `json:"participantId"` //nolint:tagliatelle // connector wire is camelCase
+	Participant   struct {
+		ParticipantID string `json:"participantId"` //nolint:tagliatelle // connector wire is camelCase
+	} `json:"participant"`
+}
+
+// identity is who the event names, whichever of the two shapes it came in.
+func (p participantLeft) identity() string {
+	if p.ParticipantID != "" {
+		return p.ParticipantID
+	}
+	return p.Participant.ParticipantID
 }
 
 // participant is the part of a roster entry this engine reads. identity is
@@ -313,11 +346,38 @@ func (s *Session) handleEnvelope(gen *generation, frame envIn) {
 		s.handleJoinResponse(gen, frame.Payload)
 	case eventMediaOut:
 		s.handleMediaOut(gen, frame.Payload)
+	case eventParticipantLeft:
+		s.handleParticipantLeft(gen, frame)
 	case eventError:
 		s.handleServerError(gen, frame)
 	default:
 		logger.Debugf("salutejazz: event %s", frame.Event)
 	}
+}
+
+// handleParticipantLeft takes one participant out of the roster.
+//
+// The connector reports a participant gone to everyone else in the room about
+// fifteen seconds after its socket dies, which is its own ping timeout. That
+// event is the one thing known to say so - whether a roster update follows
+// carrying DISCONNECTED is not something the capture answers - and a ghost
+// left in the roster keeps this session believing someone is there to talk
+// to, which is what WaitForPeer waits for.
+func (s *Session) handleParticipantLeft(gen *generation, frame envIn) {
+	identity := frame.ParticipantID
+	if identity == "" {
+		var gone participantLeft
+		if err := json.Unmarshal(frame.Payload, &gone); err != nil {
+			logger.Debugf("salutejazz: participant-left: %v", err)
+			return
+		}
+		identity = gone.identity()
+	}
+	if identity == "" {
+		logger.Debugf("salutejazz: participant-left named nobody")
+		return
+	}
+	gen.dropPeer(identity)
 }
 
 // handleJoinResponse records who we are and the group id every later frame
@@ -349,6 +409,13 @@ func (s *Session) handleMediaOut(gen *generation, payload json.RawMessage) {
 	case methodConfig:
 		s.notifyJoin(methodConfig)
 		gen.applyICEConfig(media.Configuration)
+	case methodJoin:
+		// The room as it was when this session arrived. A joiner learns who
+		// is already here from this frame and from nothing else: the roster
+		// updates that follow describe this participant to itself.
+		if media.Join != nil {
+			gen.applyParticipants(media.Join.OtherParticipants)
+		}
 	case methodOffer:
 		s.notifyJoin(methodOffer)
 		if err := s.handleOffer(gen, media.Description); err != nil {

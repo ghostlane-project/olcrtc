@@ -43,6 +43,10 @@ const (
 	eventMediaIn      = "media-in"
 	eventMediaOut     = "media-out"
 	eventError        = "error"
+	// eventParticipantLeft is what the connector tells the rest of the room
+	// when a participant is gone, about one ping timeout after its socket
+	// died.
+	eventParticipantLeft = "participant-left"
 
 	// The LiveKit signal methods a media payload carries.
 	methodConfig = "rtc:config"
@@ -51,7 +55,11 @@ const (
 	methodICE    = "rtc:ice"
 	methodPing   = "rtc:ping"
 	methodPong   = "rtc:pong"
-	// methodParticipants carries the room roster: who else is here, and
+	// methodJoin carries the state of the room at the moment this
+	// participant joined, and with it the only list of who was already here:
+	// a rtc:participants:update describes this participant to itself.
+	methodJoin = "rtc:join"
+	// methodParticipants carries a roster update: who else is here, and
 	// under which identity a data packet reaches them.
 	methodParticipants = "rtc:participants:update"
 

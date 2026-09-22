@@ -431,6 +431,14 @@ func (g *generation) hasRemote() bool {
 	return len(g.peers) > 0
 }
 
+// dropPeer takes one participant out of the roster, on the connector's word
+// that it has left.
+func (g *generation) dropPeer(identity string) {
+	g.peersMu.Lock()
+	defer g.peersMu.Unlock()
+	delete(g.peers, identity)
+}
+
 // notePeer records a sender the roster has not named yet, so the first
 // packet from a participant counts as that participant appearing. The
 // roster update that follows fills in its sid, and the one that reports it
