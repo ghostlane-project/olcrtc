@@ -426,8 +426,8 @@ func (s *Session) hasPeer() bool {
 // hasRemote reports whether anyone else is in the room, without building the
 // list: WaitForPeer asks on a poll.
 func (g *generation) hasRemote() bool {
-	g.peersMu.Lock()
-	defer g.peersMu.Unlock()
+	g.peersMu.RLock()
+	defer g.peersMu.RUnlock()
 	return len(g.peers) > 0
 }
 
@@ -443,12 +443,26 @@ func (g *generation) dropPeer(identity string) {
 // packet from a participant counts as that participant appearing. The
 // roster update that follows fills in its sid, and the one that reports it
 // gone removes it again.
+//
+// Every relayed packet comes through here, and after the first one from a
+// participant there is nothing left to record: that case takes the read lock
+// and leaves, so a session carrying traffic does not serialise its packets
+// behind a map it is not changing.
 func (g *generation) notePeer(identity string) {
 	if identity == "" || identity == g.localIdentity() {
 		return
 	}
+	g.peersMu.RLock()
+	_, known := g.peers[identity]
+	g.peersMu.RUnlock()
+	if known {
+		return
+	}
 	g.peersMu.Lock()
 	defer g.peersMu.Unlock()
+	// Between the two locks the roster may have learned this identity, with
+	// the sid an update carries; the check is made again rather than
+	// overwriting it with the empty one a packet has.
 	if _, known := g.peers[identity]; !known {
 		g.peers[identity] = ""
 	}

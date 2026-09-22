@@ -420,7 +420,7 @@ func (s *Session) handleMediaOut(gen *generation, payload json.RawMessage) {
 		s.notifyJoin(methodOffer)
 		if err := s.handleOffer(gen, media.Description); err != nil {
 			logger.Warnf("salutejazz: subscriber offer: %v", err)
-			s.queueReconnect()
+			s.reconnectAttempt(gen)
 		}
 	case methodAnswer:
 		s.deliverAnswer(gen, media.Description)
@@ -431,7 +431,7 @@ func (s *Session) handleMediaOut(gen *generation, payload json.RawMessage) {
 			gen.applyParticipants(media.Update.Participants)
 		}
 	case methodPong:
-		s.resolvePong(media.PongResp)
+		gen.resolvePong(media.PongResp)
 	default:
 		logger.Debugf("salutejazz: media-out %s", media.Method)
 	}
@@ -492,7 +492,7 @@ func (s *Session) notifyJoin(event string) {
 
 // pingLoop keeps the session alive on the connector's own cadence.
 func (s *Session) pingLoop(gen *generation) {
-	ticker := time.NewTicker(pingInterval)
+	ticker := time.NewTicker(s.pingInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -504,7 +504,7 @@ func (s *Session) pingLoop(gen *generation) {
 			}
 			if err := s.ping(gen); err != nil {
 				logger.Debugf("salutejazz: ping: %v", err)
-				s.queueReconnect()
+				s.reconnectAttempt(gen)
 				return
 			}
 		case <-gen.done:
@@ -527,12 +527,12 @@ func (s *Session) pingOnce() error {
 // ping sends one rtc:ping and waits for the pong that answers it. The frame
 // carries the last measured round trip, as the web client's does.
 func (s *Session) ping(gen *generation) error {
-	sent, waiter := s.awaitPong(time.Now().UnixMilli())
-	defer s.forgetPong(sent)
+	sent, waiter := gen.awaitPong(time.Now().UnixMilli())
+	defer gen.forgetPong(sent)
 
 	err := s.sendMedia(gen, mediaIn{
 		Method:  methodPing,
-		PingReq: &pingRequest{Timestamp: sent, RTT: s.rtt.Load()},
+		PingReq: &pingRequest{Timestamp: sent, RTT: gen.rtt.Load()},
 	})
 	if err != nil {
 		return err
@@ -541,7 +541,7 @@ func (s *Session) ping(gen *generation) error {
 	defer timer.Stop()
 	select {
 	case <-waiter:
-		s.rtt.Store(time.Now().UnixMilli() - sent)
+		gen.rtt.Store(time.Now().UnixMilli() - sent)
 		return nil
 	case <-timer.C:
 		return ErrPongTimeout
@@ -555,42 +555,42 @@ func (s *Session) ping(gen *generation) error {
 // awaitPong registers a waiter for the ping about to go out and returns the
 // timestamp to send it under: two pings in one millisecond would otherwise
 // share a key, and the first waiter would never be released.
-func (s *Session) awaitPong(sent int64) (int64, <-chan struct{}) {
+func (g *generation) awaitPong(sent int64) (int64, <-chan struct{}) {
 	waiter := make(chan struct{})
-	s.pongMu.Lock()
-	defer s.pongMu.Unlock()
+	g.pongMu.Lock()
+	defer g.pongMu.Unlock()
 	for {
-		if _, taken := s.pongWaiters[sent]; !taken {
+		if _, taken := g.pongWaiters[sent]; !taken {
 			break
 		}
 		sent++
 	}
-	s.pongWaiters[sent] = waiter
+	g.pongWaiters[sent] = waiter
 	return sent, waiter
 }
 
-func (s *Session) forgetPong(sent int64) {
-	s.pongMu.Lock()
-	delete(s.pongWaiters, sent)
-	s.pongMu.Unlock()
+func (g *generation) forgetPong(sent int64) {
+	g.pongMu.Lock()
+	delete(g.pongWaiters, sent)
+	g.pongMu.Unlock()
 }
 
 // resolvePong releases the ping this pong answers. A pong that names no ping
 // we know of still proves the link, so it releases everything waiting.
-func (s *Session) resolvePong(resp *pongResponse) {
+func (g *generation) resolvePong(resp *pongResponse) {
 	var sent int64
 	if resp != nil {
 		sent = parseMillis(resp.LastPingTimestamp)
 	}
-	s.pongMu.Lock()
-	defer s.pongMu.Unlock()
-	if waiter, ok := s.pongWaiters[sent]; ok {
-		delete(s.pongWaiters, sent)
+	g.pongMu.Lock()
+	defer g.pongMu.Unlock()
+	if waiter, ok := g.pongWaiters[sent]; ok {
+		delete(g.pongWaiters, sent)
 		close(waiter)
 		return
 	}
-	for key, waiter := range s.pongWaiters {
-		delete(s.pongWaiters, key)
+	for key, waiter := range g.pongWaiters {
+		delete(g.pongWaiters, key)
 		close(waiter)
 	}
 }

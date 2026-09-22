@@ -3,6 +3,9 @@ package salutejazz
 import (
 	"encoding/json"
 	"testing"
+	"time"
+
+	"github.com/livekit/protocol/livekit"
 )
 
 // TestRTCJoinSeedsTheRoster pins where a joiner learns who is already in the
@@ -127,4 +130,86 @@ func mediaOutJSON(t *testing.T, payload map[string]any) json.RawMessage {
 		t.Fatal(err)
 	}
 	return raw
+}
+
+// TestNotePeerTakesNoExclusiveLockForAPeerItKnows pins the shape of the
+// roster lock. Every relayed packet goes through notePeer, and almost every
+// one of them is from a participant the roster already names: taking the
+// exclusive lock to find that out put every packet of a session behind
+// whoever was reading the roster.
+func TestNotePeerTakesNoExclusiveLockForAPeerItKnows(t *testing.T) {
+	gen := newGeneration(nil)
+	gen.applyParticipants([]participant{{SID: "PA_known", Identity: "known", State: "ACTIVE"}})
+
+	gen.peersMu.RLock()
+	noted := make(chan struct{})
+	go func() {
+		gen.notePeer("known")
+		close(noted)
+	}()
+	timeout := time.NewTimer(2 * time.Second)
+	defer timeout.Stop()
+	select {
+	case <-noted:
+		gen.peersMu.RUnlock()
+	case <-timeout.C:
+		gen.peersMu.RUnlock()
+		t.Fatal("notePeer waited on the exclusive lock for a participant the roster already names")
+	}
+
+	// The fast path leaves the roster as it found it: the sid a roster
+	// update recorded is not replaced by the empty one a packet carries.
+	gen.peersMu.RLock()
+	sid := gen.peers["known"]
+	gen.peersMu.RUnlock()
+	if sid != "PA_known" {
+		t.Fatalf("the sid of a known participant is %q after a packet from them", sid)
+	}
+
+	// A sender the roster has not named yet still enters it, which is what
+	// makes the first packet from a participant count as that participant
+	// appearing.
+	gen.notePeer("stranger")
+	if peers := gen.remoteIdentities(); len(peers) != 2 || peers[1] != "stranger" {
+		t.Fatalf("roster = %v, want the known participant and the one that just spoke", peers)
+	}
+}
+
+// TestTheReceivePathDropsWhatItCannotUse covers the three ways a relayed
+// frame is not a payload for the tunnel: it is not a data packet at all, it
+// is one of the room's own updates rather than a user packet, or it belongs
+// to a connection attempt this session has already replaced.
+func TestTheReceivePathDropsWhatItCannotUse(t *testing.T) {
+	sess, in := newCallbackSession(t)
+	gen := newGeneration(nil)
+	storeString(&gen.identity, "self")
+
+	sess.handleDataPacket(gen, []byte("this is not a protobuf"))
+	sess.handleDataPacket(gen, marshalPacket(t, &livekit.DataPacket{
+		Value: &livekit.DataPacket_Speaker{Speaker: &livekit.ActiveSpeakerUpdate{}}, //nolint:staticcheck // 1.5.3 wire
+	}))
+	sess.handleDataPacket(gen, marshalPacket(t, &livekit.DataPacket{}))
+
+	// An attempt that is gone belongs to a connection this session has moved
+	// on from, whatever still arrives on its channels.
+	sess.teardown(gen)
+	sess.handleDataPacket(gen, userPacket(t, "other", "", []byte("after the teardown")))
+
+	// And a closed session delivers nothing at all.
+	live := newGeneration(nil)
+	if err := sess.Close(); err != nil {
+		t.Fatal(err)
+	}
+	sess.handleDataPacket(live, userPacket(t, "other", "", []byte("after the close")))
+
+	select {
+	case got := <-in:
+		t.Fatalf("a frame the receive path cannot use was delivered as %q from %q", got.payload, got.sender)
+	case <-time.After(100 * time.Millisecond):
+	}
+	for _, roster := range [][]string{gen.remoteIdentities(), live.remoteIdentities()} {
+		if len(roster) != 0 {
+			t.Fatalf("roster = %v, want nothing from a frame that was dropped", roster)
+		}
+	}
 }

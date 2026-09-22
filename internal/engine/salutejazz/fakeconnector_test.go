@@ -36,6 +36,8 @@ import (
 //	(*fakeSFU).holdDials() -> release       stall the upgrade, before any frame
 //	(*fakeSFU).holdForward() -> release     stall the relay, so a writer's own
 //	                                        queue fills behind it
+//	(*fakeSFU).holdPongs() -> release       stall the answer to every ping
+//	(*fakeSFU).pingsSeen()                  how many pings have arrived
 //	(*fakeSFU).refuseJoins(code, message)   answer every join with an error
 //	(*fakeSFU).dialsSeen()                  how many clients have reached it
 //	(*fakeSFU).liveSockets()                sockets still open on its side
@@ -92,10 +94,13 @@ type fakeSFU struct {
 	dials    int
 	live     int
 	// joinGate, while non-nil, stalls every join answer, dialGate the
-	// upgrade itself, and forwardGate the relay of what a client writes.
+	// upgrade itself, forwardGate the relay of what a client writes and
+	// pongGate the answer to a ping.
 	joinGate    chan struct{}
 	dialGate    chan struct{}
 	forwardGate chan struct{}
+	pongGate    chan struct{}
+	pings       int
 	// refusal, while non-nil, is the error every join is answered with.
 	refusal *serverError
 }
@@ -204,6 +209,46 @@ func (f *fakeSFU) awaitForwardGate() {
 	<-gate
 }
 
+// holdPongs stalls the answer to every ping, so a test can hold one in
+// flight and watch what else might release it. The release takes the gate off
+// the fake before it closes it, so calling it twice is safe.
+func (f *fakeSFU) holdPongs() func() {
+	gate := make(chan struct{})
+	f.mu.Lock()
+	f.pongGate = gate
+	f.mu.Unlock()
+	return f.releasePongs
+}
+
+// releasePongs answers the pings that are waiting, once.
+func (f *fakeSFU) releasePongs() {
+	f.mu.Lock()
+	gate := f.pongGate
+	f.pongGate = nil
+	f.mu.Unlock()
+	if gate != nil {
+		close(gate)
+	}
+}
+
+// notePing records a ping and blocks while holdPongs is in force.
+func (f *fakeSFU) notePing() {
+	f.mu.Lock()
+	f.pings++
+	gate := f.pongGate
+	f.mu.Unlock()
+	if gate != nil {
+		<-gate
+	}
+}
+
+// pingsSeen is how many pings have reached the connector.
+func (f *fakeSFU) pingsSeen() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.pings
+}
+
 // refuseJoins answers every join with an error frame instead of a
 // join-response, the way the connector refuses a room it will not admit a
 // client to. The reply echoes that join's own requestId, as every server
@@ -290,6 +335,7 @@ func (f *fakeSFU) sendError(code, message string) {
 // on a gate.
 func (f *fakeSFU) shutdown() {
 	f.releaseForward()
+	f.releasePongs()
 	f.dropAll()
 	for _, peer := range f.snapshot() {
 		peer.closePeerConnections()
@@ -658,6 +704,7 @@ func (p *fakePeer) handleMedia(media fakeMedia) error {
 }
 
 func (p *fakePeer) pong(ping *fakePing) error {
+	p.fake.notePing()
 	var last int64
 	if ping != nil {
 		last = ping.Timestamp

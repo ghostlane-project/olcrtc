@@ -196,9 +196,12 @@ type generation struct {
 	servers []webrtc.ICEServer
 	pending map[string][]webrtc.ICECandidateInit
 
-	// peersMu owns peers, the identity -> sid map rtc:participants:update
-	// maintains for everyone else in the room.
-	peersMu sync.Mutex
+	// peersMu owns peers, the identity -> sid map the room's frames
+	// maintain for everyone else in it. It is a read-write lock because the
+	// reads outnumber the writes by the packet: every relayed packet asks
+	// whether it is from someone the roster already names (notePeer), and
+	// almost every one of them is.
+	peersMu sync.RWMutex
 	peers   map[string]string
 
 	// confirmed is the one remote identity the tunnel handshake has
@@ -210,6 +213,15 @@ type generation struct {
 	// pcMu serialises publishing a peer connection against taking both of
 	// them away, the same discipline wsMu gives the socket.
 	pcMu sync.Mutex
+
+	// pongMu owns pongWaiters, one per ping this attempt has in flight, and
+	// rtt is the round trip it last measured. Both belong to the attempt:
+	// a pong proves the link the ping went out on, and a frame from an
+	// attempt this session has moved on from proves nothing about the one
+	// it is on now.
+	pongMu      sync.Mutex
+	pongWaiters map[int64]chan struct{}
+	rtt         atomic.Int64
 
 	// windowMu owns window, the channel a sender parked on the reliable
 	// publisher lane waits on. It is closed and replaced every time the lane
@@ -233,6 +245,8 @@ func newGeneration(api *webrtc.API) *generation {
 		pending:  make(map[string][]webrtc.ICECandidateInit),
 		peers:    make(map[string]string),
 		window:   make(chan struct{}),
+
+		pongWaiters: make(map[int64]chan struct{}),
 	}
 }
 
@@ -285,8 +299,8 @@ func (g *generation) localIdentity() string { return loadString(&g.identity) }
 // remoteIdentities is everyone else the room has reported, sorted so a
 // caller sees a stable list.
 func (g *generation) remoteIdentities() []string {
-	g.peersMu.Lock()
-	defer g.peersMu.Unlock()
+	g.peersMu.RLock()
+	defer g.peersMu.RUnlock()
 	out := make([]string, 0, len(g.peers))
 	for identity := range g.peers {
 		out = append(out, identity)
@@ -295,9 +309,9 @@ func (g *generation) remoteIdentities() []string {
 	return out
 }
 
-// applyParticipants folds one rtc:participants:update into the identity map:
-// a participant that has left is dropped, and this session is never its own
-// peer.
+// applyParticipants folds one roster - rtc:join's otherParticipants, or an
+// rtc:participants:update - into the identity map: a participant that has
+// left is dropped, and this session is never its own peer.
 func (g *generation) applyParticipants(list []participant) {
 	local := g.localIdentity()
 	g.peersMu.Lock()
@@ -336,12 +350,10 @@ type Session struct {
 
 	cur atomic.Pointer[generation]
 
-	// pongMu owns pongWaiters, one per ping in flight.
-	pongMu      sync.Mutex
-	pongWaiters map[int64]chan struct{}
-	rtt         atomic.Int64
-
-	joinTimeout time.Duration
+	// joinTimeout and pingInterval are the two paces a test shortens: how
+	// long a join may take, and how often the keepalive fires.
+	joinTimeout  time.Duration
+	pingInterval time.Duration
 
 	// lifecycleMu is held across the two steps that decide who owns a
 	// connection attempt: Connect reads the terminated flag and publishes
@@ -402,8 +414,8 @@ func New(_ context.Context, cfg engine.Config) (engine.Session, error) {
 		connectorURL:   cfg.URL,
 		room:           room,
 		pass:           cfg.Token,
-		pongWaiters:    make(map[int64]chan struct{}),
 		joinTimeout:    joinTimeout,
+		pingInterval:   pingInterval,
 		closeCh:        make(chan struct{}),
 	}
 	s.Configure(engine.ReconnectorConfig{
@@ -467,14 +479,28 @@ func (s *Session) Connect(ctx context.Context) error {
 //
 // A session that has ended refuses here too: the verdict that ended it was
 // about the room, and another join would only ask the same question again.
+//
+// An attempt that was still live is ended here, once the new one has taken
+// its place. Overwriting the pointer left the old attempt with its socket,
+// its two peer connections and their TURN allocations, and the SFU goes on
+// relaying to a participant nobody reads any more: two of ours in one room.
+// reconnect ends the old attempt itself, so it was a second Connect that
+// paid for this.
 func (s *Session) publishGeneration(gen *generation) bool {
 	s.lifecycleMu.Lock()
-	defer s.lifecycleMu.Unlock()
 	if s.terminated.Load() || s.ended.Load() {
+		s.lifecycleMu.Unlock()
 		return false
 	}
 	s.closed.Store(false)
-	s.cur.Store(gen)
+	replaced := s.cur.Swap(gen)
+	s.lifecycleMu.Unlock()
+
+	// Outside the lock: a teardown waits on pion closing two peer
+	// connections, and Close takes this lock to end the session.
+	if replaced != nil && replaced != gen {
+		s.teardown(replaced)
+	}
 	return true
 }
 
@@ -662,15 +688,41 @@ func (s *Session) queueReconnect() engine.ReconnectRequest {
 	return s.Request(s.closed.Load(), s.reconnecting.Load())
 }
 
+// reconnectAttempt asks for a rejoin on behalf of one connection attempt.
+//
+// A failure raised by an attempt that has already been torn down says
+// nothing about the session: that connection was given up on deliberately -
+// by Close, by a Connect that gave up, or by the rejoin that replaced it -
+// and everything of it fails on the way down. A request queued for one of
+// those lands behind the attempt that replaced it and rejoins a room this
+// session is already in. readLoop has always asked this before queueing;
+// the keepalive, the publisher negotiation and the answer to the SFU's offer
+// now ask it too.
+func (s *Session) reconnectAttempt(gen *generation) {
+	if s.closed.Load() || gen.isDone() {
+		return
+	}
+	s.queueReconnect()
+}
+
 // signalEnded ends the session for good, once. A session that has ended
 // asks for nothing more: the closed flag refuses every later reconnect
 // request, and one that is already queued is dropped.
+//
+// It closes the session's done channel as well, which is what the reconnect
+// supervisor watches. A request the supervisor had already taken off the
+// queue when the verdict landed is not on the queue to be drained: it was
+// inside an attempt, and it would have gone on failing and backing off until
+// the attempt limit ran out - ten of them - for a room this session has been
+// told is gone. The keepalive and everything else waiting on that channel
+// stop with it, which is the same statement.
 func (s *Session) signalEnded(reason string) {
 	if s.ended.Swap(true) {
 		return
 	}
 	s.closed.Store(true)
 	s.Drain()
+	s.closeOnce.Do(func() { close(s.closeCh) })
 	logger.Warnf("salutejazz: session ended: %s", reason)
 	s.SignalEnded(reason)
 }

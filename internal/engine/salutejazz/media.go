@@ -136,7 +136,7 @@ func (s *Session) negotiate(gen *generation) {
 	}
 	if err := s.startPublisher(gen); err != nil {
 		logger.Warnf("salutejazz: publisher negotiation: %v", err)
-		s.queueReconnect()
+		s.reconnectAttempt(gen)
 	}
 }
 
