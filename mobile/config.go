@@ -543,9 +543,13 @@ func validateDNSEntry(entry string) error {
 	return nil
 }
 
+// supportedProvider reports whether an app may name this provider. It is the
+// phone side's own list of what the bind offers, and every provider
+// RegisterDefaults wires has to be on it: one that is in the binary and not
+// here cannot be selected at all.
 func supportedProvider(provider string) bool {
 	switch provider {
-	case "jitsi", "telemost", "wbstream", providerNone:
+	case "jitsi", "telemost", "wbstream", "salutejazz", providerNone:
 		return true
 	default:
 		return false
