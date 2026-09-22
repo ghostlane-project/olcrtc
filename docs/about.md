@@ -12,7 +12,7 @@
 
 # olcRTC - overview
 
-`olcRTC` (OpenLibreCommunity RTC) is an encrypted TCP-over-WebRTC tunnel. It disguises traffic as ordinary participation in a WebRTC/SFU service: Jitsi Meet, Yandex Telemost or WbStream.
+`olcRTC` (OpenLibreCommunity RTC) is an encrypted TCP-over-WebRTC tunnel. It disguises traffic as ordinary participation in a WebRTC/SFU service: Jitsi Meet, Yandex Telemost, WbStream or Sber SaluteJazz.
 
 Project: [github.com/ghostlane-project/olcrtc](https://github.com/ghostlane-project/olcrtc), a maintained fork of the archived [openlibrecommunity/olcrtc](https://github.com/openlibrecommunity/olcrtc)  
 License: WTFPL  
@@ -76,6 +76,7 @@ olcrtc client.yaml
 | `jitsi` | `jitsi` | Jitsi room URL, instances in docs/jitsi.instances.yaml, no separate registration |
 | `telemost` | `goolom` | credentials via Yandex Telemost API, separate registration |
 | `wbstream` | `livekit` | credentials via WbBStream API, separate registration |
+| `salutejazz` | `salutejazz` | room reference `<code>:<password>`; joins as an anonymous guest, no registration; a room is one anonymous create call; data channels only, and every byte crosses Sber's TURN relay |
 | `none` | set in `engine.name` | direct engine mode with `engine.url` and `engine.token`, separate registration |
 
 The same name is used in Go configs, logs, flags and tests: `Provider` in Go and `auth.provider` in YAML.
@@ -89,6 +90,7 @@ The same name is used in Go configs, logs, flags and tests: `Provider` in Go and
 | `livekit` | `internal/engine/livekit` | data packets/video tracks/LiveKit SDK |
 | `goolom` | `internal/engine/goolom` | Telemost/Goolom signaling, publisher/subscriber PeerConnection |
 | `jitsi` | `internal/engine/jitsi` | Jitsi MUC/Jingle/colibri-ws, datachannel/best-effort video |
+| `salutejazz` | `internal/engine/salutejazz` | Sber's JSON connector (LiveKit-as-JSON over pion), data over the publisher PeerConnection |
 
 `internal/engine/builtin` binds `auth.provider` to the proper engine. There is no separate `internal/provider` package in the current project.
 
@@ -98,7 +100,7 @@ The same name is used in Go configs, logs, flags and tests: `Provider` in Go and
 
 | Transport | How it carries data | Main scenario |
 |---|---|---|
-| `datachannel` | native byte/data path of the engine | simplest and fastest path, stable with Jitsi |
+| `datachannel` | native byte/data path of the engine | simplest and fastest path, stable with Jitsi; the only one SaluteJazz carries |
 | `vp8channel` | KCP over VP8-like video frames | main video path for WB Stream and Telemost |
 | `seichannel` | payload in H264 SEI NAL units, ACK/retry | fallback for WB Stream / Jitsi |
 | `videochannel` | QR/tile frames encoded as VP8 in pure Go, ACK/retry | experimental visual transport |
@@ -323,6 +325,7 @@ E2E_PROVIDERS=wbstream E2E_TRANSPORTS=vp8channel mage e2e
 | SOCKS5 not listening | `mode: cnc`, `socks.host`, `socks.port`, client logs |
 | Jitsi does not connect without a second participant | server and client must be in the same room |
 | WB Stream + datachannel does not work | guest flow has no `canPublishData`; use `vp8channel`, `seichannel` or `videochannel` |
+| SaluteJazz + a video transport does not work | Sber admits a guest to the room's data channels only, never to a media track; use `datachannel` |
 | `seichannel ack timeout` | the provider throttles/does not route the video path; change transport/provider |
 
 ## Links
