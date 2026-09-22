@@ -97,7 +97,9 @@ func (s *Session) handleOffer(gen *generation, desc *sdpDescription) error {
 			return err
 		}
 		pc.OnDataChannel(func(dc *webrtc.DataChannel) { s.wireChannel(gen, dc, false) })
-		gen.subPC.Store(pc)
+		if !gen.publishPC(targetSubscriber, pc) {
+			return ErrSessionClosed
+		}
 	}
 	if err := pc.SetRemoteDescription(webrtc.SessionDescription{
 		Type: webrtc.SDPTypeOffer, SDP: desc.SDP,
@@ -144,7 +146,9 @@ func (s *Session) startPublisher(gen *generation) error {
 	if err != nil {
 		return err
 	}
-	gen.pubPC.Store(pc)
+	if !gen.publishPC(targetPublisher, pc) {
+		return ErrSessionClosed
+	}
 
 	ordered := true
 	reliable, err := pc.CreateDataChannel(labelReliable, &webrtc.DataChannelInit{Ordered: &ordered})

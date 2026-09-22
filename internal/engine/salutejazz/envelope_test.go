@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pion/webrtc/v4"
+
 	"github.com/openlibrecommunity/olcrtc/internal/engine"
 )
 
@@ -382,4 +384,149 @@ func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool)
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("timeout after %s waiting for %s", timeout, what)
+}
+
+// TestCloseDuringTheDialLeavesNoSocket pins the window the closeOnce fix
+// opened: a Close that lands while the connector handshake is still running
+// used to find the generation with no socket on it, spend its one teardown,
+// and then have a live socket published behind it - a join went out for a
+// closed session and nothing was left to close the connection.
+func TestCloseDuringTheDialLeavesNoSocket(t *testing.T) {
+	url, fake := newFakeConnector(t)
+	release := fake.holdDials()
+	t.Cleanup(release)
+
+	sess, err := New(context.Background(), engine.Config{
+		URL: url, Token: "passw0rd", Name: "dial",
+		Extra: map[string]string{"roomID": "abc123"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sj := sess.(*Session)
+	sj.joinTimeout = 300 * time.Millisecond
+
+	connected := make(chan error, 1)
+	go func() { connected <- sess.Connect(context.Background()) }()
+	waitFor(t, 5*time.Second, "the client to reach the connector", func() bool {
+		return fake.dialsSeen() == 1
+	})
+	gen := sj.current()
+	if gen == nil {
+		t.Fatal("connect published no generation to close")
+	}
+
+	if err := sess.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	release()
+
+	select {
+	case err := <-connected:
+		if err == nil {
+			t.Fatal("connect succeeded after the session was closed")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("connect never returned")
+	}
+
+	// The generation was torn down while the dial was in flight, so nothing
+	// may be published on it afterwards.
+	gen.wsMu.Lock()
+	published := gen.ws != nil
+	gen.wsMu.Unlock()
+	if published {
+		t.Fatal("a socket was published on a generation that had already been torn down")
+	}
+	// A frame already on the wire would arrive after Connect returned.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if joins := fake.joins(); len(joins) != 0 {
+			t.Fatalf("%d join frames reached the connector after Close", len(joins))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	waitFor(t, 5*time.Second, "the connector socket to close", func() bool {
+		return fake.liveSockets() == 0
+	})
+}
+
+// TestPeerConnectionIsNotPublishedAfterTeardown is the same rule for the
+// peer connections: one built just as its generation ends has no owner, and
+// an unowned pion peer connection keeps an ICE agent and a TURN allocation
+// alive. A torn-down generation refuses it and closes it.
+func TestPeerConnectionIsNotPublishedAfterTeardown(t *testing.T) {
+	sess := newIdleSession(t)
+	api, err := newWebRTCAPI(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gen := newGeneration(api)
+	sess.teardown(gen)
+
+	pc, err := api.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gen.publishPC(targetSubscriber, pc) {
+		t.Fatal("a torn-down generation took a peer connection")
+	}
+	if gen.subPC.Load() != nil {
+		t.Fatal("a torn-down generation kept a peer connection")
+	}
+	if state := pc.ConnectionState(); state != webrtc.PeerConnectionStateClosed {
+		t.Fatalf("peer connection state = %s, want closed", state)
+	}
+}
+
+// TestTeardownLeavesNoPeerConnectionBehind runs the publish and the teardown
+// at the same instant: whichever wins, the generation ends up owning
+// nothing and the peer connection ends up closed.
+func TestTeardownLeavesNoPeerConnectionBehind(t *testing.T) {
+	sess := newIdleSession(t)
+	api, err := newWebRTCAPI(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 8 {
+		gen := newGeneration(api)
+		pc, pcErr := api.NewPeerConnection(webrtc.Configuration{})
+		if pcErr != nil {
+			t.Fatal(pcErr)
+		}
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		wg.Go(func() {
+			<-start
+			gen.publishPC(targetPublisher, pc)
+		})
+		wg.Go(func() {
+			<-start
+			sess.teardown(gen)
+		})
+		close(start)
+		wg.Wait()
+
+		if gen.pubPC.Load() != nil {
+			t.Fatal("a torn-down generation still owns a peer connection")
+		}
+		if state := pc.ConnectionState(); state != webrtc.PeerConnectionStateClosed {
+			t.Fatalf("peer connection state = %s, want closed", state)
+		}
+	}
+}
+
+// newIdleSession is a session that has never connected: enough to drive the
+// lifecycle helpers without a connector.
+func newIdleSession(t *testing.T) *Session {
+	t.Helper()
+	sess, err := New(context.Background(), engine.Config{
+		URL: "wss://example.invalid/connector", Token: "passw0rd", Name: "idle",
+		Extra: map[string]string{"roomID": "abc123"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sess.Close() })
+	return sess.(*Session)
 }

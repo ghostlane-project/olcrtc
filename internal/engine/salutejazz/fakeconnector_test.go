@@ -32,6 +32,9 @@ import (
 //	(*fakeSFU).sawPublisherOffer()          the client's publisher offer arrived
 //	(*fakeSFU).joins()                      every join seen: its payload and group
 //	(*fakeSFU).holdJoins() -> release       stall the join answer, for a race
+//	(*fakeSFU).holdDials() -> release       stall the upgrade, before any frame
+//	(*fakeSFU).dialsSeen()                  how many clients have reached it
+//	(*fakeSFU).liveSockets()                sockets still open on its side
 //	(*fakeSFU).dropAll()                    close every fake-side socket
 //	(*fakeSFU).sendError(code, message)     a server error frame to every peer
 //	(*fakeSFU).lastError()                  what the fake itself tripped over,
@@ -72,8 +75,12 @@ type fakeSFU struct {
 	pubOffer bool
 	failure  string
 	seen     []seenJoin
-	// joinGate, while non-nil, stalls every join answer.
+	dials    int
+	live     int
+	// joinGate, while non-nil, stalls every join answer, and dialGate the
+	// upgrade itself.
 	joinGate chan struct{}
+	dialGate chan struct{}
 }
 
 func newFakeConnector(t *testing.T) (string, *fakeSFU) {
@@ -87,6 +94,7 @@ func newFakeConnector(t *testing.T) (string, *fakeSFU) {
 			http.NotFound(w, r)
 			return
 		}
+		fake.arriveDial()
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return
@@ -130,6 +138,45 @@ func (f *fakeSFU) holdJoins() func() {
 	f.mu.Unlock()
 	var once sync.Once
 	return func() { once.Do(func() { close(gate) }) }
+}
+
+// holdDials stalls the upgrade itself, so a test can hold a client inside
+// its dial, before it has written a single frame.
+func (f *fakeSFU) holdDials() func() {
+	gate := make(chan struct{})
+	f.mu.Lock()
+	f.dialGate = gate
+	f.mu.Unlock()
+	var once sync.Once
+	return func() { once.Do(func() { close(gate) }) }
+}
+
+// dialsSeen is how many clients have reached the connector endpoint,
+// counted before the upgrade so a held dial is visible.
+func (f *fakeSFU) dialsSeen() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.dials
+}
+
+// liveSockets is how many sockets are still open on the fake's side. A
+// client that leaks a connector socket leaves this above zero.
+func (f *fakeSFU) liveSockets() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.live
+}
+
+// arriveDial records a client at the endpoint and blocks while holdDials is
+// in force.
+func (f *fakeSFU) arriveDial() {
+	f.mu.Lock()
+	f.dials++
+	gate := f.dialGate
+	f.mu.Unlock()
+	if gate != nil {
+		<-gate
+	}
 }
 
 // awaitJoinGate blocks while holdJoins is in force.
@@ -291,9 +338,15 @@ type fakePeer struct {
 
 func (f *fakeSFU) serve(conn *websocket.Conn) {
 	peer := &fakePeer{fake: f, conn: conn, pending: make(map[string][]webrtc.ICECandidateInit)}
+	f.mu.Lock()
+	f.live++
+	f.mu.Unlock()
 	defer func() {
 		peer.close()
 		f.leave(peer)
+		f.mu.Lock()
+		f.live--
+		f.mu.Unlock()
 	}()
 	for {
 		var frame fakeIn

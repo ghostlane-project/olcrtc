@@ -181,6 +181,10 @@ type generation struct {
 	// maintains for everyone else in the room.
 	peersMu sync.Mutex
 	peers   map[string]string
+
+	// pcMu serialises publishing a peer connection against taking both of
+	// them away, the same discipline wsMu gives the socket.
+	pcMu sync.Mutex
 }
 
 func newGeneration(api *webrtc.API) *generation {
@@ -193,6 +197,36 @@ func newGeneration(api *webrtc.API) *generation {
 		pending:  make(map[string][]webrtc.ICECandidateInit),
 		peers:    make(map[string]string),
 	}
+}
+
+// publishPC hands a freshly built peer connection to the generation. A
+// generation that has already been torn down owns nothing, so the peer
+// connection is closed here instead of being left with an ICE agent and a
+// TURN allocation and no owner. It reports whether the generation took it.
+func (g *generation) publishPC(target string, pc *webrtc.PeerConnection) bool {
+	g.pcMu.Lock()
+	gone := g.isDone()
+	if !gone {
+		if target == targetPublisher {
+			g.pubPC.Store(pc)
+		} else {
+			g.subPC.Store(pc)
+		}
+	}
+	g.pcMu.Unlock()
+	if gone {
+		_ = pc.Close()
+		return false
+	}
+	return true
+}
+
+// takePCs removes both peer connections from the generation, so exactly one
+// caller ever closes them.
+func (g *generation) takePCs() []*webrtc.PeerConnection {
+	g.pcMu.Lock()
+	defer g.pcMu.Unlock()
+	return []*webrtc.PeerConnection{g.subPC.Swap(nil), g.pubPC.Swap(nil)}
 }
 
 // isDone reports whether this generation has been torn down.
@@ -432,7 +466,7 @@ func (s *Session) teardown(gen *generation) {
 // TURN deallocation block the caller.
 func closePeerConnections(gen *generation) {
 	var wg sync.WaitGroup
-	for _, pc := range []*webrtc.PeerConnection{gen.subPC.Swap(nil), gen.pubPC.Swap(nil)} {
+	for _, pc := range gen.takePCs() {
 		if pc == nil {
 			continue
 		}

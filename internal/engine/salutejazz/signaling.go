@@ -174,7 +174,17 @@ func (s *Session) dialWebSocket(gen *generation) (*websocket.Conn, error) {
 	}
 	conn.SetReadLimit(wsReadLimit)
 
+	// Publishing and closing the socket share wsMu, and teardown closes
+	// done before it takes the lock. Whichever order the two land in, the
+	// socket is closed by exactly one of them: a generation that is already
+	// torn down owns nothing, so this dial closes what it opened instead of
+	// leaving a live connector socket behind a closed session.
 	gen.wsMu.Lock()
+	if gen.isDone() {
+		gen.wsMu.Unlock()
+		_ = conn.Close()
+		return nil, ErrSessionClosed
+	}
 	gen.ws = conn
 	gen.wsMu.Unlock()
 	return conn, nil
