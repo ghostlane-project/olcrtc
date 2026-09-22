@@ -72,13 +72,18 @@ type createMeetingRequest struct {
 // extra colons (the password half then fails the charset check), or
 // uppercase letters are all rejected as a malformed room reference.
 func splitRoomRef(ref string) (code, password string, err error) {
+	// Never interpolate ref (or either half of it) into the returned error:
+	// the password half is a credential, and this error is logged by
+	// callers several layers up (engineconn -> builtin -> Logf). A static
+	// reason is all a caller needs; mirrors wbstream.go's Issue, which
+	// returns bare auth.ErrRoomIDRequired without echoing cfg.RoomURL.
 	i := strings.IndexByte(ref, ':')
 	if i < 0 {
-		return "", "", fmt.Errorf("%w: expected \"<code>:<password>\", got %q", auth.ErrRoomIDRequired, ref)
+		return "", "", fmt.Errorf("%w: expected \"<code>:<password>\"", auth.ErrRoomIDRequired)
 	}
 	code, password = ref[:i], ref[i+1:]
 	if !roomPartRE.MatchString(code) || !roomPartRE.MatchString(password) {
-		return "", "", fmt.Errorf("%w: malformed code or password in %q", auth.ErrRoomIDRequired, ref)
+		return "", "", fmt.Errorf("%w: malformed room reference", auth.ErrRoomIDRequired)
 	}
 	return code, password, nil
 }
@@ -164,6 +169,13 @@ func (p Provider) createMeeting(ctx context.Context, client *http.Client) (strin
 	res, err := auth.DoJSON[createMeetingReply](client, req, errCreateMeeting)
 	if err != nil {
 		return "", "", fmt.Errorf("create meeting: %w", err)
+	}
+	// Validate the server's reply against the same shape Issue requires, so
+	// a malformed roomId/password fails here rather than surfacing later as
+	// a confusing Issue error. Never echo res.Password: same rule as
+	// splitRoomRef, and for the same reason (this error is logged upstream).
+	if !roomPartRE.MatchString(res.RoomID) || !roomPartRE.MatchString(res.Password) {
+		return "", "", fmt.Errorf("%w: malformed room reference in response", errCreateMeeting)
 	}
 	return res.RoomID, res.Password, nil
 }

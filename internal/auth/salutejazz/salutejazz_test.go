@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/openlibrecommunity/olcrtc/internal/auth"
@@ -62,5 +63,40 @@ func TestCreateRoomReturnsCodeAndPassword(t *testing.T) {
 	}
 	if room != "zzz999:pw123456" {
 		t.Fatalf("room %q", room)
+	}
+}
+
+// TestIssueErrorNeverContainsPassword guards the credential-leak fix: a
+// malformed room reference must be refused without echoing the password
+// half anywhere in the error text, because that error is logged by callers
+// several layers up (engineconn -> builtin -> Logf).
+func TestIssueErrorNeverContainsPassword(t *testing.T) {
+	p := Provider{}
+	_, err := p.Issue(context.Background(), auth.Config{RoomURL: "ABC123:passw0rd"})
+	if err == nil {
+		t.Fatal("expected an error for an uppercase code")
+	}
+	if strings.Contains(err.Error(), "passw0rd") {
+		t.Fatalf("error leaked the password: %v", err)
+	}
+}
+
+// TestCreateRoomRejectsMalformedReply guards against trusting the server's
+// create-meeting reply blindly: a malformed roomId must fail CreateRoom
+// itself (not surface later as a confusing Issue error), and the resulting
+// error must not echo the password either.
+func TestCreateRoomRejectsMalformedReply(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"roomId":"ZZZ999","password":"pw123456","url":"https://salutejazz.ru/ZZZ999?psw=x"}`))
+	}))
+	defer srv.Close()
+
+	p := Provider{apiBase: srv.URL}
+	room, err := p.CreateRoom(context.Background(), auth.Config{})
+	if err == nil {
+		t.Fatalf("expected an error for an uppercase roomId, got room %q", room)
+	}
+	if strings.Contains(err.Error(), "pw123456") {
+		t.Fatalf("error leaked the password: %v", err)
 	}
 }

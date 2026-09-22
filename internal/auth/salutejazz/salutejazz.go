@@ -2,6 +2,7 @@ package salutejazz
 
 import (
 	"context"
+	"net/http"
 
 	"github.com/openlibrecommunity/olcrtc/internal/auth"
 	"github.com/openlibrecommunity/olcrtc/internal/protect"
@@ -25,6 +26,17 @@ func (Provider) Engine() string { return "salutejazz" }
 // DefaultServiceURL returns the SaluteJazz REST API base URL.
 func (Provider) DefaultServiceURL() string { return defaultAPIBase }
 
+// newClient builds an HTTP client routed through the protected resolver for
+// cfg, falling back to protect.NewResolver(cfg.DNSServer) when cfg.Resolver
+// is unset - the same pattern wbstream.go's Issue uses (wbstream.go:35-41).
+func (p Provider) newClient(cfg auth.Config) *http.Client {
+	resolver := cfg.Resolver
+	if resolver == nil {
+		resolver = protect.NewResolver(cfg.DNSServer)
+	}
+	return protect.NewHTTPClient(resolver)
+}
+
 // Issue runs the SaluteJazz join flow for an existing room and returns
 // salutejazz engine credentials.
 //
@@ -39,11 +51,7 @@ func (p Provider) Issue(ctx context.Context, cfg auth.Config) (auth.Credentials,
 		return auth.Credentials{}, err
 	}
 
-	resolver := cfg.Resolver
-	if resolver == nil {
-		resolver = protect.NewResolver(cfg.DNSServer)
-	}
-	client := protect.NewHTTPClient(resolver)
+	client := p.newClient(cfg)
 
 	connectorURL, err := p.preconnect(ctx, client, code, password)
 	if err != nil {
@@ -64,11 +72,7 @@ func (p Provider) Issue(ctx context.Context, cfg auth.Config) (auth.Credentials,
 // and returns it as a "<code>:<password>" room reference suitable for
 // cfg.RoomURL on a later Issue call.
 func (p Provider) CreateRoom(ctx context.Context, cfg auth.Config) (string, error) {
-	resolver := cfg.Resolver
-	if resolver == nil {
-		resolver = protect.NewResolver(cfg.DNSServer)
-	}
-	client := protect.NewHTTPClient(resolver)
+	client := p.newClient(cfg)
 
 	roomID, password, err := p.createMeeting(ctx, client)
 	if err != nil {
