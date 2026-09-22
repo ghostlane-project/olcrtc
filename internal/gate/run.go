@@ -239,7 +239,7 @@ func baselineSampler() *Sampler {
 func newEnv(o Options, pair Pair, client Client, ep Endpoint, dir string, sampler *Sampler) *Env {
 	env := &Env{
 		Target: o.Target, Pair: pair, Client: client, Endpoint: ep, Load: o.Target.Load(),
-		Sampler: sampler, Dir: dir, Logf: o.Logf, Thresholds: o.Thresholds,
+		Sampler: sampler, Dir: dir, Logf: o.Logf, Thresholds: o.Thresholds.For(pair.Provider),
 	}
 	if _, local := o.Target.(*LocalTarget); local {
 		env.Delayed = func(ctx context.Context, opt OpenOptions) (Endpoint, func(), error) {
@@ -315,7 +315,7 @@ func runCell(ctx context.Context, o Options, env *Env, s Scenario) error {
 			o.Logf("%s: %v", id, err)
 		}
 	}
-	return o.finish(id, m, failures, logPath, took)
+	return o.finish(id, m, env.Thresholds, failures, logPath, took)
 }
 
 // RunCell runs one scenario under its deadline and judges what it measured
@@ -373,16 +373,18 @@ func failCells(o Options, pair Pair, client string, reason error, run func(strin
 	for _, s := range scenariosFor(o.Target, pair, client) {
 		id := CellID(o.Target.Platform(), pair, client, s.ID)
 		run(cellName(pair, client, s.ID), func() error {
-			o.Recorder.NotRun(id, o.Thresholds.Map(), reason.Error())
+			o.Recorder.NotRun(id, o.Thresholds.For(pair.Provider).Map(), reason.Error())
 			return o.recorded(id)
 		})
 	}
 }
 
-// finish records a cell that ran and returns what its run reports (see
-// recorded).
-func (o Options) finish(id string, m Metrics, failures []string, logPath string, took time.Duration) error {
-	o.Recorder.Finish(id, m, o.Thresholds.Map(), failures, logPath, took)
+// finish records a cell that ran, with the thresholds it was judged by, and
+// returns what its run reports (see recorded).
+func (o Options) finish(
+	id string, m Metrics, t Thresholds, failures []string, logPath string, took time.Duration,
+) error {
+	o.Recorder.Finish(id, m, t.Map(), failures, logPath, took)
 	return o.recorded(id)
 }
 

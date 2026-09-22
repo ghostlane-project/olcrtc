@@ -86,7 +86,7 @@ func TestKnownFailureIsTheFirstEntryACellMatches(t *testing.T) {
 // entries, which would leave one of them unread.
 func TestTheKnownListNamesPlannedCellsAndOpenIssues(t *testing.T) {
 	lt, err := NewLocalTarget(LocalOptions{WorkDir: t.TempDir(), JitsiHosts: []string{"meet.example.invalid"},
-		Providers: []string{providerJitsi, providerTelemost, providerWBStream}, Transports: splitList(allTransports)})
+		Providers: localProviders(), Transports: splitList(allTransports)})
 	if err != nil {
 		t.Fatal(err)
 	}

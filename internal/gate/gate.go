@@ -123,7 +123,8 @@ type Env struct {
 	Log      *CellLog
 	Dir      string
 	Logf     func(format string, args ...any)
-	// Thresholds are what the cell is judged by: Local or Link.
+	// Thresholds are what the cell is judged by: Local or Link, for the
+	// pair's provider (Thresholds.For).
 	Thresholds Thresholds
 	// Delayed opens a fresh server for the pair with the given options and
 	// returns its endpoint; nil for targets that cannot (Link). S6 uses it.

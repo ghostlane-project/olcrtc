@@ -197,6 +197,27 @@ func TestEndpointSecretsNameEverythingALogMustLose(t *testing.T) {
 	}
 }
 
+// ai-generated: a SaluteJazz room is "<code>:<password>", and a request or a
+// log may carry either half alone, so each is withheld on its own too. Only
+// that provider's room is cut: a URL's scheme is no password.
+func TestEndpointSecretsWithholdEachHalfOfASaluteJazzRoom(t *testing.T) {
+	key := strings.Repeat("ab", 32)
+	ep := Endpoint{Provider: "salutejazz", Transport: "datachannel", Room: "fakecode1:fakepass1", Key: key,
+		Channel: "gate-00000000000b"}
+	want := []string{"fakecode1:fakepass1", "fakecode1", "fakepass1", key, "gate-00000000000b"}
+	if got := ep.Secrets(); !slices.Equal(got, want) {
+		t.Fatalf("Secrets = %v, want %v", got, want)
+	}
+	line := `POST /room/fakecode1/preconnect {"password":"fakepass1"}`
+	if out := Scrub(line, ep.Secrets()...); strings.Contains(out, "fakecode1") || strings.Contains(out, "fakepass1") {
+		t.Fatalf("a log line keeps half a room: %s", out)
+	}
+	tm := Endpoint{Provider: "telemost", Transport: "vp8channel", Room: "https://telemost.yandex.ru/j/fake-telemost-9"}
+	if got := tm.Secrets(); !slices.Equal(got, []string{tm.Room, "fake-telemost-9"}) {
+		t.Fatalf("Secrets of a telemost URL = %v, want the URL and its id alone", got)
+	}
+}
+
 // ai-generated: a pool room URL with a query or a fragment is withheld as its
 // bare id too. The telemost provider query-escapes the whole URL into its API
 // path, so a request error carries the id bare, the query escaped after it.

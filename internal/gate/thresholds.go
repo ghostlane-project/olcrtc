@@ -80,6 +80,29 @@ var Link = Thresholds{ //nolint:gochecknoglobals // the one place these numbers 
 	ResolverAnswered:  63,
 }
 
+// providerFloors are the throughput floors of a provider whose relay carries
+// less than a target's floors allow for, set by the same rule: half of what
+// was measured. SaluteJazz: every byte crosses Sber's TURN relay (Cloud.ru),
+// measured at 2.79 Mbit/s down and 3.23 up from a datacenter by the carrier's
+// phase-0 spike (2026-09-22).
+var providerFloors = map[string]throughputFloors{ //nolint:gochecknoglobals // the one place these numbers live
+	providerSaluteJazz: {Down: 1_400_000, Up: 1_600_000},
+}
+
+// throughputFloors are a provider's S2 and S3 floors, in bits per second.
+type throughputFloors struct{ Down, Up float64 }
+
+// For is what a pair of provider is judged by: t, with the provider's own
+// throughput floors where they are lower. A provider's floor never raises a
+// target's, whose own floors are its own measurement.
+func (t Thresholds) For(provider string) Thresholds {
+	if f, ok := providerFloors[provider]; ok {
+		t.ThroughputDownBps = min(t.ThroughputDownBps, f.Down)
+		t.ThroughputUpBps = min(t.ThroughputUpBps, f.Up)
+	}
+	return t
+}
+
 // Names in Map of the knobs that bound no single metric: a growth bounds the
 // difference of two, and resolver_answered each burst's count. The others
 // are named after the metric they bound, so a cell shows a bound next to its

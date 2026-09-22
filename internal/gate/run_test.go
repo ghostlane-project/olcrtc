@@ -220,6 +220,34 @@ func TestRunPlanRecordsEveryCellThroughASubtestOfItsOwn(t *testing.T) {
 	}
 }
 
+// ai-generated: a pair is judged by its provider's thresholds, SaluteJazz's
+// floors for its cells and the target's for the others, in the verdict and in
+// what the report records next to the metrics, for a cell that ran and for
+// one whose server never came up.
+func TestRunPlanJudgesAPairByItsProvidersThresholds(t *testing.T) {
+	resetRegistryForTest(t)
+	sj := Local.For("salutejazz")
+	Register(fixed("S2", Metrics{MetricPullOK: 1, MetricPullTotal: 1, MetricThroughputDownBps: sj.ThroughputDownBps,
+		MetricOnTopOK: 1, MetricOnTopTotal: 1, MetricOnTopP95Ms: 1}, nil))
+	target := &scriptTarget{pairs: []Pair{{"jitsi", "datachannel"}, {"salutejazz", "datachannel"}}}
+	cells := cellsByID(newHarness(t, target, &fakeClient{name: "cli"}).run(context.Background(), t))
+	jitsi, jazz := cells["engine-test/jitsi/datachannel/cli/S2"], cells["engine-test/salutejazz/datachannel/cli/S2"]
+	if jazz.Status != "pass" || jitsi.Status != "fail" {
+		t.Fatalf("at %v bps: salutejazz %s, jitsi %s; want salutejazz at its own floor, jitsi under Local's",
+			sj.ThroughputDownBps, jazz.Status, jitsi.Status)
+	}
+	if jazz.Thresholds[MetricThroughputDownBps] != sj.ThroughputDownBps ||
+		jitsi.Thresholds[MetricThroughputDownBps] != Local.ThroughputDownBps {
+		t.Fatalf("recorded floors: salutejazz %v, jitsi %v", jazz.Thresholds, jitsi.Thresholds)
+	}
+	never := &scriptTarget{pairs: []Pair{{"salutejazz", "datachannel"}}, errs: []error{ErrPairNotCarried}}
+	cell := cellsByID(newHarness(t, never, &fakeClient{name: "cli"}).run(context.Background(), t))["engine-test/salutejazz/datachannel/cli/S2"]
+	if cell.Status != "fail" || cell.Thresholds[MetricThroughputDownBps] != sj.ThroughputDownBps {
+		t.Fatalf("a cell whose server never came up: %s with %v, want a failure under salutejazz's floors",
+			cell.Status, cell.Thresholds)
+	}
+}
+
 // ai-generated: the report on disk follows the run, a cell at a time.
 func TestRunPlanKeepsTheReportOnDiskAfterEveryCell(t *testing.T) {
 	resetRegistryForTest(t)

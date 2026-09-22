@@ -14,11 +14,9 @@ import (
 // ErrCellFailed: the entry logs the cell instead of failing its subtest.
 var ErrKnownFailure = errors.New("known failure")
 
-// issues is where the engine's issues are. Kept with the list empty: the
+// issues is where the engine's issues are. Kept when the list is empty: the
 // next entry writes issues + "<number>", and a constant that comes back with
 // every entry is not one to delete with the last one.
-//
-//nolint:unused // the list is empty today; every entry uses this.
 const issues = "https://github.com/ghostlane-project/olcrtc/issues/"
 
 // KnownFailure is a cell that fails every run until the issue that tracks it
@@ -33,6 +31,8 @@ type KnownFailure struct{ Cell, Issue, Why string }
 // that will not open, the server never comes up, its cells never run, and a
 // cell that never ran is never known, so configuration stays blocking.
 var knownFailures = []KnownFailure{ //nolint:gochecknoglobals // edited by hand as issues open and close; tests swap it
+	{Cell: "engine-linux/salutejazz/datachannel/*/*", Issue: issues + "49",
+		Why: "a bulk transfer stalls through Sber's TURN, the session ends on liveness, mobile does not recover"},
 }
 
 // knownFailure is the entry of the list a cell id matches, the first one if

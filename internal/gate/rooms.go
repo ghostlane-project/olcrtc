@@ -15,11 +15,14 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/openlibrecommunity/olcrtc/internal/auth"
+	authSaluteJazz "github.com/openlibrecommunity/olcrtc/internal/auth/salutejazz"
 )
 
 // ai-generated: the whole file (rooms for the local target: a fresh Jitsi
-// room on a host that answers, a room of a pre-made pool in the form its
-// provider joins by, fresh keys and channel ids).
+// room on a host that answers, a fresh SaluteJazz room, a room of a pre-made
+// pool in the form its provider joins by, fresh keys and channel ids).
 
 var (
 	// ErrNoJitsiHost is a run with no Jitsi host to put a room on: none
@@ -162,6 +165,19 @@ func ProbeHTTPS(ctx context.Context, host string) bool {
 	return resp.StatusCode < http.StatusInternalServerError
 }
 
+// SaluteJazzRoom makes a fresh SaluteJazz room with the provider's own
+// anonymous create call, the one the engine's auth provider makes: no
+// account, no token, and nothing to give back, since Sber has no delete. The
+// room is "<code>:<password>", the pair's alone, as a Jitsi room is. The
+// provider's HTTP client bounds the call.
+func SaluteJazzRoom(ctx context.Context) (string, error) {
+	room, err := authSaluteJazz.New().CreateRoom(ctx, auth.Config{})
+	if err != nil {
+		return "", fmt.Errorf("create room: %w", err)
+	}
+	return room, nil
+}
+
 // PoolRoom takes the entry of a pre-made pool the run number lands on, so
 // runs in sequence take turns. Runs at the same time can still land in one
 // room (a pool of one always puts them there): the workflow's concurrency
@@ -245,8 +261,10 @@ func lastSegment(s string) string {
 // given; its last path segment, as it is and cut at a query or a fragment,
 // where each differs (the part the engine logs on its own, e.g. "joining
 // MUC host/<name>", and the id the telemost provider leaves bare when it
-// escapes the whole room URL into its API path); the key and the channel
-// id. Empty ones are left out. Feed them to Scrub.
+// escapes the whole room URL into its API path); each half of a SaluteJazz
+// room, the code and the password, which a request or a log may carry
+// alone; the key and the channel id. Empty ones are left out. Feed them to
+// Scrub.
 func (e Endpoint) Secrets() []string {
 	out := make([]string, 0, 5)
 	if e.Room != "" {
@@ -257,6 +275,14 @@ func (e Endpoint) Secrets() []string {
 		for _, name := range []string{lastSegment(e.Room), lastSegment(path)} {
 			if name != "" && !slices.Contains(out, name) {
 				out = append(out, name)
+			}
+		}
+		// ai-generated: each half of a SaluteJazz "<code>:<password>" too.
+		if code, password, ok := strings.Cut(e.Room, ":"); ok && e.Provider == providerSaluteJazz {
+			for _, half := range []string{code, password} {
+				if half != "" && !slices.Contains(out, half) {
+					out = append(out, half)
+				}
 			}
 		}
 	}
