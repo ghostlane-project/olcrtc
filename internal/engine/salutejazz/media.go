@@ -59,7 +59,7 @@ func (s *Session) newPeerConnection(gen *generation, target string) (*webrtc.Pee
 		if candidate == nil {
 			return
 		}
-		if err := s.sendICE(target, candidate.ToJSON()); err != nil {
+		if err := s.sendICE(gen, target, candidate.ToJSON()); err != nil {
 			logger.Debugf("salutejazz: %s candidate: %v", target, err)
 		}
 	})
@@ -113,7 +113,7 @@ func (s *Session) handleOffer(gen *generation, desc *sdpDescription) error {
 	if err := pc.SetLocalDescription(answer); err != nil {
 		return fmt.Errorf("salutejazz subscriber local description: %w", err)
 	}
-	return s.sendMedia(mediaIn{
+	return s.sendMedia(gen, mediaIn{
 		Method:      methodAnswer,
 		Description: &sdpOut{SDP: answer.SDP, Type: sdpTypeAnswer},
 	})
@@ -169,7 +169,7 @@ func (s *Session) startPublisher(gen *generation) error {
 	if err := pc.SetLocalDescription(offer); err != nil {
 		return fmt.Errorf("salutejazz publisher local description: %w", err)
 	}
-	if err := s.sendMedia(mediaIn{
+	if err := s.sendMedia(gen, mediaIn{
 		Method:      methodOffer,
 		Description: &sdpOut{SDP: offer.SDP, Type: sdpTypeOffer},
 	}); err != nil {
@@ -230,7 +230,7 @@ func (s *Session) wireChannel(gen *generation, dc *webrtc.DataChannel, publisher
 
 // sendICE trickles one local candidate, one candidate per frame as the web
 // client sends them. The server takes an sdpMid even though it sends none.
-func (s *Session) sendICE(target string, candidate webrtc.ICECandidateInit) error {
+func (s *Session) sendICE(gen *generation, target string, candidate webrtc.ICECandidateInit) error {
 	mid := "0"
 	if candidate.SDPMid != nil && *candidate.SDPMid != "" {
 		mid = *candidate.SDPMid
@@ -248,7 +248,7 @@ func (s *Session) sendICE(target string, candidate webrtc.ICECandidateInit) erro
 	if candidate.UsernameFragment != nil && *candidate.UsernameFragment != "" {
 		out.UsernameFragment = candidate.UsernameFragment
 	}
-	return s.sendMedia(mediaIn{Method: methodICE, Candidates: []iceCandidate{out}})
+	return s.sendMedia(gen, mediaIn{Method: methodICE, Candidates: []iceCandidate{out}})
 }
 
 // addRemoteICE applies the candidates one rtc:ice frame carries.

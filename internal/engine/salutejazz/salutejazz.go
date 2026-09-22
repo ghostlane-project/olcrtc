@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -49,6 +50,9 @@ const (
 	methodICE    = "rtc:ice"
 	methodPing   = "rtc:ping"
 	methodPong   = "rtc:pong"
+	// methodParticipants carries the room roster: who else is here, and
+	// under which identity a data packet reaches them.
+	methodParticipants = "rtc:participants:update"
 
 	// Which peer connection a description or a candidate belongs to. The SFU
 	// offers the subscriber; the client offers the publisher.
@@ -142,6 +146,23 @@ type generation struct {
 	pubReady chan struct{}
 	answer   chan string
 
+	// closeOnce makes teardown idempotent. Close and a Connect that is
+	// giving up both hold this generation, and a signal channel closed by
+	// two of them at once panics.
+	closeOnce sync.Once
+
+	// wsMu owns ws: it serialises the writes (gorilla allows a single
+	// concurrent writer) and guards the pointer. The socket belongs to the
+	// generation that dialled it, so a teardown can only close its own.
+	wsMu sync.Mutex
+	ws   *websocket.Conn
+
+	// identity is this participant's id and group the LiveKit room name
+	// behind the room code. Both come from this generation's join-response:
+	// a rejoin has neither until the connector answers it again.
+	identity atomic.Pointer[string]
+	group    atomic.Pointer[string]
+
 	subPC, pubPC     atomic.Pointer[webrtc.PeerConnection]
 	subRel, subLossy atomic.Pointer[webrtc.DataChannel]
 	pubRel, pubLossy atomic.Pointer[webrtc.DataChannel]
@@ -155,6 +176,11 @@ type generation struct {
 	iceMu   sync.Mutex
 	servers []webrtc.ICEServer
 	pending map[string][]webrtc.ICECandidateInit
+
+	// peersMu owns peers, the identity -> sid map rtc:participants:update
+	// maintains for everyone else in the room.
+	peersMu sync.Mutex
+	peers   map[string]string
 }
 
 func newGeneration(api *webrtc.API) *generation {
@@ -165,6 +191,53 @@ func newGeneration(api *webrtc.API) *generation {
 		pubReady: make(chan struct{}),
 		answer:   make(chan string, 1),
 		pending:  make(map[string][]webrtc.ICECandidateInit),
+		peers:    make(map[string]string),
+	}
+}
+
+// isDone reports whether this generation has been torn down.
+func (g *generation) isDone() bool {
+	select {
+	case <-g.done:
+		return true
+	default:
+		return false
+	}
+}
+
+func (g *generation) groupID() string { return loadString(&g.group) }
+
+func (g *generation) localIdentity() string { return loadString(&g.identity) }
+
+// remoteIdentities is everyone else the room has reported, sorted so a
+// caller sees a stable list.
+func (g *generation) remoteIdentities() []string {
+	g.peersMu.Lock()
+	defer g.peersMu.Unlock()
+	out := make([]string, 0, len(g.peers))
+	for identity := range g.peers {
+		out = append(out, identity)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// applyParticipants folds one rtc:participants:update into the identity map:
+// a participant that has left is dropped, and this session is never its own
+// peer.
+func (g *generation) applyParticipants(list []participant) {
+	local := g.localIdentity()
+	g.peersMu.Lock()
+	defer g.peersMu.Unlock()
+	for _, peer := range list {
+		if peer.Identity == "" || peer.Identity == local {
+			continue
+		}
+		if peer.State == participantDisconnected {
+			delete(g.peers, peer.Identity)
+			continue
+		}
+		g.peers[peer.Identity] = peer.SID
 	}
 }
 
@@ -188,18 +261,7 @@ type Session struct {
 	room         string
 	pass         string
 
-	// wsMu owns ws: it serialises the writes (gorilla allows a single
-	// concurrent writer) and guards the pointer itself, which Connect
-	// replaces on every attempt.
-	wsMu sync.Mutex
-	ws   *websocket.Conn
-
 	cur atomic.Pointer[generation]
-
-	// identity is this participant's id, group the LiveKit room name behind
-	// the room code. Both come from join-response and are echoed afterwards.
-	identity atomic.Pointer[string]
-	group    atomic.Pointer[string]
 
 	// pongMu owns pongWaiters, one per ping in flight.
 	pongMu      sync.Mutex
@@ -283,7 +345,7 @@ func (s *Session) Connect(ctx context.Context) error {
 	gen := newGeneration(api)
 	s.cur.Store(gen)
 
-	conn, err := s.dialWebSocket()
+	conn, err := s.dialWebSocket(gen)
 	if err != nil {
 		s.teardown(gen)
 		return err
@@ -292,7 +354,7 @@ func (s *Session) Connect(ctx context.Context) error {
 	s.goLaunch(func() { s.pingLoop(gen) })
 	s.goLaunch(func() { s.negotiate(gen) })
 
-	if err := s.sendJoin(); err != nil {
+	if err := s.sendJoin(gen); err != nil {
 		s.teardown(gen)
 		return err
 	}
@@ -339,8 +401,6 @@ func (s *Session) Close() error {
 
 	if gen := s.cur.Swap(nil); gen != nil {
 		s.teardown(gen)
-	} else {
-		s.closeWebSocket()
 	}
 	s.stopLaunching()
 
@@ -356,12 +416,16 @@ func (s *Session) Close() error {
 	return nil
 }
 
-// teardown ends one generation: its goroutines stop, its signaling socket is
-// closed and both peer connections are released.
+// teardown ends one generation: its goroutines stop, the socket it dialled
+// is closed and both peer connections are released. It runs once however
+// many callers hold the generation - Close and a Connect that is giving up
+// both do.
 func (s *Session) teardown(gen *generation) {
-	engine.CloseSignal(gen.done)
-	s.closeWebSocket()
-	closePeerConnections(gen)
+	gen.closeOnce.Do(func() {
+		engine.CloseSignal(gen.done)
+		gen.closeSocket()
+		closePeerConnections(gen)
+	})
 }
 
 // closePeerConnections closes both peer connections without letting a stuck
@@ -480,6 +544,26 @@ func (s *Session) publisherChannel(reliable bool) *webrtc.DataChannel {
 
 func (s *Session) current() *generation { return s.cur.Load() }
 
+// localIdentity is this participant's id, as this generation's join-response
+// named it.
+func (s *Session) localIdentity() string {
+	gen := s.current()
+	if gen == nil {
+		return ""
+	}
+	return gen.localIdentity()
+}
+
+// remoteIdentities is everyone else rtc:participants:update has reported in
+// the room.
+func (s *Session) remoteIdentities() []string {
+	gen := s.current()
+	if gen == nil {
+		return nil
+	}
+	return gen.remoteIdentities()
+}
+
 func (s *Session) subscriberConnected() bool {
 	gen := s.current()
 	return gen != nil && gen.subConnected.Load()
@@ -498,8 +582,6 @@ func (s *Session) iceServers() []webrtc.ICEServer {
 	}
 	return gen.iceServersSnapshot()
 }
-
-func (s *Session) groupID() string { return loadString(&s.group) }
 
 func (s *Session) roomID() string {
 	s.credMu.RLock()
@@ -530,6 +612,10 @@ func loadString(p *atomic.Pointer[string]) string {
 func storeString(p *atomic.Pointer[string], value string) {
 	p.Store(&value)
 }
+
+// participantDisconnected is the state rtc:participants:update reports for
+// someone who has left.
+const participantDisconnected = "DISCONNECTED"
 
 // goLaunch starts a tracked goroutine unless Close has started waiting.
 func (s *Session) goLaunch(fn func()) {

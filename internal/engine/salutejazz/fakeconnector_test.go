@@ -2,8 +2,10 @@ package salutejazz
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,13 +30,22 @@ import (
 //	newFakeConnector(t) -> (url, *fakeSFU)  the ws:// URL to join
 //	(*fakeSFU).sawAnswer()                  the client's subscriber answer arrived
 //	(*fakeSFU).sawPublisherOffer()          the client's publisher offer arrived
+//	(*fakeSFU).joins()                      every join seen: its payload and group
+//	(*fakeSFU).holdJoins() -> release       stall the join answer, for a race
 //	(*fakeSFU).dropAll()                    close every fake-side socket
 //	(*fakeSFU).sendError(code, message)     a server error frame to every peer
-//	(*fakeSFU).lastError()                  what the fake itself tripped over
+//	(*fakeSFU).lastError()                  what the fake itself tripped over,
+//	                                        including a client frame whose
+//	                                        group id does not match the capture
 //
 // What it deliberately does not do: no preconnect (that is the auth
 // provider's HTTP call), no rtc:join, no participant bookkeeping beyond the
 // identities a room's peers need to address each other.
+
+var (
+	errGroupOnJoin = errors.New("join carried a group id")
+	errWrongGroup  = errors.New("frame carried the wrong group id")
+)
 
 const (
 	// fakeConnectorPath is the connector endpoint, as on the real service.
@@ -45,6 +56,13 @@ const (
 	fakeSTUNURL = "stun:stun.l.google.com:19302"
 )
 
+// seenJoin is one join frame as it arrived: the payload the client built and
+// the envelope group id it carried (the capture has none on a join).
+type seenJoin struct {
+	payload string
+	group   string
+}
+
 type fakeSFU struct {
 	mu       sync.Mutex
 	peers    []*fakePeer
@@ -53,6 +71,9 @@ type fakeSFU struct {
 	answered bool
 	pubOffer bool
 	failure  string
+	seen     []seenJoin
+	// joinGate, while non-nil, stalls every join answer.
+	joinGate chan struct{}
 }
 
 func newFakeConnector(t *testing.T) (string, *fakeSFU) {
@@ -93,6 +114,35 @@ func (f *fakeSFU) sawPublisherOffer() bool {
 	return f.pubOffer
 }
 
+// joins is every join frame the fake has read, in arrival order.
+func (f *fakeSFU) joins() []seenJoin {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]seenJoin(nil), f.seen...)
+}
+
+// holdJoins stalls every join answer until the returned release is called,
+// so a test can hold a Connect in flight. Releasing twice is safe.
+func (f *fakeSFU) holdJoins() func() {
+	gate := make(chan struct{})
+	f.mu.Lock()
+	f.joinGate = gate
+	f.mu.Unlock()
+	var once sync.Once
+	return func() { once.Do(func() { close(gate) }) }
+}
+
+// awaitJoinGate blocks while holdJoins is in force.
+func (f *fakeSFU) awaitJoinGate() {
+	f.mu.Lock()
+	gate := f.joinGate
+	f.mu.Unlock()
+	if gate == nil {
+		return
+	}
+	<-gate
+}
+
 // lastError is what the fake itself failed on, for a test's failure message.
 // The fake never calls t from its own goroutines: a websocket handler
 // outlives the test that started it.
@@ -110,11 +160,11 @@ func (f *fakeSFU) dropAll() {
 	}
 }
 
-// sendError delivers a server error frame to every connected peer.
+// sendError delivers a server error frame to every connected peer. It is
+// part of the fake's documented surface, driven by the reconnect and
+// fatal-error cover.
 //
-// fatal-error cover drives it.
-//
-//nolint:unused // part of the fake's documented surface; the reconnect and
+//nolint:unused // driven by the reconnect and fatal-error tests
 func (f *fakeSFU) sendError(code, message string) {
 	for _, peer := range f.snapshot() {
 		_ = peer.write(eventError, map[string]any{"code": code, "message": message})
@@ -145,9 +195,10 @@ func (f *fakeSFU) fail(what string, err error) {
 
 // join registers a peer in its room and hands it a distinct identity, the
 // way the SFU hands every participant its own participantId.
-func (f *fakeSFU) join(peer *fakePeer, room string) {
+func (f *fakeSFU) join(peer *fakePeer, room string, frame fakeIn) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.seen = append(f.seen, seenJoin{payload: string(frame.Payload), group: frame.GroupID})
 	f.seq++
 	peer.id = "fakepart-" + strconv.Itoa(f.seq)
 	peer.room = room
@@ -240,7 +291,10 @@ type fakePeer struct {
 
 func (f *fakeSFU) serve(conn *websocket.Conn) {
 	peer := &fakePeer{fake: f, conn: conn, pending: make(map[string][]webrtc.ICECandidateInit)}
-	defer peer.close()
+	defer func() {
+		peer.close()
+		f.leave(peer)
+	}()
 	for {
 		var frame fakeIn
 		if err := conn.ReadJSON(&frame); err != nil {
@@ -290,7 +344,13 @@ type fakePing struct {
 func (p *fakePeer) handle(frame fakeIn) error {
 	switch frame.Event {
 	case eventJoin:
-		p.fake.join(p, frame.RoomID)
+		// The capture's join carries no group id: the connector names the
+		// group in its answer to this very frame.
+		if frame.GroupID != "" {
+			p.fake.fail("join", errGroupOnJoin)
+		}
+		p.fake.join(p, frame.RoomID, frame)
+		p.fake.awaitJoinGate()
 		if err := p.write(eventJoinResponse, p.joinResponse()); err != nil {
 			return err
 		}
@@ -299,8 +359,17 @@ func (p *fakePeer) handle(frame fakeIn) error {
 		}); err != nil {
 			return err
 		}
-		return p.offerSubscriber()
+		if err := p.offerSubscriber(); err != nil {
+			return err
+		}
+		p.fake.broadcastParticipants(p.room, nil)
+		return nil
 	case eventMediaIn:
+		// Everything after the join echoes the group the join-response
+		// named, as the capture does.
+		if frame.GroupID != p.group {
+			p.fake.fail("media-in", errWrongGroup)
+		}
 		var media fakeMedia
 		if err := json.Unmarshal(frame.Payload, &media); err != nil {
 			return err
@@ -308,6 +377,45 @@ func (p *fakePeer) handle(frame fakeIn) error {
 		return p.handleMedia(media)
 	default:
 		return nil
+	}
+}
+
+// broadcastParticipants sends the room roster to everyone in it, the way the
+// SFU does when the membership changes. gone, when set, is listed as
+// DISCONNECTED: that is how a participant leaves a LiveKit roster. A write
+// that fails is dropped - one dead socket does not concern the others.
+func (f *fakeSFU) broadcastParticipants(room string, gone *fakePeer) {
+	peers := f.roomPeers(room)
+	roster := make([]any, 0, len(peers)+1)
+	for _, peer := range peers {
+		roster = append(roster, rosterEntry(peer, "ACTIVE"))
+	}
+	if gone != nil {
+		roster = append(roster, rosterEntry(gone, participantDisconnected))
+	}
+	payload := map[string]any{"update": map[string]any{"participants": roster}}
+	for _, peer := range peers {
+		_ = peer.sendMedia(methodParticipants, payload)
+	}
+}
+
+func rosterEntry(peer *fakePeer, state string) map[string]any {
+	return map[string]any{"sid": "PA_" + peer.id, "identity": peer.id, "state": state, "name": peer.id}
+}
+
+// leave removes a peer whose socket is gone and tells the room, as the SFU
+// does when a participant drops.
+func (f *fakeSFU) leave(peer *fakePeer) {
+	f.mu.Lock()
+	f.peers = slices.DeleteFunc(f.peers, func(other *fakePeer) bool { return other == peer })
+	if peer.room != "" {
+		f.rooms[peer.room] = slices.DeleteFunc(f.rooms[peer.room],
+			func(other *fakePeer) bool { return other == peer })
+	}
+	room := peer.room
+	f.mu.Unlock()
+	if room != "" {
+		f.broadcastParticipants(room, peer)
 	}
 }
 
@@ -536,14 +644,20 @@ func (p *fakePeer) pcLocked(target string) *webrtc.PeerConnection {
 	return p.subPC
 }
 
+// write sends one server frame with the keys the capture shows for that
+// event: a join-response carries none of the session ids, a media-out
+// carries both, an error frame carries the group only.
 func (p *fakePeer) write(event string, payload any) error {
 	frame := map[string]any{
-		"event":         event,
-		"requestId":     uuid.NewString(),
-		"roomId":        p.room,
-		"participantId": p.id,
+		"event":     event,
+		"requestId": uuid.NewString(),
+		"roomId":    p.room,
 	}
-	if p.group != "" {
+	switch event {
+	case eventMediaOut:
+		frame["groupId"] = p.group
+		frame["participantId"] = p.id
+	case eventError:
 		frame["groupId"] = p.group
 	}
 	if payload != nil {

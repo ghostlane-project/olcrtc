@@ -79,11 +79,27 @@ type supportedFeatures struct {
 // mediaPayload is a media-out payload: one LiveKit signal method plus the
 // field that method carries.
 type mediaPayload struct {
-	Method           string            `json:"method"`
-	Configuration    *rtcConfiguration `json:"configuration"`
-	Description      *sdpDescription   `json:"description"`
-	RTCIceCandidates []iceCandidate    `json:"rtcIceCandidates"` //nolint:tagliatelle // connector wire is camelCase
-	PongResp         *pongResponse     `json:"pong_resp"`
+	Method           string              `json:"method"`
+	Configuration    *rtcConfiguration   `json:"configuration"`
+	Description      *sdpDescription     `json:"description"`
+	RTCIceCandidates []iceCandidate      `json:"rtcIceCandidates"` //nolint:tagliatelle // connector wire is camelCase
+	PongResp         *pongResponse       `json:"pong_resp"`
+	Update           *participantsUpdate `json:"update"`
+}
+
+// participantsUpdate is what rtc:participants:update carries: the room's
+// roster, under an "update" object.
+type participantsUpdate struct {
+	Participants []participant `json:"participants"`
+}
+
+// participant is the part of a roster entry this engine reads. identity is
+// what a data packet is addressed to and what the sender is stamped with;
+// state says whether the participant is still in the room.
+type participant struct {
+	SID      string `json:"sid"`
+	Identity string `json:"identity"`
+	State    string `json:"state"`
 }
 
 type rtcConfiguration struct {
@@ -143,7 +159,7 @@ type serverError struct {
 // dialWebSocket opens the connector socket and publishes it as the session's
 // single writer target. The headers are the browser's: the service is
 // fronted by a bot filter that sees them.
-func (s *Session) dialWebSocket() (*websocket.Conn, error) {
+func (s *Session) dialWebSocket(gen *generation) (*websocket.Conn, error) {
 	dialer := protect.NewWebSocketDialer(wsHandshakeTimeout, s.resolver)
 	header := http.Header{}
 	header.Set("Origin", webOrigin)
@@ -158,20 +174,20 @@ func (s *Session) dialWebSocket() (*websocket.Conn, error) {
 	}
 	conn.SetReadLimit(wsReadLimit)
 
-	s.wsMu.Lock()
-	s.ws = conn
-	s.wsMu.Unlock()
+	gen.wsMu.Lock()
+	gen.ws = conn
+	gen.wsMu.Unlock()
 	return conn, nil
 }
 
-// closeWebSocket closes the signaling socket. Clearing the pointer under
-// wsMu makes every later write fail with ErrWebSocketClosed instead of
-// writing to a dead socket.
-func (s *Session) closeWebSocket() {
-	s.wsMu.Lock()
-	conn := s.ws
-	s.ws = nil
-	s.wsMu.Unlock()
+// closeSocket closes this generation's signaling socket. Clearing the
+// pointer under wsMu makes every later write fail with ErrWebSocketClosed
+// instead of writing to a dead socket.
+func (g *generation) closeSocket() {
+	g.wsMu.Lock()
+	conn := g.ws
+	g.ws = nil
+	g.wsMu.Unlock()
 	if conn == nil {
 		return
 	}
@@ -183,15 +199,16 @@ func (s *Session) closeWebSocket() {
 
 // writeJSON is the single writer path: it owns wsMu (gorilla permits one
 // concurrent writer) and bounds the write, so a black-holed socket cannot
-// hold the lock forever and take every other writer with it.
-func (s *Session) writeJSON(v any) error {
-	s.wsMu.Lock()
-	defer s.wsMu.Unlock()
-	if s.ws == nil {
+// hold the lock forever and take every other writer with it. It writes to
+// the socket this generation dialled and to no other.
+func (g *generation) writeJSON(v any) error {
+	g.wsMu.Lock()
+	defer g.wsMu.Unlock()
+	if g.ws == nil {
 		return ErrWebSocketClosed
 	}
-	_ = s.ws.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
-	if err := s.ws.WriteJSON(v); err != nil {
+	_ = g.ws.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
+	if err := g.ws.WriteJSON(v); err != nil {
 		return fmt.Errorf("salutejazz ws write: %w", err)
 	}
 	return nil
@@ -199,7 +216,7 @@ func (s *Session) writeJSON(v any) error {
 
 // envelope wraps one payload in the client envelope: the room, the group id
 // the connector expects echoed once it has named one, and a fresh request id.
-func (s *Session) envelope(event string, payload any) (envOut, error) {
+func (s *Session) envelope(gen *generation, event string, payload any) (envOut, error) {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return envOut{}, fmt.Errorf("salutejazz marshal %s payload: %w", event, err)
@@ -208,30 +225,30 @@ func (s *Session) envelope(event string, payload any) (envOut, error) {
 		RoomID:    s.roomID(),
 		Payload:   raw,
 		Event:     event,
-		GroupID:   s.groupID(),
+		GroupID:   gen.groupID(),
 		RequestID: uuid.NewString(),
 	}, nil
 }
 
 // sendEnvelope wraps one payload in the client envelope and writes it.
-func (s *Session) sendEnvelope(event string, payload any) error {
-	frame, err := s.envelope(event, payload)
+func (s *Session) sendEnvelope(gen *generation, event string, payload any) error {
+	frame, err := s.envelope(gen, event, payload)
 	if err != nil {
 		return err
 	}
-	return s.writeJSON(frame)
+	return gen.writeJSON(frame)
 }
 
 // sendMedia writes one media-in frame carrying a LiveKit signal method.
-func (s *Session) sendMedia(payload mediaIn) error {
-	return s.sendEnvelope(eventMediaIn, payload)
+func (s *Session) sendMedia(gen *generation, payload mediaIn) error {
+	return s.sendEnvelope(gen, eventMediaIn, payload)
 }
 
 // sendJoin is the first frame on the socket. The payload mimics the web
 // client's, and is the one frame that carries the room password: nothing
 // here or below logs it.
-func (s *Session) sendJoin() error {
-	return s.sendEnvelope(eventJoin, joinRequest{
+func (s *Session) sendJoin(gen *generation) error {
+	return s.sendEnvelope(gen, eventJoin, joinRequest{
 		Password:        s.password(),
 		ParticipantName: s.name,
 		SupportedFeatures: supportedFeatures{
@@ -252,7 +269,10 @@ func (s *Session) readLoop(gen *generation, conn *websocket.Conn) {
 		_ = conn.SetReadDeadline(time.Now().Add(wsReadTimeout))
 		var frame envIn
 		if err := conn.ReadJSON(&frame); err != nil {
-			if !s.closed.Load() {
+			// A generation that has been torn down closed this socket on
+			// purpose - Close, or a Connect giving up. Only a link that
+			// died under a live generation is worth a reconnect.
+			if !s.closed.Load() && !gen.isDone() {
 				logger.Debugf("salutejazz: signaling read: %v", err)
 				s.queueReconnect()
 			}
@@ -263,12 +283,12 @@ func (s *Session) readLoop(gen *generation, conn *websocket.Conn) {
 }
 
 func (s *Session) handleEnvelope(gen *generation, frame envIn) {
-	if frame.GroupID != "" && s.groupID() == "" {
-		storeString(&s.group, frame.GroupID)
+	if frame.GroupID != "" && gen.groupID() == "" {
+		storeString(&gen.group, frame.GroupID)
 	}
 	switch frame.Event {
 	case eventJoinResponse:
-		s.handleJoinResponse(frame.Payload)
+		s.handleJoinResponse(gen, frame.Payload)
 	case eventMediaOut:
 		s.handleMediaOut(gen, frame.Payload)
 	case eventError:
@@ -280,17 +300,17 @@ func (s *Session) handleEnvelope(gen *generation, frame envIn) {
 
 // handleJoinResponse records who we are and the group id every later frame
 // echoes.
-func (s *Session) handleJoinResponse(payload json.RawMessage) {
+func (s *Session) handleJoinResponse(gen *generation, payload json.RawMessage) {
 	var resp joinResponse
 	if err := json.Unmarshal(payload, &resp); err != nil {
 		logger.Debugf("salutejazz: join-response: %v", err)
 		return
 	}
 	if resp.Participant.ParticipantID != "" {
-		storeString(&s.identity, resp.Participant.ParticipantID)
+		storeString(&gen.identity, resp.Participant.ParticipantID)
 	}
 	if resp.ParticipantGroup.GroupID != "" {
-		storeString(&s.group, resp.ParticipantGroup.GroupID)
+		storeString(&gen.group, resp.ParticipantGroup.GroupID)
 	}
 	logger.Debugf("salutejazz: joined as %s in meeting %s", resp.Participant.ParticipantID, resp.MeetingID)
 	s.notifyJoin(eventJoinResponse)
@@ -317,6 +337,10 @@ func (s *Session) handleMediaOut(gen *generation, payload json.RawMessage) {
 		s.deliverAnswer(gen, media.Description)
 	case methodICE:
 		s.addRemoteICE(gen, media.RTCIceCandidates)
+	case methodParticipants:
+		if media.Update != nil {
+			gen.applyParticipants(media.Update.Participants)
+		}
 	case methodPong:
 		s.resolvePong(media.PongResp)
 	default:
@@ -362,12 +386,12 @@ func (s *Session) pingLoop(gen *generation) {
 	for {
 		select {
 		case <-ticker.C:
-			if s.groupID() == "" {
+			if gen.groupID() == "" {
 				// The join has not been answered yet, and every frame
 				// after it echoes the group the answer names.
 				continue
 			}
-			if err := s.pingOnce(); err != nil {
+			if err := s.ping(gen); err != nil {
 				logger.Debugf("salutejazz: ping: %v", err)
 				s.queueReconnect()
 				return
@@ -380,13 +404,22 @@ func (s *Session) pingLoop(gen *generation) {
 	}
 }
 
-// pingOnce sends one rtc:ping and waits for the pong that answers it. The
-// frame carries the last measured round trip, as the web client's does.
+// pingOnce pings on the live generation.
 func (s *Session) pingOnce() error {
+	gen := s.current()
+	if gen == nil {
+		return ErrSessionClosed
+	}
+	return s.ping(gen)
+}
+
+// ping sends one rtc:ping and waits for the pong that answers it. The frame
+// carries the last measured round trip, as the web client's does.
+func (s *Session) ping(gen *generation) error {
 	sent, waiter := s.awaitPong(time.Now().UnixMilli())
 	defer s.forgetPong(sent)
 
-	err := s.sendMedia(mediaIn{
+	err := s.sendMedia(gen, mediaIn{
 		Method:  methodPing,
 		PingReq: &pingRequest{Timestamp: sent, RTT: s.rtt.Load()},
 	})
@@ -401,6 +434,8 @@ func (s *Session) pingOnce() error {
 		return nil
 	case <-timer.C:
 		return ErrPongTimeout
+	case <-gen.done:
+		return ErrSessionClosed
 	case <-s.closeCh:
 		return ErrSessionClosed
 	}
