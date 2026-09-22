@@ -13,7 +13,7 @@
 
 # olcRTC - общее описание
 
-`olcRTC` (OpenLibreCommunity RTC) - зашифрованный TCP-over-WebRTC туннель. Он маскирует трафик под обычное участие в WebRTC/SFU-сервисе: Jitsi Meet, Yandex Telemost или WbStream.
+`olcRTC` (OpenLibreCommunity RTC) - зашифрованный TCP-over-WebRTC туннель. Он маскирует трафик под обычное участие в WebRTC/SFU-сервисе: Jitsi Meet, Yandex Telemost, WbStream или Sber SaluteJazz.
 
 Проект: [github.com/openlibrecommunity/olcrtc](https://github.com/openlibrecommunity/olcrtc)  
 Лицензия: WTFPL  
@@ -77,6 +77,7 @@ olcrtc client.yaml
 | `jitsi` | `jitsi` | URL комнаты Jitsi, инстансы в docs/jitsi.instances.yaml, без отдельной регистрации |
 | `telemost` | `goolom` | credentials через Yandex Telemost API, с отдельной регистрацией |
 | `wbstream` | `livekit` | credentials через WbBStream API, с отдельной регистрацией |
+| `salutejazz` | `salutejazz` | ссылка на комнату `<code>:<password>`; вход анонимным гостем, без регистрации; комната - один анонимный вызов создания; только data-каналы, и каждый байт идёт через TURN-ретранслятор Сбера |
 | `none` | задаётся в `engine.name` | прямой engine-режим с `engine.url` и `engine.token`, с отдельной регистрацией |
 
 Во всех Go-конфигах, логах, флагах и тестах используется одно имя: `Provider` в Go и `auth.provider` в YAML.
@@ -90,6 +91,7 @@ olcrtc client.yaml
 | `livekit` | `internal/engine/livekit` | data packets/video tracks/LiveKit SDK |
 | `goolom` | `internal/engine/goolom` | Telemost/Goolom signaling, publisher/subscriber PeerConnection |
 | `jitsi` | `internal/engine/jitsi` | Jitsi MUC/Jingle/colibri-ws, datachannel/best-effort video |
+| `salutejazz` | `internal/engine/salutejazz` | JSON-коннектор Сбера (LiveKit-as-JSON поверх pion), данные через publisher PeerConnection |
 
 `internal/engine/builtin` связывает `auth.provider` с нужным engine. Отдельного пакета `internal/provider` в текущем проекте нет.
 
@@ -99,7 +101,7 @@ olcrtc client.yaml
 
 | Transport | Как передаёт данные | Основной сценарий |
 |---|---|---|
-| `datachannel` | нативный byte/data path engine | самый простой и быстрый путь, стабильно с Jitsi |
+| `datachannel` | нативный byte/data path engine | самый простой и быстрый путь, стабильно с Jitsi; единственный, который несёт SaluteJazz |
 | `vp8channel` | KCP поверх VP8-like video frames | основной video-path для WB Stream и Telemost |
 | `seichannel` | payload в H264 SEI NAL units, ACK/retry | fallback для WB Stream / Jitsi|
 | `videochannel` | QR/tile кадры с кодированием VP8 на чистом Go, ACK/retry | экспериментальный визуальный транспорт |
@@ -333,6 +335,7 @@ E2E_PROVIDERS=wbstream E2E_TRANSPORTS=vp8channel mage e2e
 | SOCKS5 не слушает | `mode: cnc`, `socks.host`, `socks.port`, логи клиента |
 | Jitsi не соединяется без второго участника | сервер и клиент должны быть в одной комнате |
 | WB Stream + datachannel не работает | в guest flow нет `canPublishData`; используй `vp8channel`, `seichannel` или `videochannel` |
+| SaluteJazz + видео-транспорт не работает | Сбер пускает гостя только в data-каналы комнаты, никогда в медиадорожку; используй `datachannel` |
 | `seichannel ack timeout` | провайдер режет/не маршрутизирует video path; смени transport/provider |
 
 ## Ссылки
