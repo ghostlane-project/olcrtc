@@ -49,7 +49,7 @@ to tell its users apart, and a phone is not a server.
 | Added here | What it is |
 | --- | --- |
 | A ring of server keys | `crypto.keys` / `crypto.keys_file`. A server holds several keys and pins, per peer, the one that peer's first record authenticates under — so each client can carry its own key. A single `crypto.key` is a one-entry ring and behaves exactly as before; clients are unchanged. |
-| Per-key metering | `stats.listen` serves `GET /stats` on loopback with per-key byte totals. Enough to bill a key or cut one off, with no control plane to run. |
+| Per-key metering | `stats.listen` serves `GET /stats` on loopback with per-key byte totals. Enough to bill a key or cut one off, with no control plane to run. The body's `link` field says what the carrier session is doing - `connecting`, `up` or `down` - because the listener is bound before the room is joined, so an answer on its own only proves the process is running. |
 | A lossy datagram lane | Datagrams travel beside the byte stream on `vp8channel`, `datachannel` and livekit, so a UDP flow no longer has to pretend to be a stream: vp8channel tags them `OLUD`/`OLUB` and sends them after control frames and before KCP data, livekit publishes them unreliably on its own topic. |
 | SOCKS5 UDP ASSOCIATE | `udp.enabled` puts calls, games and everything else that is datagrams through the relay over that lane, with `udp.max_flows` per side. Off unless asked for. |
 | DNS off the lossy lane | Behind a tun2socks every packet a phone sends arrives as a UDP association, the resolver's queries included, and a query lost under load is a stall the page feels. A datagram for port 53 now goes over a smux stream as TCP DNS (RFC 7766), 64 in flight, five seconds each, the lane as fallback. |

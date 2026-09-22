@@ -81,8 +81,13 @@ type StatsDirection struct {
 	Down uint64 `json:"down"`
 }
 
-// StatsBody is the /stats response: per-key totals plus a grand total.
+// StatsBody is the /stats response: what the carrier session is doing, then
+// per-key totals plus a grand total.
 type StatsBody struct {
+	// Link says whether the server is joined to its room (see LinkState).
+	// It was added beside the totals rather than inside them so a parser
+	// that only knows the totals keeps working.
+	Link  LinkState                 `json:"link"`
 	Keys  map[string]StatsDirection `json:"keys"`
 	Total StatsDirection            `json:"total"`
 }
@@ -100,12 +105,18 @@ func (m *meter) snapshot() StatsBody {
 	return resp
 }
 
-// statsHandler serves GET /stats with the current snapshot as JSON.
-func (m *meter) statsHandler() http.Handler {
+// statsHandler serves GET /stats with the current snapshot as JSON. link is
+// read per request - the carrier state at the moment the agent asked, not at
+// the moment the listener was bound - and must not be nil.
+//
+// ai-generated: the link parameter and the StatsBody field it fills.
+func (m *meter) statsHandler(link func() LinkState) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/stats", func(w http.ResponseWriter, _ *http.Request) {
+		body := m.snapshot()
+		body.Link = link()
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(m.snapshot())
+		_ = json.NewEncoder(w).Encode(body)
 	})
 	return mux
 }

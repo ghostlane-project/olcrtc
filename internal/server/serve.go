@@ -97,8 +97,8 @@ func (s *Server) handleAcceptError(ctx context.Context, session *smux.Session, e
 	hadSession := s.handshakeReady()
 	logger.Infof("server: AcceptStream(data) error - reinstalling session: %v", err)
 	s.reinstallSession(ctx, session)
-	if hadSession && s.ln != nil {
-		s.ln.Reconnect("liveness")
+	if hadSession {
+		s.reconnectLink("liveness")
 	}
 	return false
 }
