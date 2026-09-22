@@ -16,12 +16,15 @@
 
 ## Compatibility matrix
 
-| Transport | telemost | wbstream | jitsi |
-|-----------|:--------:|:--------:|:-----:|
-| datachannel | - | ~ | + |
-| vp8channel | + | + | + |
-| seichannel | - | + | + |
-| videochannel | + | + | + |
+| Transport | telemost | wbstream | jitsi | salutejazz |
+|-----------|:--------:|:--------:|:-----:|:----------:|
+| datachannel | - | ~ | + | + |
+| vp8channel | + | + | + | - |
+| seichannel | - | + | + | - |
+| videochannel | + | + | + | - |
+
+`salutejazz` carries bytes on the room's data channels only: it exchanges no
+video tracks, so the three video transports refuse it.
 
 **Legend:**
 - `+` - works (passes E2E tests)
@@ -49,7 +52,7 @@ Speed in descending order: `datachannel` > `vp8channel` > `seichannel` > `videoc
 | YAML field | What to enter |
 |-----------|-------------|
 | `mode` | `srv` on the server, `cnc` on the client, `gen` to generate a Room ID |
-| `auth.provider` | `telemost`, `wbstream`, `jitsi` or `none` |
+| `auth.provider` | `telemost`, `wbstream`, `jitsi`, `salutejazz` or `none` |
 | `net.transport` | `datachannel`, `vp8channel`, `seichannel` or `videochannel` |
 | `room.id` | Room ID |
 | `crypto.key` or `crypto.key_file` | Encryption key, hex 64 chars. Generate: `openssl rand -hex 32` |
@@ -103,7 +106,9 @@ Use the same traffic settings on both sides.
 ## mode: gen
 
 `gen` is kept for providers that can create rooms through an API.
-Currently the built-in providers do not support room auto-creation through `olcrtc`.
+
+`salutejazz` supports it: `-mode gen` creates a room with one anonymous call and
+prints it as `<code>:<password>`, which is what `room.id` takes.
 
 For `telemost` and `wbstream`, create a room through the service site and paste
 its ID into `room.id`. For `jitsi`, specify the room URL.

@@ -28,3 +28,20 @@ func TestEveryAuthProviderHasItsEngine(t *testing.T) {
 		}
 	}
 }
+
+// salutejazz's auth provider and engine must be wired into RegisterDefaults
+// in every build, the lean one (-tags olcrtc_lean) included. Nothing about an
+// engine is gated by that tag - it takes out the videochannel transport and
+// nothing else - so an engine missing from one tag set is an accident, and
+// olcbox#22 is what such an accident costs: the app failed at session start
+// with "engine new: engine not found".
+func TestSaluteJazzRegistered(t *testing.T) {
+	builtin.RegisterDefaults()
+
+	if got := builtin.Available(); !slices.Contains(got, "salutejazz") {
+		t.Errorf("builtin.Available() = %v, want it to contain %q", got, "salutejazz")
+	}
+	if got := engine.Available(); !slices.Contains(got, "salutejazz") {
+		t.Errorf("engine.Available() = %v, want it to contain %q", got, "salutejazz")
+	}
+}

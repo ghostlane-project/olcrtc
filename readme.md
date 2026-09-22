@@ -59,6 +59,7 @@ to tell its users apart, and a phone is not a server.
 | Phone-sized buffers | KCP windows, packet queues, NACK history, track reads and per-association read buffers sized for a phone instead of a server, selected by a host profile rather than hardcoded. |
 | Failover that follows a moving server | The supervisor re-reads its profile list at every advance (`Config.Reload`; the CLI re-reads the config file) and looks for the profile that just ran, so a client follows a rolling window of rooms: a room added while a session is live is used the moment that session ends, no restart, and a room dropped from the list carries the walk to the new head rather than ending the pass. A room nobody is in - the handshake fails and nothing there sent a frame while it ran - ends the run for a client that has other rooms to try (`EndOnEmptyRoom`); a peer that is there but silent, and a client whose only room this is, keep retrying. A control stream the peer closed on purpose ends that session at once instead of waiting out a liveness window, and leaves the room alone: the same notice arrives from a server whose own provider rebuilt underneath it. IPv6 literals are refused locally once the exit has refused several in a row, and the judgement lapses. |
 | A failover room list on mobile | `AddFailoverRoom` / `ClearFailoverRooms` beside `SetRoom`: the runtime walks the primary and the extras under the supervisor, one pass, re-reading the list at every hop, so the host can append rooms to a live generation; the pass ends with an error and the host's own retry loop takes over. A room that turns out to be empty is given up on only while another is on offer, counted as that room's run starts, so a lone room is retried in place exactly as before failover and a room the host appends is in force from the next start. `SetSessionListener` names the room of each session as it opens, which is how a host that cannot read the log tells a handover from a reconnect. |
+| salutejazz engine and auth provider | The Sber SaluteJazz JSON connector (LiveKit-as-JSON over pion). |
 
 Beside those: a client that tells an old peer, a wrong key and an empty room
 apart instead of timing out on all three; per-lane record numbering and replay
@@ -71,7 +72,7 @@ Changes that belong upstream are prepared as pull requests against it — the
 
 ## Features
 
-- **Providers:** `jitsi`, `telemost`, `wbstream`
+- **Providers:** `jitsi`, `telemost`, `wbstream`, `salutejazz`
 - **Transports:** `datachannel`, `vp8channel`, `seichannel`, `videochannel`
 - **Platforms:** Linux, macOS, Windows, Android (gomobile), embeddable Go library
 - **Public Go packages:** `pkg/olcrtc/client`, `pkg/olcrtc/tunnel`, `pkg/olcrtc/engineconn`

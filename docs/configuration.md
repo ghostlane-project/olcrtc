@@ -52,7 +52,7 @@ Ready-made examples:
 | YAML path | Meaning |
 |---|---|
 | `mode` | `srv`, `cnc` or `gen` |
-| `auth.provider` | `jitsi`, `telemost`, `wbstream`, `none` |
+| `auth.provider` | `jitsi`, `telemost`, `wbstream`, `salutejazz`, `none` |
 | `auth.token` | optional pre-issued provider account token |
 | `room.id` | room ID/URL for the chosen provider |
 | `room.channel` | optional channel ID for peer-routing scenarios |
@@ -244,6 +244,11 @@ A client running under the supervisor gives up on a room nobody is in - its hand
 ## mode: gen
 
 `gen` is kept for providers that implement room creation via an API.
-The current built-in providers (`jitsi`, `telemost`, `wbstream`) do not create rooms
-through `olcrtc`: for `telemost` and `wbstream` create the room on the service site and
-paste it into `room.id`; for `jitsi` specify the room URL.
+
+`salutejazz` is the one built-in provider that does: `-mode gen` creates a room
+with a single anonymous POST and prints it as `<code>:<password>`, which is what
+`room.id` takes.
+
+The others do not create rooms through `olcrtc`: for `telemost` and `wbstream`
+create the room on the service site and paste it into `room.id`; for `jitsi`
+specify the room URL.
