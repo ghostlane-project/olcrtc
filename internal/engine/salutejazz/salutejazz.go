@@ -202,6 +202,17 @@ type generation struct {
 	// pcMu serialises publishing a peer connection against taking both of
 	// them away, the same discipline wsMu gives the socket.
 	pcMu sync.Mutex
+
+	// windowMu owns window, the channel a sender parked on the reliable
+	// publisher lane waits on. It is closed and replaced every time the lane
+	// drains back under its mark, which is how one drain releases all of
+	// them. See Session.awaitSendWindow.
+	windowMu sync.Mutex
+	window   chan struct{}
+
+	// lossyDrops counts the datagrams this attempt threw away because the
+	// lossy lane was over its budget.
+	lossyDrops atomic.Uint64
 }
 
 func newGeneration(api *webrtc.API) *generation {
@@ -213,6 +224,7 @@ func newGeneration(api *webrtc.API) *generation {
 		answer:   make(chan string, 1),
 		pending:  make(map[string][]webrtc.ICECandidateInit),
 		peers:    make(map[string]string),
+		window:   make(chan struct{}),
 	}
 }
 

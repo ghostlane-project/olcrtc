@@ -32,6 +32,18 @@ const (
 	// peerPollInterval is how often WaitForPeer looks at the room. The
 	// roster and the first frame both arrive on other goroutines.
 	peerPollInterval = 50 * time.Millisecond
+
+	// bufferHighWaterMark is how much one publisher channel may hold before
+	// the lane it belongs to is over its budget. pion's DataChannel.Send
+	// never blocks - it appends to an SCTP pending queue with no bound - so
+	// a peer that stops reading turns a writer above into memory here until
+	// the process dies. The number is goolom's, which is the one this
+	// project has run behind.
+	bufferHighWaterMark = 512 * 1024
+
+	// lossyDropLogEvery keeps a lane that is dropping from writing one log
+	// line per packet.
+	lossyDropLogEvery = 100
 )
 
 // The capability interfaces the transport layer type-asserts on. A session
@@ -61,8 +73,10 @@ func (s *Session) SendTo(peerID string, data []byte) error {
 }
 
 // SendDatagram publishes one payload on the lossy lane, to the whole room.
-// The lane is unordered and not retransmitted: a packet that cannot go now
-// is worth nothing later, so a lane that is not up refuses it.
+// The lane is ordered and never retransmitted - LiveKit's own _lossy
+// settings, which startPublisher creates it with - so a packet that cannot go
+// now is worth nothing later: a lane that is not up refuses it, and a lane
+// over its budget drops it.
 func (s *Session) SendDatagram(data []byte) error {
 	return s.publish(data, datagramPublishTopic, nil, false)
 }
@@ -90,6 +104,10 @@ func destinations(peerID string) []string {
 // generation that has been torn down. The window between that check and the
 // write closes itself: teardown closes the peer connections, and pion then
 // refuses the write with an error of its own.
+//
+// A lane over its high-water mark is where the two lanes part: the byte
+// stream waits for room (awaitSendWindow), because a frame it drops is a
+// frame the peer waits for forever, and the datagram lane drops.
 func (s *Session) publish(payload []byte, topic string, dest []string, reliable bool) error {
 	if s.closed.Load() {
 		return ErrSessionClosed
@@ -102,6 +120,14 @@ func (s *Session) publish(payload []byte, topic string, dest []string, reliable 
 	if dc == nil || dc.ReadyState() != webrtc.DataChannelStateOpen {
 		return ErrNoDataChannel
 	}
+	if !reliable {
+		if dc.BufferedAmount() > bufferHighWaterMark {
+			gen.dropLossy()
+			return nil
+		}
+	} else if err := s.awaitSendWindow(gen, dc); err != nil {
+		return err
+	}
 	frame, err := proto.Marshal(dataPacket(payload, topic, dest, reliable))
 	if err != nil {
 		return fmt.Errorf("salutejazz marshal data packet: %w", err)
@@ -110,6 +136,60 @@ func (s *Session) publish(payload []byte, topic string, dest []string, reliable 
 		return fmt.Errorf("salutejazz data channel send: %w", err)
 	}
 	return nil
+}
+
+// awaitSendWindow holds the caller while the reliable lane is over its
+// budget. pion's Send never blocks, so this is the only back-pressure the
+// byte stream has: the caller waits here until the lane's low-water callback
+// says the queue has drained back under the mark (wireChannel arms it).
+//
+// The waiter is taken before the gauge is read. A drain that lands between
+// the two closes that very channel, so the wake it sends cannot be missed by
+// a caller that was about to wait for it.
+//
+// A generation that ends while a caller is parked releases it with
+// ErrSessionClosed: pion runs the low-water callback only while the channel
+// is open, so for a channel that is being closed the wake never comes.
+func (s *Session) awaitSendWindow(gen *generation, dc *webrtc.DataChannel) error {
+	for {
+		window := gen.sendWindow()
+		if dc.BufferedAmount() <= bufferHighWaterMark {
+			return nil
+		}
+		select {
+		case <-window:
+		case <-gen.done:
+			return ErrSessionClosed
+		case <-s.closeCh:
+			return ErrSessionClosed
+		}
+	}
+}
+
+// sendWindow is the channel that is closed the next time the reliable lane
+// drains back under its high-water mark.
+func (g *generation) sendWindow() <-chan struct{} {
+	g.windowMu.Lock()
+	defer g.windowMu.Unlock()
+	return g.window
+}
+
+// openSendWindow releases every sender parked on the reliable lane and arms
+// the next wait. pion calls it from its own goroutine, once per crossing.
+func (g *generation) openSendWindow() {
+	g.windowMu.Lock()
+	defer g.windowMu.Unlock()
+	close(g.window)
+	g.window = make(chan struct{})
+}
+
+// dropLossy records one datagram thrown away because the lossy lane was over
+// its budget, and says so every so often: a lane that is dropping is worth a
+// line in the log, one per packet is not.
+func (g *generation) dropLossy() {
+	if dropped := g.lossyDrops.Add(1); dropped%lossyDropLogEvery == 1 {
+		logger.Debugf("salutejazz: the lossy lane is over its budget, %d datagrams dropped", dropped)
+	}
 }
 
 // dataPacket builds the packet the SFU relays. The service runs LiveKit
@@ -215,15 +295,20 @@ func senderIdentity(packet *livekit.DataPacket) (string, bool) {
 	return identity, identity != ""
 }
 
-// CanSend reports whether the reliable lane is open.
+// CanSend reports whether the reliable lane is open and under its budget. A
+// lane over the mark says no, because a Send issued there would park until it
+// drains, and the layer above would rather hold its bytes than hand them to a
+// queue that is not moving.
 func (s *Session) CanSend() bool {
-	return !s.closed.Load() && laneOpen(s.publisherChannel(true))
+	return !s.closed.Load() && laneReady(s.publisherChannel(true))
 }
 
-// DatagramCanSend reports whether the lossy lane is open. It negotiates
-// alongside the reliable one and can lag it by a moment.
+// DatagramCanSend reports whether the lossy lane is open and under its
+// budget. It negotiates alongside the reliable one and can lag it by a
+// moment. Over the mark it says no, and the datagram writer above polls it:
+// this is what stops the packet before the lane has to drop it.
 func (s *Session) DatagramCanSend() bool {
-	return !s.closed.Load() && laneOpen(s.publisherChannel(false))
+	return !s.closed.Load() && laneReady(s.publisherChannel(false))
 }
 
 // SubscriberCanSend reports whether the subscriber PC is connected. Unlike
@@ -265,6 +350,13 @@ func publisherChannelOf(gen *generation, reliable bool) *webrtc.DataChannel {
 
 func laneOpen(dc *webrtc.DataChannel) bool {
 	return dc != nil && dc.ReadyState() == webrtc.DataChannelStateOpen
+}
+
+// laneReady is what a lane has to be for the layer above to write on it: open,
+// and holding less than one high-water mark of data it has not managed to
+// send.
+func laneReady(dc *webrtc.DataChannel) bool {
+	return laneOpen(dc) && dc.BufferedAmount() <= bufferHighWaterMark
 }
 
 // LocalPeerID is the identity this session is addressed by, which is the

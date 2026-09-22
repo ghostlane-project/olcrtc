@@ -33,6 +33,8 @@ import (
 //	(*fakeSFU).joins()                      every join seen: its payload and group
 //	(*fakeSFU).holdJoins() -> release       stall the join answer, for a race
 //	(*fakeSFU).holdDials() -> release       stall the upgrade, before any frame
+//	(*fakeSFU).holdForward() -> release     stall the relay, so a writer's own
+//	                                        queue fills behind it
 //	(*fakeSFU).refuseJoins(code, message)   answer every join with an error
 //	(*fakeSFU).dialsSeen()                  how many clients have reached it
 //	(*fakeSFU).liveSockets()                sockets still open on its side
@@ -78,10 +80,11 @@ type fakeSFU struct {
 	seen     []seenJoin
 	dials    int
 	live     int
-	// joinGate, while non-nil, stalls every join answer, and dialGate the
-	// upgrade itself.
-	joinGate chan struct{}
-	dialGate chan struct{}
+	// joinGate, while non-nil, stalls every join answer, dialGate the
+	// upgrade itself, and forwardGate the relay of what a client writes.
+	joinGate    chan struct{}
+	dialGate    chan struct{}
+	forwardGate chan struct{}
 	// refusal, while non-nil, is the error every join is answered with.
 	refusal *serverError
 }
@@ -152,6 +155,42 @@ func (f *fakeSFU) holdDials() func() {
 	f.mu.Unlock()
 	var once sync.Once
 	return func() { once.Do(func() { close(gate) }) }
+}
+
+// holdForward stalls the relay of everything a client writes, inside the
+// handler that reads its data channel. The reader stops, the receive window
+// closes, and the writer's own SCTP queue fills - which is the only way a
+// test can reach the high-water mark the lanes are bounded by.
+// The release takes the gate off the fake before it closes it, so calling it
+// twice - the test's own cleanup and the fake's shutdown - is safe.
+func (f *fakeSFU) holdForward() func() {
+	gate := make(chan struct{})
+	f.mu.Lock()
+	f.forwardGate = gate
+	f.mu.Unlock()
+	return f.releaseForward
+}
+
+// releaseForward lets the relay run again, once.
+func (f *fakeSFU) releaseForward() {
+	f.mu.Lock()
+	gate := f.forwardGate
+	f.forwardGate = nil
+	f.mu.Unlock()
+	if gate != nil {
+		close(gate)
+	}
+}
+
+// awaitForwardGate blocks while holdForward is in force.
+func (f *fakeSFU) awaitForwardGate() {
+	f.mu.Lock()
+	gate := f.forwardGate
+	f.mu.Unlock()
+	if gate == nil {
+		return
+	}
+	<-gate
 }
 
 // refuseJoins answers every join with an error frame instead of a
@@ -235,8 +274,11 @@ func (f *fakeSFU) sendError(code, message string) {
 	}
 }
 
-// shutdown ends every peer: sockets first, then their peer connections.
+// shutdown ends every peer: sockets first, then their peer connections. A
+// relay a test left held is released, so no handler outlives the test blocked
+// on a gate.
 func (f *fakeSFU) shutdown() {
+	f.releaseForward()
 	f.dropAll()
 	for _, peer := range f.snapshot() {
 		peer.closePeerConnections()
@@ -300,6 +342,7 @@ func (f *fakeSFU) markPublisherOffer() {
 // relays what a publisher writes. Receivers get it on the channels the fake
 // created on their subscriber PC.
 func (f *fakeSFU) forward(from *fakePeer, frame []byte) {
+	f.awaitForwardGate()
 	var packet livekit.DataPacket
 	if err := proto.Unmarshal(frame, &packet); err != nil {
 		f.fail("forward unmarshal", err)

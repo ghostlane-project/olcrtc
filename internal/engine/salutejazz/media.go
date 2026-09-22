@@ -211,6 +211,13 @@ func (s *Session) wireChannel(gen *generation, dc *webrtc.DataChannel, publisher
 	switch {
 	case publisher && label == labelReliable:
 		gen.pubRel.Store(dc)
+		// The wake for a sender parked over the high-water mark. The
+		// threshold is the mark itself, so the callback fires exactly as the
+		// queue falls back through it, which is when a parked sender may
+		// write again. pion keeps both until the channel opens and applies
+		// them then, so arming them here is enough.
+		dc.SetBufferedAmountLowThreshold(bufferHighWaterMark)
+		dc.OnBufferedAmountLow(gen.openSendWindow)
 	case publisher && label == labelLossy:
 		gen.pubLossy.Store(dc)
 	case label == labelReliable:
