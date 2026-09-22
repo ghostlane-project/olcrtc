@@ -202,8 +202,10 @@ func (s *Session) awaitPublisherAnswer(gen *generation, pc *webrtc.PeerConnectio
 }
 
 // wireChannel publishes one data channel on the session and reports the lane
-// as ready once the reliable one opens. The byte stream attaches to the
-// stored channels; this is the seam between negotiation and data.
+// as ready once the reliable one opens. This is the seam between negotiation
+// and data: the byte stream sends on the publisher's channels, and only the
+// subscriber's carry what the SFU relays back, so only those get a receive
+// path (see data.go).
 func (s *Session) wireChannel(gen *generation, dc *webrtc.DataChannel, publisher bool) {
 	label := dc.Label()
 	switch {
@@ -218,6 +220,9 @@ func (s *Session) wireChannel(gen *generation, dc *webrtc.DataChannel, publisher
 	default:
 		logger.Debugf("salutejazz: unexpected channel %q", label)
 		return
+	}
+	if !publisher {
+		s.receiveOn(gen, dc)
 	}
 	dc.OnOpen(func() {
 		logger.Debugf("salutejazz: channel %q open (publisher=%v)", label, publisher)

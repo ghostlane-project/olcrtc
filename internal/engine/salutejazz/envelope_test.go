@@ -3,11 +3,13 @@ package salutejazz
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"regexp"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/livekit/protocol/livekit"
 	"github.com/pion/webrtc/v4"
 
 	"github.com/openlibrecommunity/olcrtc/internal/engine"
@@ -529,4 +531,258 @@ func newIdleSession(t *testing.T) *Session {
 	}
 	t.Cleanup(func() { _ = sess.Close() })
 	return sess.(*Session)
+}
+
+// TestDataLanesRoundTripThroughTheFake drives the data plane end to end
+// through the fake's relay: a reliable broadcast, a reliable packet
+// addressed to one identity, and a datagram on the lossy lane, every one of
+// them written on the publisher peer connection and read on the subscriber.
+func TestDataLanesRoundTripThroughTheFake(t *testing.T) {
+	url, fake := newFakeConnector(t)
+	mk := func(name string) (engine.Session, chan []byte, chan string) {
+		stream := make(chan []byte, 8)
+		peer := make(chan string, 8)
+		s, err := New(context.Background(), engine.Config{URL: url, Token: "passw0rd",
+			Name: name, Extra: map[string]string{"roomID": "abc123"},
+			OnPeerData:     func(p string, d []byte) { peer <- p; stream <- d },
+			OnPeerDatagram: func(p string, d []byte) { peer <- p + "/dg"; stream <- d }})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = s.Close() })
+		return s, stream, peer
+	}
+	a, _, _ := mk("a")
+	if err := a.Connect(context.Background()); err != nil {
+		t.Fatalf("connect a: %v (fake: %s)", err, fake.lastError())
+	}
+	b, bs, bp := mk("b")
+	if err := b.Connect(context.Background()); err != nil {
+		t.Fatalf("connect b: %v (fake: %s)", err, fake.lastError())
+	}
+	// reliable stream, broadcast and targeted
+	if err := a.Send([]byte("hello-stream")); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-bs; string(got) != "hello-stream" {
+		t.Fatalf("stream %q", got)
+	}
+	<-bp
+	if err := a.(engine.PeerSession).SendTo(b.(*Session).localIdentity(), []byte("hello-targeted")); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-bs; string(got) != "hello-targeted" {
+		t.Fatalf("targeted %q", got)
+	}
+	// lossy lane on the datagram topic
+	if err := a.(engine.DatagramSession).SendDatagram([]byte("hello-dgram")); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-bs; string(got) != "hello-dgram" {
+		t.Fatalf("dgram %q", got)
+	}
+	if failure := fake.lastError(); failure != "" {
+		t.Fatalf("fake SFU error: %s", failure)
+	}
+}
+
+// TestTargetedDeliveryAndTopicDispatch pins the two things a round trip
+// between two participants cannot show: a packet addressed to one identity
+// reaches that one and nobody else, and the lane a payload arrives on is
+// decided by its topic, not by the channel it came in on.
+func TestTargetedDeliveryAndTopicDispatch(t *testing.T) {
+	url, fake := newFakeConnector(t)
+	sender := connectSession(t, url, "sender")
+	wanted, wantedIn := connectPeer(t, url, "wanted")
+	other, otherIn := connectPeer(t, url, "other")
+
+	// Everyone has to be in the room, on both lanes, before the first
+	// addressed packet: a participant the SFU has not listed yet cannot be
+	// addressed, and a lane that has not opened refuses what it is given.
+	for _, s := range []*Session{sender, wanted, other} {
+		waitFor(t, 5*time.Second, "the roster to name both peers and both lanes to open", func() bool {
+			return len(s.remoteIdentities()) == 2 && s.CanSend() && s.DatagramCanSend()
+		})
+	}
+
+	if err := sender.SendTo(wanted.localIdentity(), []byte("for-one")); err != nil {
+		t.Fatal(err)
+	}
+	got := receive(t, wantedIn, "the addressed payload")
+	if string(got.payload) != "for-one" || got.lane != "stream" {
+		t.Fatalf("addressed packet = %q on %s, want %q on stream", got.payload, got.lane, "for-one")
+	}
+	if got.sender != sender.localIdentity() {
+		t.Fatalf("sender = %q, want %q", got.sender, sender.localIdentity())
+	}
+
+	// The datagram is a broadcast, so it reaches the other participant too:
+	// waiting for it there is what proves the addressed packet before it
+	// did not, rather than merely being late.
+	if err := sender.SendDatagram([]byte("for-all")); err != nil {
+		t.Fatal(err)
+	}
+	if dgram := receive(t, otherIn, "the broadcast datagram"); string(dgram.payload) != "for-all" {
+		t.Fatalf("other received %q before the datagram", dgram.payload)
+	} else if dgram.lane != "datagram" {
+		t.Fatalf("datagram arrived on the %s lane", dgram.lane)
+	}
+	if dgram := receive(t, wantedIn, "the broadcast datagram"); dgram.lane != "datagram" {
+		t.Fatalf("datagram arrived on the %s lane", dgram.lane)
+	}
+	if failure := fake.lastError(); failure != "" {
+		t.Fatalf("fake SFU error: %s", failure)
+	}
+}
+
+// TestPeerBindingBelongsToTheConnectionAttempt covers the peer interfaces:
+// the local id is the identity the join-response named, a binding is
+// refused without one, and neither ResetPeer nor a rejoin leaves a stale
+// binding behind.
+func TestPeerBindingBelongsToTheConnectionAttempt(t *testing.T) {
+	url, fake := newFakeConnector(t)
+	sess := connectSession(t, url, "binding")
+	peer := connectSession(t, url, "peer")
+
+	if id := sess.LocalPeerID(); id == "" || id != sess.localIdentity() {
+		t.Fatalf("local peer id %q, identity %q", id, sess.localIdentity())
+	}
+	if err := sess.ConfirmPeer(""); !errors.Is(err, engine.ErrInvalidPeerID) {
+		t.Fatalf("ConfirmPeer(\"\") = %v, want %v", err, engine.ErrInvalidPeerID)
+	}
+	if err := sess.ConfirmPeer(peer.localIdentity()); err != nil {
+		t.Fatal(err)
+	}
+	if bound := loadString(&sess.current().confirmed); bound != peer.localIdentity() {
+		t.Fatalf("bound to %q, want %q", bound, peer.localIdentity())
+	}
+	sess.ResetPeer()
+	if bound := loadString(&sess.current().confirmed); bound != "" {
+		t.Fatalf("ResetPeer left %q bound", bound)
+	}
+
+	// The roster alone releases WaitForPeer: the other session is in the room.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := sess.WaitForPeer(ctx); err != nil {
+		t.Fatalf("wait for peer: %v (fake: %s)", err, fake.lastError())
+	}
+
+	// A rejoin is a fresh connection attempt, and the binding does not
+	// survive it: the SFU issues new participant ids.
+	if err := sess.ConfirmPeer(peer.localIdentity()); err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.reconnect(context.Background()); err != nil {
+		t.Fatalf("reconnect: %v (fake: %s)", err, fake.lastError())
+	}
+	if bound := loadString(&sess.current().confirmed); bound != "" {
+		t.Fatalf("the rejoin kept the binding %q", bound)
+	}
+	if failure := fake.lastError(); failure != "" {
+		t.Fatalf("fake SFU error: %s", failure)
+	}
+}
+
+// TestTheDataPlaneRefusesWhatItCannotCarry pins the discipline the reviews
+// asked for: nothing is written to a generation that is gone, and a lane
+// that has not negotiated says so instead of pretending.
+func TestTheDataPlaneRefusesWhatItCannotCarry(t *testing.T) {
+	idle := newIdleSession(t)
+	for what, err := range map[string]error{
+		"Send":           idle.Send([]byte("x")),
+		"SendTo":         idle.SendTo("someone", []byte("x")),
+		"SendDatagram":   idle.SendDatagram([]byte("x")),
+		"SendDatagramTo": idle.SendDatagramTo("someone", []byte("x")),
+	} {
+		if !errors.Is(err, ErrNoDataChannel) {
+			t.Fatalf("%s on a session that never connected = %v, want %v", what, err, ErrNoDataChannel)
+		}
+	}
+	if idle.CanSend() || idle.DatagramCanSend() || idle.GetBufferedAmount() != 0 {
+		t.Fatal("a session that never connected reports a live lane")
+	}
+
+	url, _ := newFakeConnector(t)
+	sess := connectSession(t, url, "refuses")
+	waitFor(t, 5*time.Second, "both lanes open", func() bool {
+		return sess.CanSend() && sess.DatagramCanSend()
+	})
+	if err := sess.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for what, err := range map[string]error{
+		"Send":         sess.Send([]byte("x")),
+		"SendDatagram": sess.SendDatagram([]byte("x")),
+	} {
+		if !errors.Is(err, ErrSessionClosed) {
+			t.Fatalf("%s after Close = %v, want %v", what, err, ErrSessionClosed)
+		}
+	}
+	if sess.CanSend() || sess.DatagramCanSend() {
+		t.Fatal("a closed session reports a live lane")
+	}
+}
+
+// TestSenderIdentityReadsEveryStampLiveKitUses covers the fallback chain:
+// 1.5.3 stamps the user packet and drops to the sid when it has no identity
+// for a participant, later versions stamp the packet around it.
+func TestSenderIdentityReadsEveryStampLiveKitUses(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		packet *livekit.DataPacket
+		want   string
+	}{
+		{"user identity", &livekit.DataPacket{Value: &livekit.DataPacket_User{
+			User: &livekit.UserPacket{ParticipantIdentity: "who", ParticipantSid: "PA_who"}}}, "who"},
+		{"user sid", &livekit.DataPacket{Value: &livekit.DataPacket_User{
+			User: &livekit.UserPacket{ParticipantSid: "PA_who"}}}, "PA_who"},
+		{"packet identity", &livekit.DataPacket{ParticipantIdentity: "who",
+			Value: &livekit.DataPacket_User{User: &livekit.UserPacket{}}}, "who"},
+		{"anonymous", &livekit.DataPacket{Value: &livekit.DataPacket_User{
+			User: &livekit.UserPacket{}}}, ""},
+	} {
+		if got := senderIdentity(tc.packet); got != tc.want {
+			t.Fatalf("%s: sender = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// inbound is one payload as a session's callbacks delivered it.
+type inbound struct {
+	lane    string
+	sender  string
+	payload []byte
+}
+
+// connectPeer joins the fake with both per-peer callbacks wired to one
+// queue, so a test can tell the stream lane from the datagram lane.
+func connectPeer(t *testing.T, url, name string) (*Session, chan inbound) {
+	t.Helper()
+	in := make(chan inbound, 16)
+	sess, err := New(context.Background(), engine.Config{
+		URL: url, Token: "passw0rd", Name: name,
+		Extra:          map[string]string{"roomID": "abc123"},
+		OnPeerData:     func(p string, d []byte) { in <- inbound{"stream", p, d} },
+		OnPeerDatagram: func(p string, d []byte) { in <- inbound{"datagram", p, d} },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sess.Close() })
+	if err := sess.Connect(context.Background()); err != nil {
+		t.Fatalf("connect %s: %v", name, err)
+	}
+	return sess.(*Session), in
+}
+
+func receive(t *testing.T, in chan inbound, what string) inbound {
+	t.Helper()
+	select {
+	case got := <-in:
+		return got
+	case <-time.After(10 * time.Second):
+		t.Fatalf("timeout waiting for %s", what)
+		return inbound{}
+	}
 }

@@ -182,6 +182,12 @@ type generation struct {
 	peersMu sync.Mutex
 	peers   map[string]string
 
+	// confirmed is the one remote identity the tunnel handshake has
+	// authenticated, and it belongs to this connection attempt: the SFU
+	// hands every connection fresh participant ids, so a rejoin starts
+	// without a binding. See Session.ConfirmPeer.
+	confirmed atomic.Pointer[string]
+
 	// pcMu serialises publishing a peer connection against taking both of
 	// them away, the same discipline wsMu gives the socket.
 	pcMu sync.Mutex
@@ -529,51 +535,6 @@ func (s *Session) queueReconnect() {
 func (s *Session) signalEnded(reason string) {
 	s.closed.Store(true)
 	s.SignalEnded(reason)
-}
-
-// Send carries the byte stream. The LiveKit data packet framing the SFU
-// expects on these channels is wired in data.go; a session that has not
-// negotiated its publisher lane has nowhere to put the bytes.
-func (s *Session) Send([]byte) error {
-	return ErrNoDataChannel
-}
-
-// CanSend reports whether the publisher lane is open.
-func (s *Session) CanSend() bool {
-	if s.closed.Load() {
-		return false
-	}
-	dc := s.publisherChannel(true)
-	return dc != nil && dc.ReadyState() == webrtc.DataChannelStateOpen
-}
-
-// SubscriberCanSend reports whether the subscriber PC is connected. Unlike
-// CanSend it does not wait for the publisher PC, which negotiates second.
-func (s *Session) SubscriberCanSend() bool {
-	return !s.closed.Load() && s.subscriberConnected()
-}
-
-// GetBufferedAmount is what both publisher channels still hold.
-func (s *Session) GetBufferedAmount() uint64 {
-	var buffered uint64
-	for _, dc := range []*webrtc.DataChannel{s.publisherChannel(true), s.publisherChannel(false)} {
-		if dc != nil {
-			buffered += dc.BufferedAmount()
-		}
-	}
-	return buffered
-}
-
-// publisherChannel returns the live publisher channel of one lane.
-func (s *Session) publisherChannel(reliable bool) *webrtc.DataChannel {
-	gen := s.current()
-	if gen == nil {
-		return nil
-	}
-	if reliable {
-		return gen.pubRel.Load()
-	}
-	return gen.pubLossy.Load()
 }
 
 func (s *Session) current() *generation { return s.cur.Load() }
