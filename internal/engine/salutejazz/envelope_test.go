@@ -11,6 +11,7 @@ import (
 
 	"github.com/livekit/protocol/livekit"
 	"github.com/pion/webrtc/v4"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/openlibrecommunity/olcrtc/internal/engine"
 )
@@ -539,47 +540,35 @@ func newIdleSession(t *testing.T) *Session {
 // them written on the publisher peer connection and read on the subscriber.
 func TestDataLanesRoundTripThroughTheFake(t *testing.T) {
 	url, fake := newFakeConnector(t)
-	mk := func(name string) (engine.Session, chan []byte, chan string) {
-		stream := make(chan []byte, 8)
-		peer := make(chan string, 8)
-		s, err := New(context.Background(), engine.Config{URL: url, Token: "passw0rd",
-			Name: name, Extra: map[string]string{"roomID": "abc123"},
-			OnPeerData:     func(p string, d []byte) { peer <- p; stream <- d },
-			OnPeerDatagram: func(p string, d []byte) { peer <- p + "/dg"; stream <- d }})
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = s.Close() })
-		return s, stream, peer
+	sender := connectSession(t, url, "a")
+	receiver, in := connectPeer(t, url, "b")
+
+	// A lane that has not opened refuses what it is given, and a
+	// participant the roster has not named yet cannot be addressed.
+	for _, s := range []*Session{sender, receiver} {
+		waitFor(t, 5*time.Second, "the roster to name the peer and both lanes to open", func() bool {
+			return len(s.remoteIdentities()) == 1 && s.CanSend() && s.DatagramCanSend()
+		})
 	}
-	a, _, _ := mk("a")
-	if err := a.Connect(context.Background()); err != nil {
-		t.Fatalf("connect a: %v (fake: %s)", err, fake.lastError())
-	}
-	b, bs, bp := mk("b")
-	if err := b.Connect(context.Background()); err != nil {
-		t.Fatalf("connect b: %v (fake: %s)", err, fake.lastError())
-	}
-	// reliable stream, broadcast and targeted
-	if err := a.Send([]byte("hello-stream")); err != nil {
+
+	if err := sender.Send([]byte("hello-stream")); err != nil {
 		t.Fatal(err)
 	}
-	if got := <-bs; string(got) != "hello-stream" {
-		t.Fatalf("stream %q", got)
+	if got := receive(t, in, "the broadcast payload"); string(got.payload) != "hello-stream" {
+		t.Fatalf("stream %q", got.payload)
 	}
-	<-bp
-	if err := a.(engine.PeerSession).SendTo(b.(*Session).localIdentity(), []byte("hello-targeted")); err != nil {
+	if err := sender.SendTo(receiver.localIdentity(), []byte("hello-targeted")); err != nil {
 		t.Fatal(err)
 	}
-	if got := <-bs; string(got) != "hello-targeted" {
-		t.Fatalf("targeted %q", got)
+	if got := receive(t, in, "the addressed payload"); string(got.payload) != "hello-targeted" {
+		t.Fatalf("targeted %q", got.payload)
 	}
-	// lossy lane on the datagram topic
-	if err := a.(engine.DatagramSession).SendDatagram([]byte("hello-dgram")); err != nil {
+	if err := sender.SendDatagram([]byte("hello-dgram")); err != nil {
 		t.Fatal(err)
 	}
-	if got := <-bs; string(got) != "hello-dgram" {
-		t.Fatalf("dgram %q", got)
+	got := receive(t, in, "the datagram")
+	if string(got.payload) != "hello-dgram" || got.lane != "datagram" {
+		t.Fatalf("datagram %q on the %s lane", got.payload, got.lane)
 	}
 	if failure := fake.lastError(); failure != "" {
 		t.Fatalf("fake SFU error: %s", failure)
@@ -726,24 +715,30 @@ func TestTheDataPlaneRefusesWhatItCannotCarry(t *testing.T) {
 
 // TestSenderIdentityReadsEveryStampLiveKitUses covers the fallback chain:
 // 1.5.3 stamps the user packet and drops to the sid when it has no identity
-// for a participant, later versions stamp the packet around it.
+// for a participant, later versions stamp the packet around it. Only the
+// identity stamps name a participant the room can address.
 func TestSenderIdentityReadsEveryStampLiveKitUses(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		packet *livekit.DataPacket
-		want   string
+		name     string
+		packet   *livekit.DataPacket
+		want     string
+		identity bool
 	}{
 		{"user identity", &livekit.DataPacket{Value: &livekit.DataPacket_User{
-			User: &livekit.UserPacket{ParticipantIdentity: "who", ParticipantSid: "PA_who"}}}, "who"},
+			User: &livekit.UserPacket{ParticipantIdentity: "who", ParticipantSid: "PA_who"}}}, "who", true},
 		{"user sid", &livekit.DataPacket{Value: &livekit.DataPacket_User{
-			User: &livekit.UserPacket{ParticipantSid: "PA_who"}}}, "PA_who"},
+			User: &livekit.UserPacket{ParticipantSid: "PA_who"}}}, "PA_who", false},
 		{"packet identity", &livekit.DataPacket{ParticipantIdentity: "who",
-			Value: &livekit.DataPacket_User{User: &livekit.UserPacket{}}}, "who"},
+			Value: &livekit.DataPacket_User{User: &livekit.UserPacket{}}}, "who", true},
 		{"anonymous", &livekit.DataPacket{Value: &livekit.DataPacket_User{
-			User: &livekit.UserPacket{}}}, ""},
+			User: &livekit.UserPacket{}}}, "", false},
 	} {
-		if got := senderIdentity(tc.packet); got != tc.want {
+		got, byIdentity := senderIdentity(tc.packet)
+		if got != tc.want {
 			t.Fatalf("%s: sender = %q, want %q", tc.name, got, tc.want)
+		}
+		if byIdentity != tc.identity {
+			t.Fatalf("%s: named by identity = %v, want %v", tc.name, byIdentity, tc.identity)
 		}
 	}
 }
@@ -785,4 +780,129 @@ func receive(t *testing.T, in chan inbound, what string) inbound {
 		t.Fatalf("timeout waiting for %s", what)
 		return inbound{}
 	}
+}
+
+// TestLanesAgreeWithTheGenerationTheyBelongTo pins the first of the Task 4
+// review's findings: teardown closes the generation before it closes the
+// peer connections, and in that window Send already refuses while the
+// channel is still open. The predicates the transport layer asks before it
+// writes must refuse there too, or it is told to send on a lane that is
+// gone.
+func TestLanesAgreeWithTheGenerationTheyBelongTo(t *testing.T) {
+	url, _ := newFakeConnector(t)
+	sess := connectSession(t, url, "lanes")
+	waitFor(t, 5*time.Second, "both lanes open", func() bool {
+		return sess.CanSend() && sess.DatagramCanSend()
+	})
+
+	// The first step of teardown, on its own: the generation is gone, its
+	// channels are not closed yet.
+	engine.CloseSignal(sess.current().done)
+
+	if err := sess.Send([]byte("x")); !errors.Is(err, ErrNoDataChannel) {
+		t.Fatalf("Send on a torn-down attempt = %v, want %v", err, ErrNoDataChannel)
+	}
+	if sess.CanSend() || sess.DatagramCanSend() {
+		t.Fatalf("a torn-down attempt reports open lanes: reliable=%v lossy=%v",
+			sess.CanSend(), sess.DatagramCanSend())
+	}
+	if buffered := sess.GetBufferedAmount(); buffered != 0 {
+		t.Fatalf("a torn-down attempt reports %d buffered bytes", buffered)
+	}
+}
+
+// TestOurOwnPacketIsNotDeliveredBack pins the echo filter: a packet stamped
+// with this session's own identity is ours, however it came back, and the
+// tunnel above must never read its own bytes.
+func TestOurOwnPacketIsNotDeliveredBack(t *testing.T) {
+	sess, in := newCallbackSession(t)
+	gen := newGeneration(nil)
+	storeString(&gen.identity, "self")
+
+	sess.handleDataPacket(gen, userPacket(t, "self", "", []byte("mine")))
+	sess.handleDataPacket(gen, userPacket(t, "other", "", []byte("theirs")))
+
+	got := receive(t, in, "the remote payload")
+	if string(got.payload) != "theirs" || got.sender != "other" {
+		t.Fatalf("delivered %q from %q, want %q from %q", got.payload, got.sender, "theirs", "other")
+	}
+	select {
+	case extra := <-in:
+		t.Fatalf("a second payload %q from %q was delivered", extra.payload, extra.sender)
+	default:
+	}
+	if peers := gen.remoteIdentities(); len(peers) != 1 || peers[0] != "other" {
+		t.Fatalf("roster = %v, want just the remote identity", peers)
+	}
+}
+
+// TestASidIsNotARosterEntry pins the second finding: LiveKit falls back to
+// the participant sid when it has no identity for a sender, and a sid names
+// nobody a packet can be addressed to. It is reported as the sender, so the
+// payload still reaches the callbacks, and it never enters the roster.
+func TestASidIsNotARosterEntry(t *testing.T) {
+	sess, in := newCallbackSession(t)
+	gen := newGeneration(nil)
+	storeString(&gen.identity, "self")
+
+	sess.handleDataPacket(gen, sidPacket(t, "PA_unnamed", []byte("payload")))
+
+	got := receive(t, in, "the payload from an unnamed participant")
+	if got.sender != "PA_unnamed" {
+		t.Fatalf("sender = %q, want the sid fallback", got.sender)
+	}
+	if peers := gen.remoteIdentities(); len(peers) != 0 {
+		t.Fatalf("roster = %v, want no entry for a sid", peers)
+	}
+}
+
+// newCallbackSession is a session that never connects, with both per-peer
+// callbacks wired to one queue: enough to drive the receive path directly.
+func newCallbackSession(t *testing.T) (*Session, chan inbound) {
+	t.Helper()
+	in := make(chan inbound, 8)
+	sess, err := New(context.Background(), engine.Config{
+		URL: "wss://example.invalid/connector", Token: "passw0rd", Name: "callbacks",
+		Extra:          map[string]string{"roomID": "abc123"},
+		OnPeerData:     func(p string, d []byte) { in <- inbound{"stream", p, d} },
+		OnPeerDatagram: func(p string, d []byte) { in <- inbound{"datagram", p, d} },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sess.Close() })
+	return sess.(*Session), in
+}
+
+// userPacket is one relayed packet as LiveKit 1.5.3 stamps it: the sender on
+// the user packet, under the identity the room addresses it by.
+func userPacket(t *testing.T, sender, topic string, payload []byte) []byte {
+	t.Helper()
+	user := &livekit.UserPacket{
+		Payload:             payload,
+		ParticipantIdentity: sender,
+		ParticipantSid:      "PA_" + sender,
+	}
+	if topic != "" {
+		user.Topic = &topic
+	}
+	return marshalPacket(t, &livekit.DataPacket{Value: &livekit.DataPacket_User{User: user}})
+}
+
+// sidPacket is a packet from a participant the SFU has no identity for: only
+// the sid is stamped.
+func sidPacket(t *testing.T, sid string, payload []byte) []byte {
+	t.Helper()
+	return marshalPacket(t, &livekit.DataPacket{Value: &livekit.DataPacket_User{
+		User: &livekit.UserPacket{Payload: payload, ParticipantSid: sid},
+	}})
+}
+
+func marshalPacket(t *testing.T, packet *livekit.DataPacket) []byte {
+	t.Helper()
+	frame, err := proto.Marshal(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return frame
 }

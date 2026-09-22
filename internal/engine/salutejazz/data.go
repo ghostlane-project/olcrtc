@@ -163,8 +163,21 @@ func (s *Session) handleDataPacket(gen *generation, frame []byte) {
 		// room puts on these channels. None of it is ours.
 		return
 	}
-	sender := senderIdentity(&packet)
-	gen.notePeer(sender)
+	sender, byIdentity := senderIdentity(&packet)
+	if sender != "" && sender == gen.localIdentity() {
+		// Our own payload, relayed back to us. Nothing in the room should
+		// send it, but a tunnel that reads its own bytes answers its own
+		// handshake, so a packet stamped with this session's identity is
+		// dropped wherever it came from.
+		return
+	}
+	if byIdentity {
+		// Only an identity belongs in the roster. The sid fallback below
+		// names the same participant under an id no packet can be addressed
+		// to, and a roster entry under it would hand WaitForPeer and every
+		// caller of the peer list a participant they cannot reach.
+		gen.notePeer(sender)
+	}
 	if user.GetTopic() == datagramPublishTopic {
 		s.deliver(sender, user.GetPayload(), s.onPeerDatagram, s.onDatagram)
 		return
@@ -184,19 +197,22 @@ func (s *Session) deliver(sender string, payload []byte, toPeer func(string, []b
 	}
 }
 
-// senderIdentity is who sent one data packet. LiveKit 1.5.3, which the
-// service runs, stamps the user packet and falls back to the sid for a
-// participant it has no identity for; later versions stamp the packet
-// around it instead.
-func senderIdentity(packet *livekit.DataPacket) string {
+// senderIdentity is who sent one data packet, and whether the room named
+// them by identity. LiveKit 1.5.3, which the service runs, stamps the user
+// packet and falls back to the sid for a participant it has no identity for;
+// later versions stamp the packet around it instead. The sid names the same
+// participant, so it is reported as the sender, but it is not an identity
+// and the roster does not take it.
+func senderIdentity(packet *livekit.DataPacket) (string, bool) {
 	user := packet.GetUser()
 	if identity := user.GetParticipantIdentity(); identity != "" { //nolint:staticcheck // 1.5.3 wire
-		return identity
+		return identity, true
 	}
 	if sid := user.GetParticipantSid(); sid != "" { //nolint:staticcheck // 1.5.3 wire
-		return sid
+		return sid, false
 	}
-	return packet.GetParticipantIdentity()
+	identity := packet.GetParticipantIdentity()
+	return identity, identity != ""
 }
 
 // CanSend reports whether the reliable lane is open.
@@ -227,10 +243,14 @@ func (s *Session) GetBufferedAmount() uint64 {
 	return buffered
 }
 
-// publisherChannel returns the live publisher channel of one lane.
+// publisherChannel returns the live publisher channel of one lane. A
+// generation that is gone has no lane, whatever state its channels are still
+// in: teardown ends the generation before pion closes them, and in that
+// window publish already refuses. Everything that reports on a lane reads it
+// through here, so the predicates and the write agree.
 func (s *Session) publisherChannel(reliable bool) *webrtc.DataChannel {
 	gen := s.current()
-	if gen == nil {
+	if gen == nil || gen.isDone() {
 		return nil
 	}
 	return publisherChannelOf(gen, reliable)
