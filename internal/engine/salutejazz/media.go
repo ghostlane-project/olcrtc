@@ -2,6 +2,7 @@ package salutejazz
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/pion/interceptor"
@@ -278,35 +279,40 @@ func (s *Session) sendICE(gen *generation, target, ufrag string, candidate webrt
 // localICEUfrag is the ICE username fragment one peer connection gathers
 // under. pion leaves it out of ICECandidate.ToJSON - that renders the
 // candidate line, the mid and the m-line index and nothing else - so it is
-// read off the transport instead, which is where pion keeps the credentials
-// it put in the local description.
+// read from the local description, which is the same statement of it that
+// went to the SFU in the offer or the answer.
 //
-// Every step down to the ICE transport may be missing on a peer connection
-// that is being torn down, and a candidate is worth sending without the
-// fragment rather than not at all, so nothing here fails: it answers with
-// what it has.
+// The transport's own GetLocalParameters is the other way to ask, and it is
+// not safe here: it reads the ICE transport's gatherer without the lock that
+// ICETransport.Start writes it under, and the race detector catches it
+// against the transport starting on a remote description. The description is
+// read under the peer connection's lock, and a candidate is never gathered
+// before it is set.
+//
+// A peer connection that has none yet, or is being taken apart, answers with
+// nothing: a candidate is worth sending without the fragment rather than not
+// at all.
 func localICEUfrag(pc *webrtc.PeerConnection) string {
 	if pc == nil {
 		return ""
 	}
-	sctp := pc.SCTP()
-	if sctp == nil {
+	desc := pc.LocalDescription()
+	if desc == nil {
 		return ""
 	}
-	dtls := sctp.Transport()
-	if dtls == nil {
-		return ""
+	return ufragFromSDP(desc.SDP)
+}
+
+// ufragFromSDP reads the a=ice-ufrag attribute of a description. Both peer
+// connections carry one m-line, the data channel's, so there is one fragment
+// in the description and the first is it.
+func ufragFromSDP(sdp string) string {
+	for line := range strings.Lines(sdp) {
+		if rest, found := strings.CutPrefix(strings.TrimSpace(line), "a=ice-ufrag:"); found {
+			return strings.TrimSpace(rest)
+		}
 	}
-	ice := dtls.ICETransport()
-	if ice == nil {
-		return ""
-	}
-	params, err := ice.GetLocalParameters()
-	if err != nil {
-		logger.Debugf("salutejazz: local ICE parameters: %v", err)
-		return ""
-	}
-	return params.UsernameFragment
+	return ""
 }
 
 // addRemoteICE applies the candidates one rtc:ice frame carries.

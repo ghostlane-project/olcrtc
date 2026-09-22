@@ -237,15 +237,14 @@ type generation struct {
 
 func newGeneration(api *webrtc.API) *generation {
 	return &generation{
-		api:      api,
-		done:     make(chan struct{}),
-		subReady: make(chan struct{}),
-		pubReady: make(chan struct{}),
-		answer:   make(chan string, 1),
-		pending:  make(map[string][]webrtc.ICECandidateInit),
-		peers:    make(map[string]string),
-		window:   make(chan struct{}),
-
+		api:         api,
+		done:        make(chan struct{}),
+		subReady:    make(chan struct{}),
+		pubReady:    make(chan struct{}),
+		answer:      make(chan string, 1),
+		pending:     make(map[string][]webrtc.ICECandidateInit),
+		peers:       make(map[string]string),
+		window:      make(chan struct{}),
 		pongWaiters: make(map[int64]chan struct{}),
 	}
 }

@@ -105,12 +105,13 @@ type roomState struct {
 // participantLeft is the payload of a participant-left event: the participant
 // the connector is reporting gone.
 //
-// The capture has no such frame - its room held one participant - so the two
-// shapes read here are the two the connector uses for a participant id
-// elsewhere: the bare field, as the envelope carries it, and the participant
-// object join-response answers with. A frame that matches neither leaves the
-// roster alone, and the identity a later roster update reports DISCONNECTED
-// removes it anyway.
+// The capture has no such frame - its room held one participant - so what is
+// read here are the shapes the connector uses for a participant id elsewhere:
+// the envelope's own participantId (handleParticipantLeft looks there first),
+// the same field in the payload, and the participant object join-response
+// answers with. A frame that matches none of them leaves the roster alone,
+// and the identity a later roster update reports DISCONNECTED removes it
+// anyway.
 type participantLeft struct {
 	ParticipantID string `json:"participantId"` //nolint:tagliatelle // connector wire is camelCase
 	Participant   struct {
@@ -156,9 +157,9 @@ type sdpDescription struct {
 // sends an sdpMLineIndex without an sdpMid; both sides carry the target the
 // candidate belongs to. Every candidate the official client sends carries the
 // ICE fragment it was gathered under, which pion leaves out of
-// ICECandidate.ToJSON and sendICE reads off the transport; the server's own
-// candidates arrive without one, so the field is omitted rather than sent as
-// null.
+// ICECandidate.ToJSON and sendICE reads off the local description; the
+// server's own candidates arrive without one, so the field is omitted rather
+// than sent as null.
 type iceCandidate struct {
 	Candidate        string  `json:"candidate"`
 	SDPMid           *string `json:"sdpMid"`                     //nolint:tagliatelle // connector wire is camelCase

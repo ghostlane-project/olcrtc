@@ -50,10 +50,11 @@ func TestEveryTrickledCandidateCarriesItsUfrag(t *testing.T) {
 	}
 }
 
-// TestTheUfragIsReadOffThePeerConnection covers the accessor on its own: a
-// peer connection that has one answers with it, and every step of the walk
-// down to the ICE transport is allowed to be missing.
-func TestTheUfragIsReadOffThePeerConnection(t *testing.T) {
+// TestTheUfragIsReadOffTheLocalDescription covers the accessor on its own: a
+// peer connection that has put a description on the wire answers with the
+// fragment that description carries, and one that has not - or none at all -
+// answers with nothing rather than failing a candidate.
+func TestTheUfragIsReadOffTheLocalDescription(t *testing.T) {
 	if got := localICEUfrag(nil); got != "" {
 		t.Fatalf("localICEUfrag(nil) = %q, want empty", got)
 	}
@@ -66,7 +67,37 @@ func TestTheUfragIsReadOffThePeerConnection(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = pc.Close() })
-	if got := localICEUfrag(pc); got == "" {
-		t.Fatal("a live peer connection reports no local ICE fragment")
+	if got := localICEUfrag(pc); got != "" {
+		t.Fatalf("a peer connection with no description reports the fragment %q", got)
+	}
+
+	ordered := true
+	if _, err = pc.CreateDataChannel(labelReliable, &webrtc.DataChannelInit{Ordered: &ordered}); err != nil {
+		t.Fatal(err)
+	}
+	offer, err := pc.CreateOffer(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = pc.SetLocalDescription(offer); err != nil {
+		t.Fatal(err)
+	}
+	ufrag := localICEUfrag(pc)
+	if ufrag == "" {
+		t.Fatal("a peer connection that has offered reports no ICE fragment")
+	}
+	if want := ufragFromSDP(offer.SDP); ufrag != want {
+		t.Fatalf("fragment %q, want the one the offer carried (%q)", ufrag, want)
+	}
+
+	// The attribute is read out of the description and nothing else is.
+	for sdp, want := range map[string]string{
+		"v=0\r\na=ice-ufrag:abcd\r\na=ice-pwd:passw0rd\r\n": "abcd",
+		"v=0\r\na=ice-pwd:passw0rd\r\n":                     "",
+		"":                                                  "",
+	} {
+		if got := ufragFromSDP(sdp); got != want {
+			t.Fatalf("ufragFromSDP(%q) = %q, want %q", sdp, got, want)
+		}
 	}
 }
