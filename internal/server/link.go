@@ -35,6 +35,7 @@ func (s *Server) bringUpLink(ctx context.Context, cfg Config, cancel context.Can
 	}
 	ln.SetEndedCallback(func(reason string) {
 		logger.Infof("Server link reported conference end: %s", reason)
+		s.setLinkState(LinkDown)
 		cancel()
 	})
 	ln.SetShouldReconnect(func() bool { return ctx.Err() == nil })
@@ -52,6 +53,11 @@ func (s *Server) bringUpLink(ctx context.Context, cfg Config, cancel context.Can
 	if err := ln.Connect(ctx); err != nil {
 		return fmt.Errorf("failed to connect link: %w", err)
 	}
+	// Joined, with the smux session over it already installed above: a
+	// client could pair now. A join that fails returns instead and leaves
+	// /stats reporting connecting, which is the whole point of the field -
+	// a room that is gone must not read like a server one can reach.
+	s.setLinkState(LinkUp)
 	logger.Infof("Link connected")
 	s.logPeersLine()
 	s.goTracked(func() { ln.WatchConnection(ctx) })
@@ -117,9 +123,30 @@ func (s *Server) installControlSession(ctx context.Context) {
 	s.goTracked(func() { s.acceptSingletonHandshake(ctx, session) })
 }
 
+// reconnectLink records the carrier session as down and asks the transport
+// to rebuild it. Every server-side liveness verdict goes through here, so
+// /stats reports down for the whole rebuild - the engine backs off between
+// attempts, which is seconds to minutes - and not merely for the instant the
+// server noticed.
+//
+// ai-generated: the whole function, and the two callers it replaced.
+func (s *Server) reconnectLink(reason string) {
+	if s.ln == nil {
+		return
+	}
+	s.setLinkState(LinkDown)
+	s.ln.Reconnect(reason)
+}
+
 func (s *Server) handleReconnect(ctx context.Context) {
 	s.health.RecordReconnect()
 	logger.Infof("server reconnect reason=provider - tearing down smux session")
+	// The engine reports only a rebuild it completed, so the carrier
+	// session is joined again by the time this runs; /stats says up once
+	// the smux session over it has been reinstalled. A reinstall that
+	// fails still leaves the session joined - what the serve loop retries
+	// then is the session, not the room.
+	defer s.setLinkState(LinkUp)
 	if s.peerLn != nil {
 		s.reinstallPeerRouting(ctx)
 		return

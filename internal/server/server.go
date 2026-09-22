@@ -83,8 +83,11 @@ type Server struct {
 	sessionID     string
 
 	// meter attributes stream bytes to the pinned key of their session for
-	// the /stats endpoint.
+	// the /stats endpoint; link is the carrier state the same endpoint
+	// reports. A nil link reads as LinkConnecting, so a server that never
+	// joined never reads as one a client could pair with.
 	meter *meter
+	link  atomic.Pointer[LinkState]
 
 	// UDP relay state (see udp.go). udpPendingFlows counts flows being
 	// dialled so the cap holds while a dial is in flight.
@@ -208,7 +211,7 @@ func Run(ctx context.Context, cfg Config) error {
 func (s *Server) serveStats(ctx context.Context, addr string) {
 	statsSrv := &http.Server{
 		Addr:              addr,
-		Handler:           s.meter.statsHandler(),
+		Handler:           s.meter.statsHandler(s.LinkState),
 		ReadHeaderTimeout: statsReadHeaderTimeout,
 	}
 	go func() {
