@@ -63,12 +63,16 @@ const (
 	// already closed while the server's next session kept the counter
 	// moving (olcbox#25). Now it is seven probes, 70 seconds.
 	//
-	// The excuse cannot tell a transfer from the peer's own pings. Progress
-	// counts payload on every stream, the control stream's included, so a
-	// link that carries the peer's pings to us but not ours to it has its
-	// first three timeouts excused as if a transfer were in flight. That is
-	// a known limitation on every carrier, and an issue apart from the
-	// queue.
+	// On a transport with no control plane of its own - datachannel, on
+	// every carrier, and videochannel and seichannel - the excuse cannot
+	// tell a transfer from the peer's own pings. The control stream shares
+	// the data session there, and Progress counts payload on every stream
+	// of it, the control stream's included, so a link that carries the
+	// peer's pings to us but not ours to it has its first three timeouts
+	// excused as if a transfer were in flight. vp8channel runs the control
+	// stream on a conn of its own (muxconn.NewControl), and Progress reads
+	// only the data conn, which the peer's pings never reach. That is a
+	// known limitation, and an issue apart from the queue.
 	//
 	// ai-generated: the account of the windows and of the limitation
 	// (olcrtc#49).
