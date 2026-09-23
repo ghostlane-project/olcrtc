@@ -17,6 +17,10 @@ import (
 // the relay window works (windowBound).
 const RelayWindowBound = windowBound
 
+// RelayWindow is what a sender may have in flight toward one destination
+// (relayWindow).
+const RelayWindow = relayWindow
+
 // FakeRoom is the fake SFU (fakeconnector_test.go) and the one room on it the
 // tunnel test joins.
 type FakeRoom struct {
@@ -40,8 +44,16 @@ func (r *FakeRoom) Join(cfg engine.Config) engine.Config {
 }
 
 // SlowLeg drains the leg toward identity at rate bytes a second (see
-// fakeSFU.slowLeg).
-func (r *FakeRoom) SlowLeg(identity string, rate int) { r.fake.slowLeg(identity, rate) }
+// fakeSFU.slowLeg). An identity the fake has not admitted fails t: the fake
+// would put the leg nowhere, and a test that meant to run on it would pass
+// without one.
+func (r *FakeRoom) SlowLeg(t *testing.T, identity string, rate int) {
+	t.Helper()
+	if r.fake.peer(identity) == nil {
+		t.Fatalf("no participant %q in the fake room to put a slow leg in front of", identity)
+	}
+	r.fake.slowLeg(identity, rate)
+}
 
 // QueuedTo is what the leg toward identity holds now.
 func (r *FakeRoom) QueuedTo(identity string) int { return r.fake.queuedTo(identity) }

@@ -62,12 +62,14 @@ const (
 //   - every pong comes back within two windows' worth of leg and a second;
 //   - pongs keep coming at both ends: no gap between two is longer than that
 //     and a probe interval;
-//   - both transfers move, and what arrives is what was sent.
+//   - both transfers move, and what arrives is what was sent;
+//   - each leg did hold the bulk, at least half a window of it at its
+//     peak, and never more than a window.
 func TestATunnelOnASlowLegKeepsItsControlStreamUnderBulk(t *testing.T) {
 	room := salutejazz.NewFakeRoom(t)
 	tunnel := startFakeTunnel(t, room)
-	room.SlowLeg(tunnel.serverID, tunnelLeg)
-	room.SlowLeg(tunnel.clientID, tunnelLeg)
+	room.SlowLeg(t, tunnel.serverID, tunnelLeg)
+	room.SlowLeg(t, tunnel.clientID, tunnelLeg)
 
 	down := startDownload(t, tunnel.socksAddr, startSource(t))
 	up := startUpload(t, tunnel.socksAddr, startSink(t))
@@ -102,9 +104,17 @@ func TestATunnelOnASlowLegKeepsItsControlStreamUnderBulk(t *testing.T) {
 		}
 	}
 	for who, id := range map[string]string{"client": tunnel.clientID, "server": tunnel.serverID} {
-		if peak := room.PeakQueuedTo(id); peak > salutejazz.RelayWindowBound {
+		peak := room.PeakQueuedTo(id)
+		if peak > salutejazz.RelayWindowBound {
 			t.Fatalf("the leg to the %s held %d KiB, over the %d KiB a window allows",
 				who, peak>>10, salutejazz.RelayWindowBound>>10)
+		}
+		// Every check above is a floor on the rates or a ceiling on a
+		// queue, and a tunnel with no slow leg under it passes them all.
+		// This one says the bulk did queue on the leg.
+		if peak < salutejazz.RelayWindow/2 {
+			t.Fatalf("the leg to the %s peaked at %d KiB, under half a %d KiB window: the bulk never queued "+
+				"on it, so the tunnel did not run on a slow leg", who, peak>>10, salutejazz.RelayWindow>>10)
 		}
 	}
 	if failure := room.LastError(); failure != "" {
@@ -182,6 +192,10 @@ func startFakeTunnel(t *testing.T, room *salutejazz.FakeRoom) *fakeTunnel {
 	select {
 	case x.socksAddr = <-socks:
 	case err := <-clientDone:
+		// Put it back for the cleanup above, which waits on this channel
+		// and would otherwise wait out its 10 s and report a tunnel that
+		// has already stopped.
+		clientDone <- err
 		t.Fatalf("the client ended before it listened: %v", err)
 	case <-time.After(10 * time.Second):
 		t.Fatal("the client did not listen within 10 s")
