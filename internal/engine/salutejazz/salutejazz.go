@@ -145,6 +145,11 @@ var (
 	ErrNoDescription = errors.New("salutejazz description missing")
 	// ErrNoDataChannel is returned when no data channel can carry a payload.
 	ErrNoDataChannel = errors.New("salutejazz data channel not ready")
+	// ErrDestinationEnded is returned by a send held on its destination's
+	// relay window when the session it belonged to ended while it waited:
+	// the server retired the peer, the binding was dropped or moved, or the
+	// participant left. Its frame was not sent.
+	ErrDestinationEnded = errors.New("salutejazz destination's session ended while the send was held")
 )
 
 // generation is one connection attempt: the peer connections, their
@@ -324,20 +329,26 @@ func (g *generation) remoteIdentities() []string {
 
 // applyParticipants folds one roster - rtc:join's otherParticipants, or an
 // rtc:participants:update - into the identity map: a participant that has
-// left is dropped, and this session is never its own peer.
+// left is dropped, and this session is never its own peer. A participant that
+// has left takes its relay window with it, as participant-left does.
 func (g *generation) applyParticipants(list []participant) {
 	local := g.localIdentity()
+	var gone []string
 	g.peersMu.Lock()
-	defer g.peersMu.Unlock()
 	for _, peer := range list {
 		if peer.Identity == "" || peer.Identity == local {
 			continue
 		}
 		if peer.State == participantDisconnected {
 			delete(g.peers, peer.Identity)
+			gone = append(gone, peer.Identity)
 			continue
 		}
 		g.peers[peer.Identity] = peer.SID
+	}
+	g.peersMu.Unlock()
+	for _, identity := range gone {
+		g.forgetRelayPeer(identity)
 	}
 }
 

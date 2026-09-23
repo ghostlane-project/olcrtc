@@ -482,3 +482,123 @@ func TestFanInTwoUploaders(t *testing.T) {
 		t.Fatalf("one uploader starved the other: %d and %d bytes", fromOne, fromTwo)
 	}
 }
+
+// TestHeldSendAcrossEpochNeverSends is the epoch guard. A send held on a
+// window belongs to the session that was live when it began; when that
+// session ends while it waits - the server retires the peer, the client
+// drops its binding or binds another server - the send returns an error and
+// its frame never reaches the wire: the other end may already be answering a
+// fresh handshake under the same identity, and an old session's frame in the
+// middle of it corrupts that stream.
+//
+// What the SFU holds outlives the session, so a retirement keeps the window's
+// counts - the next send is held too, until the old backlog drains - while a
+// binding that is dropped or moved starts the window over.
+func TestHeldSendAcrossEpochNeverSends(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		upload    bool
+		end       func(server, client *Session)
+		heldAfter bool
+	}{
+		{"the server retires the client", false, func(server, client *Session) {
+			server.RetirePeer(client.localIdentity())
+		}, true},
+		{"the client drops its binding", true, func(_, client *Session) {
+			client.ResetPeer()
+		}, false},
+		{"the client binds another server", true, func(_, client *Session) {
+			if err := client.ConfirmPeer("fakepart-elsewhere"); err != nil {
+				panic(err)
+			}
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			url, fake := newFakeConnector(t)
+			server, serverGot, client, clientGot := windowPair(t, url)
+			sender, to, got := server, client.localIdentity(), clientGot
+			if tc.upload {
+				sender, to, got = client, server.localIdentity(), serverGot
+			}
+			send := func(p []byte) error { return sender.SendTo(to, p) }
+			fake.slowLeg(to, 0)
+
+			writer := startBulk(send, "bulk", 4<<20, slowLegRecord)
+			held := int(writer.waitHeld(t, "the sender to hold on a full window"))
+			tc.end(server, client)
+			if err := writer.finish(t, 2*time.Second, "the held send once its session ended"); !errors.Is(err, ErrDestinationEnded) {
+				t.Fatalf("the held send = %v, want %v", err, ErrDestinationEnded)
+			}
+
+			after := make(chan error, 1)
+			go func() { after <- send(taggedPayload("after", 0, 64)) }()
+			if tc.heldAfter {
+				select {
+				case err := <-after:
+					t.Fatalf("the send after a retirement went at once (%v): the old backlog is still queued", err)
+				case <-time.After(slowLegSettle):
+				}
+			}
+			fake.slowLeg(to, 2_000_000)
+			select {
+			case err := <-after:
+				if err != nil {
+					t.Fatalf("the send after the session ended = %v", err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("the send after the session ended never went")
+			}
+			waitFor(t, 10*time.Second, "everything sent before the change, and the send after it", func() bool {
+				_, last := got.arrival("bulk", held-1)
+				_, fresh := got.arrival("after", 0)
+				return last && fresh
+			})
+			time.Sleep(slowLegSettle)
+			if _, ok := got.arrival("bulk", held); ok {
+				t.Fatal("the frame held when its session ended reached the other end")
+			}
+		})
+	}
+}
+
+// TestParticipantLeftReleasesParkedPublish is the destination leaving the
+// room while a send to it is held: the connector's participant-left, or a
+// roster update that reports it disconnected. Either releases the held send
+// with the error of a session that ended, and a window kept for someone who
+// is not there any more holds nothing after.
+func TestParticipantLeftReleasesParkedPublish(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		leave func(server, client *Session)
+	}{
+		{"the connector reports it gone", func(server, client *Session) {
+			server.handleEnvelope(server.current(), envIn{
+				Event: eventParticipantLeft, ParticipantID: client.localIdentity(),
+			})
+		}},
+		{"the roster reports it disconnected", func(_, client *Session) {
+			_ = client.Close()
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			url, fake := newFakeConnector(t)
+			server, _, client, _ := windowPair(t, url)
+			to := client.localIdentity()
+			fake.slowLeg(to, 0)
+
+			writer := startBulk(func(p []byte) error { return server.SendTo(to, p) }, "bulk", 4<<20, slowLegRecord)
+			writer.waitHeld(t, "the server to hold on a full window")
+			tc.leave(server, client)
+			if err := writer.finish(t, 5*time.Second, "the held send once its destination left"); !errors.Is(err, ErrDestinationEnded) {
+				t.Fatalf("the held send = %v, want %v", err, ErrDestinationEnded)
+			}
+			done := make(chan error, 1)
+			go func() { done <- server.SendTo(to, taggedPayload("after", 0, slowLegRecord)) }()
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("a send to a participant that has left was held")
+			}
+		})
+	}
+}

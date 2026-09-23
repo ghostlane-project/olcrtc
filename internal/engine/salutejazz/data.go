@@ -58,6 +58,7 @@ var (
 	_ engine.PeerReadySession    = (*Session)(nil)
 	_ engine.PeerIdentity        = (*Session)(nil)
 	_ engine.PeerResetter        = (*Session)(nil)
+	_ engine.PeerRetirer         = (*Session)(nil)
 )
 
 // Send publishes one payload on the reliable lane, to the whole room.
@@ -113,6 +114,8 @@ func destinations(peerID string) []string {
 // lane's mark cannot see: the SFU takes everything at once and queues it
 // toward a slow receiver without a limit. What went out is counted against
 // the window afterwards, and a mark follows it when one is due (window.go).
+// A send that was held while its destination's session ended is refused with
+// ErrDestinationEnded, and its frame never reaches the wire.
 func (s *Session) publish(payload []byte, topic string, dest []string, reliable bool) error {
 	if s.closed.Load() {
 		return ErrSessionClosed
@@ -133,10 +136,11 @@ func (s *Session) publish(payload []byte, topic string, dest []string, reliable 
 		}
 	} else {
 		key = gen.relayKey(dest)
+		epoch := gen.relayEpoch(key)
 		if err := s.awaitSendWindow(gen, dc); err != nil {
 			return err
 		}
-		if err := s.awaitRelayWindow(gen, key); err != nil {
+		if err := s.awaitRelayWindow(gen, key, epoch); err != nil {
 			return err
 		}
 	}
@@ -396,6 +400,8 @@ func (s *Session) LocalPeerID() string { return s.localIdentity() }
 // server's first reply byte. So the binding puts a mark of count 0 on the
 // wire here, ahead of any data: the server arms its window on it, and a
 // server of a build before the window drops it as a frame it cannot decrypt.
+// A binding that moves to another identity ends the window toward the old
+// one, and a send held on it with it.
 func (s *Session) ConfirmPeer(peerID string) error {
 	if peerID == "" {
 		return fmt.Errorf("%w: empty identity", engine.ErrInvalidPeerID)
@@ -404,17 +410,25 @@ func (s *Session) ConfirmPeer(peerID string) error {
 	if gen == nil || gen.isDone() {
 		return ErrSessionClosed
 	}
-	storeString(&gen.confirmed, peerID)
+	if old := gen.confirmed.Swap(&peerID); old != nil && *old != peerID {
+		gen.forgetRelayPeer(*old)
+	}
 	s.sendWindowFrame(gen, peerID, windowMark, 0)
 	return nil
 }
 
 // ResetPeer drops the confirmed binding, after an upper-layer handshake
 // failure. The room roster is left alone: who is in the room is the
-// connector's statement, not this session's.
+// connector's statement, not this session's. The relay window toward the
+// server that was bound goes with the binding, and a send held on it is
+// refused: the session it belonged to is over.
 func (s *Session) ResetPeer() {
-	if gen := s.current(); gen != nil {
-		gen.confirmed.Store(nil)
+	gen := s.current()
+	if gen == nil {
+		return
+	}
+	if old := gen.confirmed.Swap(nil); old != nil {
+		gen.forgetRelayPeer(*old)
 	}
 }
 

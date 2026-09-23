@@ -219,3 +219,34 @@ func TestStreamTransportWrapsErrors(t *testing.T) {
 		t.Fatalf("Close() error = %v", err)
 	}
 }
+
+// retiringSession is an engine that keeps per-peer send state under the
+// server's peer sessions.
+type retiringSession struct {
+	*stubSession
+	retired []string
+}
+
+func (s *retiringSession) RetirePeer(peerID string) { s.retired = append(s.retired, peerID) }
+
+// TestRetirePeerReachesTheEngine covers the server's word that its session
+// on a peer has ended: the datachannel transport takes it and passes it on to
+// an engine that keeps state per peer, and leaves an engine that keeps none
+// alone.
+//
+// ai-generated: this test (olcrtc#49).
+func TestRetirePeerReachesTheEngine(t *testing.T) {
+	sess := &retiringSession{stubSession: &stubSession{}}
+	var tr any = &streamTransport{session: sess}
+	lifecycle, ok := tr.(transport.PeerLifecycle)
+	if !ok {
+		t.Fatal("the datachannel transport does not take the server's peer retirements")
+	}
+	lifecycle.RetirePeer("peer-1")
+	if len(sess.retired) != 1 || sess.retired[0] != "peer-1" {
+		t.Fatalf("the engine was told %v, want [peer-1]", sess.retired)
+	}
+
+	var plain any = &streamTransport{session: &stubSession{}}
+	plain.(transport.PeerLifecycle).RetirePeer("peer-1")
+}

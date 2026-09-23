@@ -155,6 +155,15 @@ func (g *generation) relayKey(dest []string) string {
 	}
 }
 
+// relayEpoch is the epoch of the window a send to key belongs to, taken
+// before the send waits for anything: 0 for a send with no window.
+func (g *generation) relayEpoch(key string) uint64 {
+	if key == "" {
+		return 0
+	}
+	return g.win.Epoch(key)
+}
+
 // awaitRelayWindow holds the caller while the window toward key is full.
 //
 // The wake is taken before the window is asked, so an echo that lands between
@@ -162,7 +171,12 @@ func (g *generation) relayKey(dest []string) string {
 // also looks again every Retry: the window may want a probe mark by then, or
 // have let a silent destination go. A generation that ends releases it with
 // ErrSessionClosed, as the lane's own wait does.
-func (s *Session) awaitRelayWindow(gen *generation, key string) error {
+//
+// epoch is the window's epoch when the send began. A window whose epoch has
+// moved on belongs to a session that has ended since - retired, reset, left
+// - and the frame held for it is refused rather than sent into whatever
+// comes after under the same identity.
+func (s *Session) awaitRelayWindow(gen *generation, key string, epoch uint64) error {
 	if key == "" {
 		return nil
 	}
@@ -172,6 +186,9 @@ func (s *Session) awaitRelayWindow(gen *generation, key string) error {
 			return ErrSessionClosed
 		}
 		wake := gen.win.Wake(key)
+		if gen.win.Epoch(key) != epoch {
+			return ErrDestinationEnded
+		}
 		ok, probe, counter := gen.win.Room(key, time.Now())
 		if probe {
 			s.markRelay(gen, key, counter)
@@ -260,6 +277,27 @@ func (s *Session) handleWindowFrame(gen *generation, from string, byIdentity boo
 			gen.noteEcho(from, frame.counter, turnedOn, time.Now())
 		}
 	}
+}
+
+// RetirePeer is the server's word that its session on peerID has ended
+// (engine.PeerRetirer). A send held toward the peer is refused. The window's
+// counts are kept: the old session's bytes are still queued at the SFU, and
+// the peer, still in the room, may start a fresh session behind them.
+func (s *Session) RetirePeer(peerID string) {
+	if gen := s.current(); gen != nil {
+		gen.win.Bump(peerID)
+	}
+}
+
+// forgetRelayPeer ends the window toward identity and everything this attempt
+// knew of it: the participant left, or a client's binding to it was dropped
+// or moved. A send held on the window is refused, and a window kept for
+// identity later starts over, off until it speaks the window again.
+func (g *generation) forgetRelayPeer(identity string) {
+	g.win.Reset(identity)
+	g.relayMu.Lock()
+	defer g.relayMu.Unlock()
+	delete(g.relayPeers, identity)
 }
 
 // relayPeer is what the window's wire knows of one peer: whether it speaks
