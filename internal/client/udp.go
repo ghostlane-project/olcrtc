@@ -191,8 +191,8 @@ func (c *Client) handleUDPAssociate(ctx context.Context, tcpConn net.Conn, req s
 }
 
 // prepareUDPAssociate checks everything an association needs before a
-// socket is opened: the relay is on, the transport has a datagram lane, the
-// tunnel session is up and the SOCKS client's source is known.
+// socket is opened: the relay is on, the transport has the datagram methods,
+// the tunnel session is up and the SOCKS client's source is known.
 func (c *Client) prepareUDPAssociate(
 	ctx context.Context, tcpConn net.Conn, req socksRequest,
 ) (transport.DatagramTransport, udpAssociationSource, bool) {
@@ -200,11 +200,12 @@ func (c *Client) prepareUDPAssociate(
 		return nil, udpAssociationSource{}, false
 	}
 	// The methods are not the lane: the datachannel has them whatever its
-	// engine, and over one without a lane (Jitsi) DatagramCanSend never
-	// turns true, so an association accepted there never carries a
-	// datagram. ai-generated: the Features check (olcrtc#49).
+	// engine. An association over one without a lane (Jitsi) is still
+	// accepted, for what it carries off the lane - resolver queries over the
+	// stream, direct flows, direct DNS - and forwardLocalUDP drops only what
+	// is for the lane. ai-generated: the comment (olcrtc#49).
 	dg, ok := c.ln.(transport.DatagramTransport)
-	if !ok || !dg.Features().Datagram {
+	if !ok {
 		return nil, udpAssociationSource{}, false
 	}
 	// With rules on, an association may carry direct flows and direct DNS
@@ -294,6 +295,14 @@ func (c *Client) forwardLocalUDP(
 		return
 	}
 	if c.tryDirectUDP(ctx, udpConn, src, target, payload) {
+		return
+	}
+	// A link without the lane (Jitsi's datachannel, which has the lane's
+	// methods whatever its engine) never takes the datagram, and a wait for
+	// it held the read loop until the association ended: it is dropped here,
+	// at once and before it takes a flow. ai-generated: the check (olcrtc#49).
+	if !dg.Features().Datagram {
+		logger.Debugf("drop udp packet: the link has no datagram lane")
 		return
 	}
 	flowID, ok := c.udpFlowID(udpConn, src, target)
@@ -424,7 +433,10 @@ func (c *Client) removeUDPFlowsForConn(conn *net.UDPConn) {
 
 // ensureUDPFlowSweeper starts the client's one idle-flow sweeper the first
 // time an association needs it. It lives as long as ctx, the client's run,
-// and looks at every association's flows on each tick.
+// and looks at every association's flows on each tick. Only
+// handleUDPAssociate calls it: everything under an association runs on the
+// association's context, and a sweeper started on one would end with it,
+// never to start again. ai-generated: the last two sentences (olcrtc#49).
 func (c *Client) ensureUDPFlowSweeper(ctx context.Context) {
 	c.udpSweepOnce.Do(func() {
 		c.goTracked(func() { c.sweepUDPFlows(ctx) })

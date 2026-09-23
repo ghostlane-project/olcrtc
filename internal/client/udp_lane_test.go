@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"io"
@@ -15,6 +16,7 @@ import (
 	enginebuiltin "github.com/openlibrecommunity/olcrtc/internal/engine/builtin"
 	"github.com/openlibrecommunity/olcrtc/internal/transport"
 	"github.com/openlibrecommunity/olcrtc/internal/transport/datachannel"
+	"github.com/openlibrecommunity/olcrtc/internal/udpwire"
 )
 
 // ai-generated: the whole file (a UDP ASSOCIATE that never frees its SOCKS
@@ -138,42 +140,81 @@ func udpAssociate(t *testing.T, addr string) (net.Conn, []byte) {
 	return conn, reply
 }
 
-// Without a datagram lane an association can never carry a datagram, and
-// the datachannel has the lane's methods whatever its engine: over Jitsi
-// the association used to be accepted, its first datagram waited for the
-// run to end, and its SOCKS slot with it. It is refused at once, before it
-// waits for anything, the session included.
-func TestUDPAssociateWithoutADatagramLaneIsRefusedAtOnce(t *testing.T) {
-	cases := map[string]func(t *testing.T) *Client{
-		"with the session up": func(t *testing.T) *Client {
-			t.Helper()
-			c, _ := newDNSTestClient(t, func(*smux.Stream) error { return nil })
-			return c
-		},
-		"with the session down": func(t *testing.T) *Client {
-			t.Helper()
-			c := newDirectTestClient(t, nil, staticLookup{})
-			// Parked on the session, the reply would come 10 s late, and
-			// udpAssociate reads for one.
-			c.sessionReadyTimeout = 10 * time.Second
-			return c
-		},
-	}
-	for name, newClient := range cases {
-		t.Run(name, func(t *testing.T) {
-			c := newClient(t)
-			c.ln = jitsiLikeLink(t)
-			conn, reply := udpAssociate(t, serveSocksForTest(t, c))
-			if reply[1] != socksRepHostUnreachable {
-				t.Fatalf("UDP ASSOCIATE on a lane-less link: REP = %d, want %d", reply[1], socksRepHostUnreachable)
+// Over a link with no datagram lane - Jitsi's datachannel, which has the
+// lane's methods whatever its engine - an association still carries all that
+// never touches the lane: a resolver query over the stream (hev in udp mode
+// sends every system query that way, and so does the gate's S5 on Jitsi), a
+// direct flow. Refusing the association took those with it. Only a datagram
+// for the lane is dropped, at once and with no flow of its own: it used to
+// wait for the run to end, and the read loop and the SOCKS slot with it.
+func TestUDPAssociateWithoutADatagramLaneDropsOnlyWhatIsForTheLane(t *testing.T) {
+	t.Run("with the session up, a query takes the stream", func(t *testing.T) {
+		c, _ := newDNSTestClient(t, func(stream *smux.Stream) error {
+			if _, err := readFramedQuery(stream); err != nil {
+				return err
 			}
-			_ = conn.SetReadDeadline(time.Now().Add(time.Second))
-			if n, err := conn.Read(make([]byte, 1)); err == nil {
-				t.Fatalf("the refused control connection stayed open and sent %d bytes", n)
-			}
-			waitSocksSlots(t, c, 0, time.Second, "the refusal")
+			return writeFramed(stream, dnsTestResponse)
 		})
+		resolver := udpwire.Endpoint{Host: dnsTestResolver, Port: dnsPort}
+		checkLanelessAssociation(t, c, resolver, dnsTestQuery, dnsTestResponse)
+	})
+	t.Run("with the session down, a direct flow", func(t *testing.T) {
+		port := udpEchoServer(t)
+		c := newDirectTestClient(t, mustRules(t, "127.0.0.0/8\n"), staticLookup{})
+		c.udpFlows = map[uint64]clientUDPFlow{}
+		//nolint:gosec // G115: a test port
+		echo := udpwire.Endpoint{Host: directTestLoopback, Port: uint16(port)}
+		checkLanelessAssociation(t, c, echo, []byte("ping"), []byte("ping"))
+	})
+}
+
+// checkLanelessAssociation runs c's accept loop over a lane-less link and
+// sends, on one association, a datagram for the lane and then one for
+// offLane, which is answered without it. The answer comes at once, the
+// datagram for the lane leaves no flow, and the SOCKS slot comes back when
+// the control connection closes.
+func checkLanelessAssociation(t *testing.T, c *Client, offLane udpwire.Endpoint, payload, answer []byte) {
+	t.Helper()
+	c.ln = jitsiLikeLink(t)
+	// A datagram that waited for the lane would hold the read loop, and the
+	// answer behind it, for a minute.
+	c.datagramReadyTimeout = time.Minute
+
+	conn, reply := udpAssociate(t, serveSocksForTest(t, c))
+	if reply[1] != socksRepSuccess {
+		t.Fatalf("UDP ASSOCIATE on a lane-less link: REP = %d, want %d", reply[1], socksRepSuccess)
 	}
+	relay := &net.UDPAddr{IP: net.IP(reply[4:8]), Port: int(binary.BigEndian.Uint16(reply[8:10]))}
+	_, cli := dnsTestSockets(t)
+	for _, packet := range [][]byte{
+		socksDatagram(t, udpLaneTestTarget, 4444, []byte("x")),
+		socksDatagram(t, offLane.Host, offLane.Port, payload),
+	} {
+		if _, err := cli.WriteToUDP(packet, relay); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = cli.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 4096)
+	n, _, err := cli.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("no answer from %s:%d within 2 s, behind a datagram for the lane: %v",
+			offLane.Host, offLane.Port, err)
+	}
+	from, got, err := parseSocksUDP(buf[:n])
+	if err != nil || from != offLane || !bytes.Equal(got, answer) {
+		t.Fatalf("answer = %x from %s:%d (%v), want %x from %s:%d",
+			got, from.Host, from.Port, err, answer, offLane.Host, offLane.Port)
+	}
+	c.udpMu.Lock()
+	flows := len(c.udpFlows)
+	c.udpMu.Unlock()
+	if flows != 0 {
+		t.Fatalf("lane flows after a datagram for a link with no lane = %d, want 0", flows)
+	}
+
+	_ = conn.Close()
+	waitSocksSlots(t, c, 0, 2*time.Second, "the control connection closed")
 }
 
 // An association whose lane never opens used to hold its first datagram
@@ -258,5 +299,32 @@ func TestADatagramWaitsForTheLaneNoLongerThanItsDeadline(t *testing.T) {
 	c.forwardLocalUDP(ctx, lane, assoc, src, packet)
 	if lane.sent.Load() != 1 {
 		t.Fatalf("datagrams sent once the lane opened = %d, want 1", lane.sent.Load())
+	}
+}
+
+// The sweeper is the client's: handleUDPAssociate starts it once, on the
+// run's context, before its read loop. A direct flow runs on its
+// association's context, and a sweeper it started would end with the first
+// association to close, never to start again behind the sync.Once; idle lane
+// flows would then fill the table and idle direct sockets stay open.
+func TestADirectFlowLeavesTheSweeperToTheRun(t *testing.T) {
+	port := udpEchoServer(t)
+	c, lane := newDirectUDPTestClient(t, mustRules(t, "127.0.0.0/8\n"), staticLookup{})
+	assoc, cli := dnsTestSockets(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	//nolint:gosec // G115: a test port
+	c.forwardLocalUDP(ctx, lane, assoc, cli.LocalAddr().(*net.UDPAddr), socksDatagram(t, directTestLoopback, uint16(port), []byte("ping")))
+	if _, payload := readSocksUDP(t, cli); string(payload) != "ping" {
+		t.Fatalf("direct answer = %q, want ping", payload)
+	}
+	cancel()
+	waitTracked(t, c)
+
+	started := false
+	c.udpSweepOnce.Do(func() { started = true })
+	if !started {
+		t.Fatal("a direct flow started the client's sweeper on its association's context")
 	}
 }
