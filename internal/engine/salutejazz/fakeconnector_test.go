@@ -52,6 +52,10 @@ import (
 //	                                        LiveKit 1.5.3 does; see fakeLeg
 //	(*fakeSFU).queuedTo(identity)           what that leg holds now, and
 //	(*fakeSFU).peakQueuedTo(identity)       the most it has held
+//	(*fakeSFU).swallow(topic)               relay nothing under topic, as if
+//	                                        no peer in the room spoke it
+//	(*fakeSFU).framesFrom(identity, topic)  how many packets identity has
+//	                                        published under topic
 //
 // What it deliberately does not do: no preconnect (that is the auth
 // provider's HTTP call), no participant bookkeeping beyond the identities a
@@ -109,11 +113,25 @@ type fakeSFU struct {
 	pings       int
 	// refusal, while non-nil, is the error every join is answered with.
 	refusal *serverError
+	// swallowed is the topics the relay drops, and published counts the
+	// packets each sender published under each topic, swallowed or not.
+	swallowed map[string]bool
+	published map[publishedKey]int
+}
+
+// publishedKey is one sender and one topic.
+type publishedKey struct {
+	from  string
+	topic string
 }
 
 func newFakeConnector(t *testing.T) (string, *fakeSFU) {
 	t.Helper()
-	fake := &fakeSFU{rooms: make(map[string][]*fakePeer)}
+	fake := &fakeSFU{
+		rooms:     make(map[string][]*fakePeer),
+		swallowed: make(map[string]bool),
+		published: make(map[publishedKey]int),
+	}
 	// The engine sends the browser's Origin, which gorilla's default check
 	// refuses against a loopback host.
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
@@ -437,6 +455,9 @@ func (f *fakeSFU) forward(from *fakePeer, frame []byte) {
 	if user == nil {
 		return
 	}
+	if !f.notePublished(from.id, user.GetTopic()) {
+		return
+	}
 	// LiveKit 1.5.3, which the service runs, carries the sender and the
 	// destinations on the user packet, not on the data packet around it.
 	user.ParticipantIdentity = from.id      //nolint:staticcheck // 1.5.3 wire
@@ -454,6 +475,31 @@ func (f *fakeSFU) forward(from *fakePeer, frame []byte) {
 		}
 		peer.relay(out, lossy)
 	}
+}
+
+// swallow makes the relay drop every packet under topic, whoever sends it.
+// A room whose peers are all of a build that does not know a topic behaves
+// the same way at both ends: nothing under it is ever answered.
+func (f *fakeSFU) swallow(topic string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.swallowed[topic] = true
+}
+
+// framesFrom is how many packets identity has published under topic.
+func (f *fakeSFU) framesFrom(identity, topic string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.published[publishedKey{from: identity, topic: topic}]
+}
+
+// notePublished counts one packet and reports whether the relay passes it
+// on.
+func (f *fakeSFU) notePublished(from, topic string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.published[publishedKey{from: from, topic: topic}]++
+	return !f.swallowed[topic]
 }
 
 // slowLeg puts the leg toward one participant behind a queue that drains at

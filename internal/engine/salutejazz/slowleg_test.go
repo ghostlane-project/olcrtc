@@ -131,8 +131,11 @@ func waitForRoom(t *testing.T, sessions ...*Session) {
 // time, as fast as the send returns.
 type bulkWriter struct {
 	sent atomic.Int64
-	stop chan struct{}
-	done chan error
+	// longest is the longest a single send took, in nanoseconds: how long
+	// the writer was held at most.
+	longest atomic.Int64
+	stop    chan struct{}
+	done    chan error
 }
 
 // startBulk writes total bytes in frames of size through send. It stops early
@@ -147,15 +150,59 @@ func startBulk(send func([]byte) error, kind string, total, size int) *bulkWrite
 				return
 			default:
 			}
+			began := time.Now()
 			if err := send(taggedPayload(kind, seq, size)); err != nil {
 				w.done <- err
 				return
+			}
+			if took := int64(time.Since(began)); took > w.longest.Load() {
+				w.longest.Store(took)
 			}
 			w.sent.Add(1)
 		}
 		w.done <- nil
 	}()
 	return w
+}
+
+// halt ends the writer at its next frame, and is safe to call twice.
+func (w *bulkWriter) halt() {
+	select {
+	case <-w.stop:
+	default:
+		close(w.stop)
+	}
+}
+
+// waitHeld waits until the writer has made no progress for slowLegSettle
+// while it still has frames to write, and returns how many it had sent.
+func (w *bulkWriter) waitHeld(t *testing.T, what string) int64 {
+	t.Helper()
+	var held int64
+	waitFor(t, 20*time.Second, what, func() bool {
+		select {
+		case err := <-w.done:
+			t.Fatalf("%s: the writer finished instead (%v) after %d frames", what, err, w.sent.Load())
+		default:
+		}
+		before := w.sent.Load()
+		time.Sleep(slowLegSettle)
+		held = w.sent.Load()
+		return held == before
+	})
+	return held
+}
+
+// finish waits for the writer to end and returns what it ended on.
+func (w *bulkWriter) finish(t *testing.T, timeout time.Duration, what string) error {
+	t.Helper()
+	select {
+	case err := <-w.done:
+		return err
+	case <-time.After(timeout):
+		t.Fatalf("%s: the writer was still going after %s, at %d frames", what, timeout, w.sent.Load())
+		return nil
+	}
 }
 
 // TestTheSlowLegQueuesWithoutALimitAndDrainsAtItsRate pins the fake's model

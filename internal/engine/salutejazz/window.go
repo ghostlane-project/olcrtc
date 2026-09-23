@@ -1,14 +1,47 @@
 package salutejazz
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+	"time"
 
-// The relay window's wire (olcrtc#49). The window itself - what a sender may
-// have handed the SFU for one destination that the destination has not yet
-// taken off it - is internal/relaywin's; this engine carries its marks and
-// echoes to the other end of the tunnel and back.
+	"github.com/pion/webrtc/v4"
+	"google.golang.org/protobuf/proto"
+
+	"github.com/openlibrecommunity/olcrtc/internal/logger"
+	"github.com/openlibrecommunity/olcrtc/internal/relaywin"
+)
+
+// The relay window (olcrtc#49). LiveKit 1.5.3 acknowledges what a sender
+// writes at once and queues it toward each receiver without a limit, so on a
+// slow SFU-to-receiver leg the queue grows to whatever the receiver's smux
+// windows allow - megabytes, tens of seconds of it - with the tunnel's
+// control pings waiting at the back until liveness closes a session whose
+// bytes are still arriving. The lane's own high-water mark cannot see it: it
+// measures the first hop, which the SFU never lets fill.
 //
-// A mark or an echo is a UserPacket under windowTopic on the reliable lane,
-// addressed to the one participant it is for:
+// So every send on the reliable lane counts against a window toward its
+// destination (internal/relaywin): a sender may have handed the SFU at most
+// relayWindow bytes for one destination that the destination has not echoed,
+// and waits while it has. Which destination a send counts against:
+//
+//   - a payload addressed to one participant, that participant: the server's
+//     reply to a client, keyed by the identity the SFU stamps on the client's
+//     packets;
+//   - a payload to the room, on a client, the server its ConfirmPeer bound;
+//   - anything else, nothing. A room-wide send before the handshake has
+//     confirmed a server is the hello, and small.
+//
+// The window is on only once the destination has shown it speaks it: its
+// first window frame arms it (a client's ConfirmPeer sends one, a mark of
+// count 0, ahead of any data, so a server is armed before its first reply
+// byte), and so does an echo. A peer of a build before the window never sends
+// either, and is sent to as it always was. A server marks nobody who has not
+// spoken the window first, so an older client is never handed a frame it
+// cannot read; a client marks the server it confirmed from the start, and an
+// older server drops the unknown topic as a frame it cannot decrypt.
+//
+// On the wire a mark or an echo is a UserPacket under windowTopic on the
+// reliable lane, addressed to the one participant it is for:
 //
 //	[version=1][kind: 1 mark, 2 echo][counter, u64 big-endian][advertised window, u32 big-endian]
 //
@@ -42,7 +75,41 @@ const (
 	// At a 0.35 s round trip it still carries about 3.9 Mbit/s (7/8 of a
 	// window a round trip), over the gate's 1.4 and 1.6 Mbit/s floors.
 	relayWindow = 192 << 10
+	// relayMarkEvery keeps a sender's view of a window within an eighth of
+	// it.
+	relayMarkEvery = relayWindow / 8
+	// relayProbeAfter: a sender held this long since its last mark marks
+	// again, which repairs a lost mark or echo, and a destination that has
+	// not echoed yet is marked at least this often.
+	relayProbeAfter = time.Second
+	// relayRetry is how often a held sender looks again, for the probe and
+	// the dead check; an echo, a Reset or a Bump wakes it at once anyway.
+	relayRetry = 250 * time.Millisecond
+	// relayDeadAfter lets a destination go that has held a sender this long
+	// without an echo. LiveKit never drops reliable data, so a silent
+	// destination is a slow leg or a hole being repaired far more often than
+	// a dead one, and liveness closes a dead one long before this: it is a
+	// backstop, not a verdict.
+	relayDeadAfter = 120 * time.Second
+
+	// windowReportEvery is how often a destination's delivery rate and echo
+	// round trip go to the debug log, and windowMarksKept how many marks in
+	// flight a destination keeps the send time of, to time their echoes.
+	windowReportEvery = 5 * time.Second
+	windowMarksKept   = 64
 )
+
+// defaultRelayTiming is the window's pace in the engine; a test shortens it
+// through Session.relayTiming.
+func defaultRelayTiming() relaywin.Timing {
+	return relaywin.Timing{
+		Window:     relayWindow,
+		MarkEvery:  relayMarkEvery,
+		ProbeAfter: relayProbeAfter,
+		DeadAfter:  relayDeadAfter,
+		Retry:      relayRetry,
+	}
+}
 
 // windowFrame is a mark or an echo, as the wire carries it.
 type windowFrame struct {
@@ -72,4 +139,230 @@ func parseWindowFrame(frame []byte) (windowFrame, bool) {
 		return windowFrame{}, false
 	}
 	return windowFrame{kind: kind, counter: binary.BigEndian.Uint64(frame[2:10])}, true
+}
+
+// relayKey is the window a payload to dest counts against: the participant it
+// is addressed to, the confirmed server for a payload to the room, and none
+// for anything else.
+func (g *generation) relayKey(dest []string) string {
+	switch len(dest) {
+	case 0:
+		return loadString(&g.confirmed)
+	case 1:
+		return dest[0]
+	default:
+		return ""
+	}
+}
+
+// awaitRelayWindow holds the caller while the window toward key is full.
+//
+// The wake is taken before the window is asked, so an echo that lands between
+// the two closes the very channel the caller then waits on. A held sender
+// also looks again every Retry: the window may want a probe mark by then, or
+// have let a silent destination go. A generation that ends releases it with
+// ErrSessionClosed, as the lane's own wait does.
+func (s *Session) awaitRelayWindow(gen *generation, key string) error {
+	if key == "" {
+		return nil
+	}
+	retry := gen.win.Timing().Retry
+	for {
+		if gen.isDone() || s.closed.Load() {
+			return ErrSessionClosed
+		}
+		wake := gen.win.Wake(key)
+		ok, probe, counter := gen.win.Room(key, time.Now())
+		if probe {
+			s.markRelay(gen, key, counter)
+		}
+		if ok {
+			return nil
+		}
+		timer := time.NewTimer(retry)
+		select {
+		case <-wake:
+		case <-timer.C:
+		case <-gen.done:
+		case <-s.closeCh:
+		}
+		timer.Stop()
+	}
+}
+
+// countRelayed counts n bytes handed to the relay for key and, when a mark is
+// due, sends it: on the caller's goroutine, straight after the bytes it
+// counts, so the ordered lane keeps it behind them.
+func (s *Session) countRelayed(gen *generation, key string, n int) {
+	if key == "" {
+		return
+	}
+	if due, counter := gen.win.Sent(key, n, time.Now()); due {
+		s.markRelay(gen, key, counter)
+	}
+}
+
+// markRelay sends key a mark of counter, if key is someone this session
+// marks: the server it confirmed, or a peer that has spoken the window. A
+// peer of an older build is never handed a frame it cannot read.
+func (s *Session) markRelay(gen *generation, key string, counter uint64) {
+	if !gen.marks(key) {
+		return
+	}
+	gen.noteMark(key, counter, time.Now())
+	s.sendWindowFrame(gen, key, windowMark, counter)
+}
+
+// sendWindowFrame puts a mark or an echo on the reliable lane, to the one
+// participant it is for. It waits for nothing - not the lane's mark, not the
+// window a mark exists to move - and what cannot go is lost: a lost mark
+// costs a probe, a lost echo is covered by the next one.
+func (s *Session) sendWindowFrame(gen *generation, to string, kind byte, counter uint64) {
+	dc := gen.pubRel.Load()
+	if dc == nil || dc.ReadyState() != webrtc.DataChannelStateOpen {
+		return
+	}
+	frame := windowFrame{kind: kind, counter: counter}.encode()
+	packet, err := proto.Marshal(dataPacket(frame, windowTopic, []string{to}, true))
+	if err != nil {
+		return
+	}
+	_ = dc.Send(packet)
+}
+
+// handleWindowFrame takes a mark or an echo off the receive path. It acts
+// only on a sender the SFU names by identity - the only name a window is
+// kept under - and only on a frame it can read; whatever it does, the frame
+// is not the tunnel's and goes no further.
+//
+// The first frame from a peer arms the window toward it. A mark is answered
+// with an echo of its count: packets arrive in order on this channel and each
+// is handed up before the next, so by now every frame the peer sent before
+// the mark has been. An echo moves the window toward its sender, and only
+// that one: relaywin takes it only past the last echo and within what was
+// sent.
+func (s *Session) handleWindowFrame(gen *generation, from string, byIdentity bool, payload []byte) {
+	if !byIdentity {
+		return
+	}
+	frame, ok := parseWindowFrame(payload)
+	if !ok {
+		return
+	}
+	if gen.noteSpeaker(from) {
+		gen.win.Arm(from)
+	}
+	switch frame.kind {
+	case windowMark:
+		s.sendWindowFrame(gen, from, windowEcho, frame.counter)
+	case windowEcho:
+		if moved, turnedOn := gen.win.ApplyEcho(from, frame.counter); moved {
+			gen.noteEcho(from, frame.counter, turnedOn, time.Now())
+		}
+	}
+}
+
+// relayPeer is what the window's wire knows of one peer: whether it speaks
+// the window, and what the debug log reports of it. The log names a peer by
+// the order this attempt met it in, never by its identity.
+type relayPeer struct {
+	ordinal int
+	speaks  bool
+	// marks is the send time of each mark still in flight, oldest first,
+	// which an echo is timed against.
+	marks []markStamp
+	rtt   time.Duration
+	// since, echoed and delivered measure the delivery rate: the bytes
+	// echoed since since, counted from echoed.
+	since     time.Time
+	echoed    uint64
+	delivered uint64
+}
+
+type markStamp struct {
+	counter uint64
+	at      time.Time
+}
+
+// relayPeerLocked is identity's entry, made on first use. Called with
+// relayMu held.
+func (g *generation) relayPeerLocked(identity string) *relayPeer {
+	peer := g.relayPeers[identity]
+	if peer == nil {
+		g.relaySeq++
+		peer = &relayPeer{ordinal: g.relaySeq}
+		g.relayPeers[identity] = peer
+	}
+	return peer
+}
+
+// noteSpeaker records that identity has sent a window frame, and reports
+// whether this is the first.
+func (g *generation) noteSpeaker(identity string) bool {
+	g.relayMu.Lock()
+	defer g.relayMu.Unlock()
+	peer := g.relayPeerLocked(identity)
+	if peer.speaks {
+		return false
+	}
+	peer.speaks = true
+	logger.Debugf("salutejazz: peer %d speaks the relay window", peer.ordinal)
+	return true
+}
+
+// marks reports whether this session marks key: the server it confirmed, or
+// a peer that has spoken the window.
+func (g *generation) marks(key string) bool {
+	if key == loadString(&g.confirmed) {
+		return true
+	}
+	g.relayMu.Lock()
+	defer g.relayMu.Unlock()
+	peer := g.relayPeers[key]
+	return peer != nil && peer.speaks
+}
+
+// noteMark keeps the send time of a mark to key, for the echo that answers
+// it. Only so many are kept: a destination that never echoes does not grow
+// the list.
+func (g *generation) noteMark(key string, counter uint64, now time.Time) {
+	g.relayMu.Lock()
+	defer g.relayMu.Unlock()
+	peer := g.relayPeerLocked(key)
+	if len(peer.marks) >= windowMarksKept {
+		peer.marks = peer.marks[1:]
+	}
+	peer.marks = append(peer.marks, markStamp{counter: counter, at: now})
+}
+
+// noteEcho takes an echo that moved key's window to counter into what the
+// debug log reports: the round trip of the mark it answers and, every
+// windowReportEvery, the rate the destination has taken bytes off the relay
+// at. That rate is the leg's, which is what a red gate cell is judged by.
+func (g *generation) noteEcho(key string, counter uint64, turnedOn bool, now time.Time) {
+	g.relayMu.Lock()
+	defer g.relayMu.Unlock()
+	peer := g.relayPeerLocked(key)
+	if turnedOn {
+		logger.Debugf("salutejazz: peer %d echoes marks - relay window on", peer.ordinal)
+	}
+	answered := 0
+	for answered < len(peer.marks) && peer.marks[answered].counter <= counter {
+		if peer.marks[answered].counter == counter {
+			peer.rtt = now.Sub(peer.marks[answered].at)
+		}
+		answered++
+	}
+	peer.marks = peer.marks[answered:]
+	if peer.since.IsZero() {
+		peer.since, peer.echoed = now, counter
+		return
+	}
+	peer.delivered += counter - peer.echoed
+	peer.echoed = counter
+	if elapsed := now.Sub(peer.since); elapsed >= windowReportEvery {
+		logger.Debugf("salutejazz: relay window to peer %d: %.1f kB/s delivered, echo rtt %s",
+			peer.ordinal, float64(peer.delivered)/elapsed.Seconds()/1000, peer.rtt.Round(time.Millisecond))
+		peer.since, peer.delivered = now, 0
+	}
 }

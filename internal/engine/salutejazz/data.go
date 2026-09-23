@@ -108,6 +108,11 @@ func destinations(peerID string) []string {
 // A lane over its high-water mark is where the two lanes part: the byte
 // stream waits for room (awaitSendWindow), because a frame it drops is a
 // frame the peer waits for forever, and the datagram lane drops.
+//
+// The byte stream then waits for its destination's relay window, which the
+// lane's mark cannot see: the SFU takes everything at once and queues it
+// toward a slow receiver without a limit. What went out is counted against
+// the window afterwards, and a mark follows it when one is due (window.go).
 func (s *Session) publish(payload []byte, topic string, dest []string, reliable bool) error {
 	if s.closed.Load() {
 		return ErrSessionClosed
@@ -120,13 +125,20 @@ func (s *Session) publish(payload []byte, topic string, dest []string, reliable 
 	if dc == nil || dc.ReadyState() != webrtc.DataChannelStateOpen {
 		return ErrNoDataChannel
 	}
+	key := ""
 	if !reliable {
 		if dc.BufferedAmount() > bufferHighWaterMark {
 			gen.dropLossy()
 			return nil
 		}
-	} else if err := s.awaitSendWindow(gen, dc); err != nil {
-		return err
+	} else {
+		key = gen.relayKey(dest)
+		if err := s.awaitSendWindow(gen, dc); err != nil {
+			return err
+		}
+		if err := s.awaitRelayWindow(gen, key); err != nil {
+			return err
+		}
 	}
 	frame, err := proto.Marshal(dataPacket(payload, topic, dest, reliable))
 	if err != nil {
@@ -135,6 +147,7 @@ func (s *Session) publish(payload []byte, topic string, dest []string, reliable 
 	if err := dc.Send(frame); err != nil {
 		return fmt.Errorf("salutejazz data channel send: %w", err)
 	}
+	s.countRelayed(gen, key, len(frame))
 	return nil
 }
 
@@ -224,10 +237,11 @@ func (s *Session) receiveOn(gen *generation, dc *webrtc.DataChannel) {
 	})
 }
 
-// handleDataPacket routes one relayed packet by topic: the datagram topic
-// feeds the lossy lane, everything else the byte stream. A packet that
-// arrives on a generation that has been torn down belongs to a connection
-// this session has already replaced, and is dropped.
+// handleDataPacket routes one relayed packet by topic: a window frame is the
+// relay window's and goes no further, the datagram topic feeds the lossy
+// lane, everything else the byte stream. A packet that arrives on a
+// generation that has been torn down belongs to a connection this session has
+// already replaced, and is dropped.
 func (s *Session) handleDataPacket(gen *generation, frame []byte) {
 	if s.closed.Load() || gen.isDone() {
 		return
@@ -258,11 +272,14 @@ func (s *Session) handleDataPacket(gen *generation, frame []byte) {
 		// caller of the peer list a participant they cannot reach.
 		gen.notePeer(sender)
 	}
-	if user.GetTopic() == datagramPublishTopic {
+	switch user.GetTopic() {
+	case windowTopic:
+		s.handleWindowFrame(gen, sender, byIdentity, user.GetPayload())
+	case datagramPublishTopic:
 		s.deliver(sender, user.GetPayload(), s.onPeerDatagram, s.onDatagram)
-		return
+	default:
+		s.deliver(sender, user.GetPayload(), s.onPeerData, s.onData)
 	}
-	s.deliver(sender, user.GetPayload(), s.onPeerData, s.onData)
 }
 
 // deliver hands one payload to the lane's callbacks: the per-peer one when
@@ -373,6 +390,12 @@ func (s *Session) LocalPeerID() string { return s.localIdentity() }
 // fresh participant ids, so an identity confirmed under the previous attempt
 // names nobody under the next one. The upper layer runs its handshake again
 // after a reconnect and confirms again.
+//
+// The confirmed server is also what this client's relay window is kept
+// toward, and the server's window toward this client has to be on before the
+// server's first reply byte. So the binding puts a mark of count 0 on the
+// wire here, ahead of any data: the server arms its window on it, and a
+// server of a build before the window drops it as a frame it cannot decrypt.
 func (s *Session) ConfirmPeer(peerID string) error {
 	if peerID == "" {
 		return fmt.Errorf("%w: empty identity", engine.ErrInvalidPeerID)
@@ -382,6 +405,7 @@ func (s *Session) ConfirmPeer(peerID string) error {
 		return ErrSessionClosed
 	}
 	storeString(&gen.confirmed, peerID)
+	s.sendWindowFrame(gen, peerID, windowMark, 0)
 	return nil
 }
 

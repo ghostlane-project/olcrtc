@@ -33,6 +33,7 @@ import (
 	"github.com/openlibrecommunity/olcrtc/internal/engine"
 	"github.com/openlibrecommunity/olcrtc/internal/logger"
 	"github.com/openlibrecommunity/olcrtc/internal/protect"
+	"github.com/openlibrecommunity/olcrtc/internal/relaywin"
 )
 
 const (
@@ -233,6 +234,17 @@ type generation struct {
 	// lossyDrops counts the datagrams this attempt threw away because the
 	// lossy lane was over its budget.
 	lossyDrops atomic.Uint64
+
+	// win is the relay window toward every destination this attempt sends
+	// to, and relayMu owns relayPeers, what the window's wire knows of each
+	// of them (relaySeq numbers them for the log). All of it belongs to the
+	// attempt: the SFU hands every connection fresh participant ids, so a
+	// window kept under the last attempt's names nobody under this one. See
+	// window.go.
+	win        *relaywin.Windows
+	relayMu    sync.Mutex
+	relayPeers map[string]*relayPeer
+	relaySeq   int
 }
 
 func newGeneration(api *webrtc.API) *generation {
@@ -246,6 +258,8 @@ func newGeneration(api *webrtc.API) *generation {
 		peers:       make(map[string]string),
 		window:      make(chan struct{}),
 		pongWaiters: make(map[int64]chan struct{}),
+		win:         relaywin.New(defaultRelayTiming()),
+		relayPeers:  make(map[string]*relayPeer),
 	}
 }
 
@@ -384,6 +398,10 @@ type Session struct {
 	// ownership of it. Tests set it before Connect to land a Close in that
 	// window every time instead of hoping for it.
 	beforePublish func()
+
+	// relayTiming paces the relay window of every attempt this session
+	// makes. Tests shorten it before Connect.
+	relayTiming relaywin.Timing
 }
 
 // New creates a SaluteJazz engine session.
@@ -415,6 +433,7 @@ func New(_ context.Context, cfg engine.Config) (engine.Session, error) {
 		pass:           cfg.Token,
 		joinTimeout:    joinTimeout,
 		pingInterval:   pingInterval,
+		relayTiming:    defaultRelayTiming(),
 		closeCh:        make(chan struct{}),
 	}
 	s.Configure(engine.ReconnectorConfig{
@@ -438,6 +457,7 @@ func (s *Session) Connect(ctx context.Context) error {
 		return err
 	}
 	gen := newGeneration(api)
+	gen.win = relaywin.New(s.relayTiming)
 	if s.beforePublish != nil {
 		s.beforePublish()
 	}
@@ -576,9 +596,14 @@ func (s *Session) terminate() *generation {
 // is closed and both peer connections are released. It runs once however
 // many callers hold the generation - Close and a Connect that is giving up
 // both do.
+//
+// Every relay window of the generation goes with it, which wakes a sender
+// held on one: it finds the generation gone and returns ErrSessionClosed. A
+// new attempt starts with windows of its own.
 func (s *Session) teardown(gen *generation) {
 	gen.closeOnce.Do(func() {
 		engine.CloseSignal(gen.done)
+		gen.win.ResetAll()
 		gen.closeSocket()
 		closePeerConnections(gen)
 	})
