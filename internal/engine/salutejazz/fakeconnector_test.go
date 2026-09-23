@@ -46,6 +46,12 @@ import (
 //	(*fakeSFU).lastError()                  what the fake itself tripped over,
 //	                                        including a client frame whose
 //	                                        group id does not match the capture
+//	(*fakeSFU).slowLeg(identity, rate)      queue what is relayed to one
+//	                                        participant and drain it at rate
+//	                                        bytes a second (0 holds it), as
+//	                                        LiveKit 1.5.3 does; see fakeLeg
+//	(*fakeSFU).queuedTo(identity)           what that leg holds now, and
+//	(*fakeSFU).peakQueuedTo(identity)       the most it has held
 //
 // What it deliberately does not do: no preconnect (that is the auth
 // provider's HTTP call), no participant bookkeeping beyond the identities a
@@ -446,8 +452,188 @@ func (f *fakeSFU) forward(from *fakePeer, frame []byte) {
 		if peer == from || !addressed(dest, peer.id) {
 			continue
 		}
-		peer.deliver(out, lossy)
+		peer.relay(out, lossy)
 	}
+}
+
+// slowLeg puts the leg toward one participant behind a queue that drains at
+// rate bytes a second, and holds it while rate is 0. Calling it again changes
+// the rate of the same queue, so a held leg is released by giving it one.
+// Unknown identities are ignored: the leg belongs to a peer the fake has
+// admitted.
+func (f *fakeSFU) slowLeg(identity string, rate int) {
+	if peer := f.peer(identity); peer != nil {
+		peer.slowLeg(rate)
+	}
+}
+
+// queuedTo is what the leg toward identity holds right now, in relayed
+// packet bytes: 0 for a participant with no slow leg.
+func (f *fakeSFU) queuedTo(identity string) int {
+	if leg := f.leg(identity); leg != nil {
+		queued, _ := leg.gauge()
+		return queued
+	}
+	return 0
+}
+
+// peakQueuedTo is the most the leg toward identity has held at once.
+func (f *fakeSFU) peakQueuedTo(identity string) int {
+	if leg := f.leg(identity); leg != nil {
+		_, peak := leg.gauge()
+		return peak
+	}
+	return 0
+}
+
+func (f *fakeSFU) leg(identity string) *fakeLeg {
+	peer := f.peer(identity)
+	if peer == nil {
+		return nil
+	}
+	peer.mu.Lock()
+	defer peer.mu.Unlock()
+	return peer.leg
+}
+
+// peer is the admitted participant under identity, or nil.
+func (f *fakeSFU) peer(identity string) *fakePeer {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, peer := range f.peers {
+		if peer.id == identity {
+			return peer
+		}
+	}
+	return nil
+}
+
+// fakeLeg is the SFU's queue toward one subscriber as LiveKit 1.5.3 keeps
+// it, with the path to that subscriber as its only brake.
+//
+// LiveKit reads a publisher's channel as fast as packets arrive - its SCTP
+// acknowledges at once, which is what the fake's publisher side does too - and
+// hands every packet to each subscriber's channel there and then.
+// PCTransport.SendDataPacket drops only when DataChannelMaxBufferedAmount is
+// set, which it is not by default, and pion/sctp's pending queue has no bound,
+// so what a slow subscriber cannot take piles up for it without a limit and
+// leaves in order at the rate its path carries. Both lanes share the queue:
+// LiveKit opens a subscriber's _lossy channel ordered, and pion keeps every
+// ordered chunk of an association in one FIFO.
+//
+// The rate is the path's: a packet leaves once the leg has had the time to
+// carry it and everything before it, and a leg that was idle has saved up no
+// time. queued counts a packet until it has left, and peak is the most queued
+// ever was.
+type fakeLeg struct {
+	mu     sync.Mutex
+	frames []legFrame
+	queued int
+	peak   int
+	rate   int
+	// kick is closed and replaced whenever a packet arrives or the rate
+	// changes, which is what a drain waiting on an empty or held leg waits
+	// for.
+	kick chan struct{}
+	stop chan struct{}
+	once sync.Once
+}
+
+// legFrame is one relayed packet and the lane it goes out on.
+type legFrame struct {
+	data  []byte
+	lossy bool
+}
+
+func newFakeLeg() *fakeLeg {
+	return &fakeLeg{kick: make(chan struct{}), stop: make(chan struct{})}
+}
+
+// push queues one packet. It never blocks: that is the point.
+func (l *fakeLeg) push(frame []byte, lossy bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.frames = append(l.frames, legFrame{data: frame, lossy: lossy})
+	l.queued += len(frame)
+	l.peak = max(l.peak, l.queued)
+	l.kickLocked()
+}
+
+func (l *fakeLeg) setRate(rate int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.rate = rate
+	l.kickLocked()
+}
+
+func (l *fakeLeg) gauge() (int, int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.queued, l.peak
+}
+
+func (l *fakeLeg) kickLocked() {
+	close(l.kick)
+	l.kick = make(chan struct{})
+}
+
+// head waits for a packet at the front of a leg that is moving, and returns
+// it with the rate it moves at. It reports false once the leg is stopped.
+func (l *fakeLeg) head() (legFrame, int, bool) {
+	for {
+		l.mu.Lock()
+		if len(l.frames) > 0 && l.rate > 0 {
+			frame, rate := l.frames[0], l.rate
+			l.mu.Unlock()
+			return frame, rate, true
+		}
+		kick := l.kick
+		l.mu.Unlock()
+		select {
+		case <-kick:
+		case <-l.stop:
+			return legFrame{}, 0, false
+		}
+	}
+}
+
+// pop takes the front packet off once it has left. Only the drain pops, so
+// the front is still the packet head returned.
+func (l *fakeLeg) pop() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.queued -= len(l.frames[0].data)
+	l.frames[0] = legFrame{}
+	l.frames = l.frames[1:]
+}
+
+// drain carries the queue down the leg at its rate until the leg stops.
+func (l *fakeLeg) drain(deliver func(frame []byte, lossy bool)) {
+	var free time.Time
+	for {
+		frame, rate, ok := l.head()
+		if !ok {
+			return
+		}
+		now := time.Now()
+		if free.Before(now) {
+			free = now
+		}
+		free = free.Add(time.Duration(len(frame.data)) * time.Second / time.Duration(rate))
+		timer := time.NewTimer(time.Until(free))
+		select {
+		case <-timer.C:
+		case <-l.stop:
+			timer.Stop()
+			return
+		}
+		l.pop()
+		deliver(frame.data, frame.lossy)
+	}
+}
+
+func (l *fakeLeg) close() {
+	l.once.Do(func() { close(l.stop) })
 }
 
 func addressed(dest []string, id string) bool {
@@ -479,6 +665,9 @@ type fakePeer struct {
 	pubPC            *webrtc.PeerConnection
 	subRel, subLossy *webrtc.DataChannel
 	pending          map[string][]webrtc.ICECandidateInit
+	// leg, once a test has made this peer's leg slow, queues what is
+	// relayed to it (see fakeLeg).
+	leg *fakeLeg
 }
 
 func (f *fakeSFU) serve(conn *websocket.Conn) {
@@ -795,6 +984,32 @@ func (p *fakePeer) answerPublisher(sdp string) error {
 	})
 }
 
+// relay hands one relayed packet to this peer: down its slow leg when it has
+// one, straight to its channel otherwise.
+func (p *fakePeer) relay(frame []byte, lossy bool) {
+	p.mu.Lock()
+	leg := p.leg
+	p.mu.Unlock()
+	if leg != nil {
+		leg.push(frame, lossy)
+		return
+	}
+	p.deliver(frame, lossy)
+}
+
+// slowLeg gives this peer a leg of its own at rate, or changes its rate.
+func (p *fakePeer) slowLeg(rate int) {
+	p.mu.Lock()
+	leg := p.leg
+	if leg == nil {
+		leg = newFakeLeg()
+		p.leg = leg
+		go leg.drain(p.deliver)
+	}
+	p.mu.Unlock()
+	leg.setRate(rate)
+}
+
 // deliver writes one relayed packet to this peer on the channel its kind
 // belongs to.
 func (p *fakePeer) deliver(frame []byte, lossy bool) {
@@ -944,7 +1159,11 @@ func (p *fakePeer) closePeerConnections() {
 	p.mu.Lock()
 	sub, pub := p.subPC, p.pubPC
 	p.subPC, p.pubPC = nil, nil
+	leg := p.leg
 	p.mu.Unlock()
+	if leg != nil {
+		leg.close()
+	}
 	for _, pc := range []*webrtc.PeerConnection{sub, pub} {
 		if pc != nil {
 			_ = pc.Close()
