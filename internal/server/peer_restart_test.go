@@ -132,10 +132,13 @@ func (c *relayClient) handshake(t *testing.T) *smux.Stream {
 // server writes into it now reaches the client, and what it did write would
 // land in the session the client runs next under the same relay identity -
 // on the stream with the number this one had, which is where a retried hello
-// runs. The server ends such a session without a word.
+// runs. The server ends such a session without a word, and reports it closed
+// as left: liveness did not end it.
 func TestAPeerThatLeftItsSessionIsToldNothing(t *testing.T) {
 	link := &relayLinkStub{}
 	s := newRelayServer(t, link)
+	reasons := make(chan string, 4)
+	s.onClose = func(_, reason string) { reasons <- reason }
 	client := newRelayClient(t, s, "peer")
 	var sent atomic.Int64
 	link.mu.Lock()
@@ -164,6 +167,14 @@ func TestAPeerThatLeftItsSessionIsToldNothing(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if extra := sent.Load() - before; extra != 0 {
 		t.Fatalf("the server wrote %d records to a peer that had left the session", extra)
+	}
+	select {
+	case reason := <-reasons:
+		if reason != "left" {
+			t.Fatalf("the session its peer left was reported closed with reason %q, want %q", reason, "left")
+		}
+	default:
+		t.Fatal("the session its peer left was never reported closed")
 	}
 }
 

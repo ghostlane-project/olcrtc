@@ -473,8 +473,15 @@ func (s *Server) startPeerControlLoop(ctx context.Context, peer *peerSession, st
 	runner := tunnelcore.ControlRunner{
 		Transport: s.ln, Config: s.liveness, Health: s.health,
 		LogFields: func() string { return "role=server peer=" + peer.peerID },
-		// ai-generated: a peer that ended the stream is told nothing (olcrtc#49).
-		OnDeath:  func(err error) { s.endPeer(peer, "liveness", !peerLeft(err)) },
+		// ai-generated: a peer that ended the stream is told nothing, and its
+		// session is reported left, not dead of liveness (olcrtc#49).
+		OnDeath: func(err error) {
+			if peerLeft(err) {
+				s.endPeer(peer, "left", false)
+				return
+			}
+			s.endPeer(peer, "liveness", true)
+		},
 		Progress: func() uint64 { return peer.dataConn().PayloadBytes() },
 	}
 	s.goTracked(func() {
