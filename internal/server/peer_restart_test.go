@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -515,4 +516,162 @@ func smuxFrames(record []byte) []smuxFrameView {
 		record = record[8+body:]
 	}
 	return frames
+}
+
+// errHeldSendEnded is what epochLinkStub answers a send held across a
+// retirement with, as the SaluteJazz engine answers ErrDestinationEnded.
+var errHeldSendEnded = errors.New("destination ended while held")
+
+// epochLinkStub is relayLinkStub with the part of the SaluteJazz relay window
+// the server's teardown order answers to. While held, a send to the peer
+// waits, as one does on a full window; the send takes the peer's epoch when it
+// begins, and one still held when the server retires the peer is refused: its
+// frame was the session's that ended. A send begun after the retirement goes
+// once the hold lifts.
+type epochLinkStub struct {
+	relayLinkStub
+	emu     sync.Mutex
+	moved   *sync.Cond
+	held    bool
+	epoch   uint64
+	entered int
+	parked  int
+}
+
+func newEpochLinkStub() *epochLinkStub {
+	l := &epochLinkStub{relayLinkStub: relayLinkStub{features: datachannelFeatures}}
+	l.moved = sync.NewCond(&l.emu)
+	return l
+}
+
+func (l *epochLinkStub) SendTo(peerID string, data []byte) error {
+	l.emu.Lock()
+	epoch := l.epoch
+	l.entered++
+	for l.held && l.epoch == epoch {
+		l.parked++
+		l.moved.Wait()
+		l.parked--
+	}
+	ended := l.epoch != epoch
+	l.emu.Unlock()
+	if ended {
+		return errHeldSendEnded
+	}
+	return l.relayLinkStub.SendTo(peerID, data)
+}
+
+// RetirePeer moves the peer's epoch on and refuses every send held on it.
+func (l *epochLinkStub) RetirePeer(string) {
+	l.emu.Lock()
+	l.epoch++
+	l.moved.Broadcast()
+	l.emu.Unlock()
+}
+
+// hold holds every send to the peer from now on, or lets them go.
+func (l *epochLinkStub) hold(on bool) {
+	l.emu.Lock()
+	l.held = on
+	l.moved.Broadcast()
+	l.emu.Unlock()
+}
+
+// sends is how many sends have begun, and how many of them are held now.
+func (l *epochLinkStub) sends() (int, int) {
+	l.emu.Lock()
+	defer l.emu.Unlock()
+	return l.entered, l.parked
+}
+
+// waitSends waits until cond holds of sends.
+func (l *epochLinkStub) waitSends(t *testing.T, what string, cond func(entered, parked int) bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !cond(l.sends()) {
+		if time.Now().After(deadline) {
+			t.Fatalf("waiting for %s", what)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// A peer that liveness ends on a slow leg is sent a close notice that the
+// full window toward it holds. The client has given the session up by then
+// and retries its hello under the same relay identity, and the server builds
+// the retry a session at once, while the old one still waits on its notice.
+// The old session's retirement has to come before the new session's first
+// send: coming after, as it did when the old session retired the peer at the
+// end of its own teardown, it refused the new session's welcome, held on the
+// same full window, and the retry's hello timed out with the new session dead
+// of the refusal.
+func TestAHelloRetriedWhileTheOldSessionIsClosingIsAnswered(t *testing.T) {
+	link := newEpochLinkStub()
+	s := newRelayServer(t, &link.relayLinkStub)
+	s.ln, s.peerLn = link, link
+	t.Cleanup(func() { link.hold(false) })
+	var current atomic.Pointer[relayClient]
+	link.mu.Lock()
+	link.toPeer = func(_ string, data []byte) {
+		if client := current.Load(); client != nil {
+			client.conn.Push(data)
+		}
+	}
+	link.mu.Unlock()
+
+	first := newRelayClient(t, s, "peer")
+	current.Store(first)
+	first.handshake(t)
+	old := lookupPeer(s, "peer")
+	if old == nil {
+		t.Fatal("the server built no session for the peer")
+	}
+	waitPeerControl(t, old)
+
+	// The window toward the peer fills, and liveness ends the session: its
+	// close notice is held.
+	link.hold(true)
+	ended := make(chan struct{})
+	go func() {
+		defer close(ended)
+		s.removePeer(old, "liveness")
+	}()
+	link.waitSends(t, "the close notice to be held", func(_, parked int) bool { return parked > 0 })
+	before, _ := link.sends()
+
+	// The client retries its hello under the same identity.
+	retry := newRelayClient(t, s, "peer")
+	current.Store(retry)
+	answered := make(chan error, 1)
+	go func() {
+		stream, err := retry.session.OpenStream()
+		if err != nil {
+			answered <- err
+			return
+		}
+		_ = stream.SetDeadline(time.Now().Add(5 * time.Second))
+		_, _, err = handshake.Client(stream, "relay-client", nil)
+		answered <- err
+	}()
+	link.waitSends(t, "the retry's welcome to be sent", func(entered, _ int) bool { return entered > before })
+
+	// The old session's teardown ends, and the window opens again.
+	select {
+	case <-ended:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the old session's teardown never ended")
+	}
+	link.hold(false)
+	select {
+	case err := <-answered:
+		if err != nil {
+			t.Fatalf("the hello retried while the old session was closing = %v, want a welcome", err)
+		}
+	case <-time.After(6 * time.Second):
+		t.Fatal("the hello retried while the old session was closing was never answered")
+	}
+	next := lookupPeer(s, "peer")
+	if next == nil || next == old || next.dataSession().IsClosed() {
+		t.Fatal("the session that answered the retried hello did not outlive the old one's teardown")
+	}
 }

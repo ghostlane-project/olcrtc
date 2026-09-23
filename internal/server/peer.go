@@ -374,13 +374,21 @@ func (s *Server) getPeerSession(peerID string) *peerSession {
 // from nothing starts in: carried, the group of the session a restarted peer
 // left, or a fresh one when that is nil.
 //
-// ai-generated: carried (olcrtc#49); the rest is getPeerSession as it was.
+// A session built from nothing is built after the peer's last one is retired
+// (retireEndedLocked).
+//
+// ai-generated: carried and the retirement first (olcrtc#49); the rest is
+// getPeerSession as it was.
 func (s *Server) peerSessionIn(peerID string, carried *muxconn.PinGroup) *peerSession {
 	if peerID == "" || s.peerLn == nil {
 		return nil
 	}
 	s.sessMu.Lock()
 	peer := s.peerSessions[peerID]
+	if peer == nil {
+		s.retireEndedLocked(peerID)
+		peer = s.peerSessions[peerID]
+	}
 	if peer != nil && peer.dataConn() != nil {
 		s.sessMu.Unlock()
 		return peer
@@ -604,7 +612,16 @@ func (s *Server) removePeer(peer *peerSession, reason string) {
 // endPeer is removePeer, and with notify false it tells the peer nothing (see
 // endPeerSession).
 //
-// ai-generated: notify (olcrtc#49); the rest is removePeer as it was.
+// The transport is told after the teardown, unless a new session for the
+// peer ID has been built during it: that session told the transport before
+// its first send (retireEndedLocked), and the teardown then tells it nothing.
+// A close notice can take the whole notice budget on a stalled leg, and a
+// peer that has given the session up is sending its retried hello meanwhile;
+// told only now, the transport would refuse the new session's welcome, held
+// on the same full relay window, as a frame of the session that ended.
+//
+// ai-generated: notify and the retirement a new session takes over
+// (olcrtc#49); the rest is removePeer as it was.
 func (s *Server) endPeer(peer *peerSession, reason string, notify bool) {
 	if peer == nil {
 		return
@@ -615,9 +632,43 @@ func (s *Server) endPeer(peer *peerSession, reason string, notify bool) {
 		return
 	}
 	delete(s.peerSessions, peer.peerID)
+	if s.retiring == nil {
+		s.retiring = make(map[string]*peerSession)
+	}
+	s.retiring[peer.peerID] = peer
 	s.sessMu.Unlock()
 	s.endPeerSession(peer, reason, notify)
-	s.retirePeer(peer.peerID)
+	s.sessMu.Lock()
+	own := s.retiring[peer.peerID] == peer
+	if own {
+		delete(s.retiring, peer.peerID)
+	}
+	s.sessMu.Unlock()
+	if own {
+		s.retirePeer(peer.peerID)
+	}
+}
+
+// retireEndedLocked tells the transport that the session ended for peerID
+// is over, when that session's teardown has not yet done so, before a new
+// session for peerID is built: the new session's sends then begin after the
+// retirement, and nothing the retirement refuses is theirs. What it refuses
+// is the old session's, its close notice too, and rightly: the peer is
+// sending into a new session by now, and anything the old one sends would
+// land there.
+//
+// Called with sessMu held and no session in the map for peerID. The lock is
+// let go around the transport's call and taken again, so the caller reads
+// the map afresh after it.
+//
+// ai-generated: the whole method (olcrtc#49).
+func (s *Server) retireEndedLocked(peerID string) {
+	for s.retiring[peerID] != nil && s.peerSessions[peerID] == nil {
+		delete(s.retiring, peerID)
+		s.sessMu.Unlock()
+		s.retirePeer(peerID)
+		s.sessMu.Lock()
+	}
 }
 
 // peerLeft reports whether a control stream ended because the peer ended it:
