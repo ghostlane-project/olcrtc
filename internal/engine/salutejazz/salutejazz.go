@@ -385,6 +385,13 @@ type Session struct {
 
 	cur atomic.Pointer[generation]
 
+	// server is the identity the last handshake this session completed
+	// confirmed. It is kept here and not on the attempt, where the binding
+	// is: the binding is dropped before every handshake the client retries
+	// (ResetPeer) and does not survive a rejoin, and PeerSeen asks about the
+	// server across both. See PeerSeen.
+	server atomic.Pointer[string]
+
 	// joinTimeout and pingInterval are the two paces a test shortens: how
 	// long a join may take, and how often the keepalive fires.
 	joinTimeout  time.Duration

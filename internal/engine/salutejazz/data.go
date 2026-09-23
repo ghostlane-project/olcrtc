@@ -403,7 +403,9 @@ func (s *Session) LocalPeerID() string { return s.localIdentity() }
 // made, and a rejoin does not carry it over: the SFU hands every connection
 // fresh participant ids, so an identity confirmed under the previous attempt
 // names nobody under the next one. The upper layer runs its handshake again
-// after a reconnect and confirms again.
+// after a reconnect and confirms again. What PeerSeen asks about is kept
+// apart from the binding and outlives it: the server the last handshake
+// confirmed.
 //
 // The confirmed server is also where this client's payloads to the room go
 // while it is in the room, and what its relay window is kept toward; the
@@ -424,6 +426,7 @@ func (s *Session) ConfirmPeer(peerID string) error {
 	if old := gen.confirmed.Swap(&peerID); old != nil && *old != peerID {
 		gen.forgetRelayPeer(*old)
 	}
+	s.server.Store(&peerID)
 	s.sendWindowFrame(gen, peerID, windowMark, 0)
 	return nil
 }
@@ -470,6 +473,28 @@ func (s *Session) hasPeer() bool {
 		return false
 	}
 	return loadString(&gen.confirmed) != "" || gen.hasRemote()
+}
+
+// PeerSeen implements transport.PeerObserver: the server the last handshake
+// this session completed confirmed is in the room, by the roster of the
+// attempt that is live now. The client asks when a handshake has gone
+// unanswered, to tell a server that is there and silent - its hello queued at
+// the SFU behind a dead session's backlog - from an empty room.
+//
+// Nobody else counts. A room whose server has been retired can still hold a
+// client of another device, and taking that for a peer had a client retry a
+// dead room instead of failing over to the next. The binding cannot answer
+// either: the client drops it before every handshake it retries, and a rejoin
+// starts without one. The identity can, across both: the SFU hands out a new
+// one only to a connection that joins again, so a server that stayed is in
+// the rejoined attempt's roster under the name it was confirmed by.
+func (s *Session) PeerSeen() bool {
+	server := loadString(&s.server)
+	gen := s.current()
+	if server == "" || gen == nil || gen.isDone() {
+		return false
+	}
+	return gen.inRoom(server)
 }
 
 // hasRemote reports whether anyone else is in the room, without building the
