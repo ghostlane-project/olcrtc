@@ -613,14 +613,14 @@ const slack = 64 << 10
 // none.
 func TestAWindowOffIsNeverOver(t *testing.T) {
 	w := New(Timing{})
-	if w.Over("peer", slack) {
+	if w.Over("peer", slack, t0) {
 		t.Fatal("a destination with no window is over")
 	}
 	if _, open := w.windows["peer"]; open {
 		t.Fatal("Over opened a window")
 	}
 	w.Sent("peer", 16*window, t0)
-	if w.Over("peer", slack) {
+	if w.Over("peer", slack, t0) {
 		t.Fatalf("a destination that never echoed is over with %d in flight", 16*window)
 	}
 }
@@ -634,18 +634,18 @@ func TestAWindowOnIsOverPastAWindowAndItsSlack(t *testing.T) {
 	if ok, _, _ := w.Room("peer", t0); ok {
 		t.Fatal("the window is not on and full")
 	}
-	if w.Over("peer", slack) {
+	if w.Over("peer", slack, t0) {
 		t.Fatal("over at a window in flight: a datagram is dropped only past the slack")
 	}
 	w.Sent("peer", slack, t0)
-	if w.Over("peer", slack) {
+	if w.Over("peer", slack, t0) {
 		t.Fatalf("over at exactly a window and the slack (%d) in flight", window+slack)
 	}
 	w.Sent("peer", 1, t0)
-	if !w.Over("peer", slack) {
+	if !w.Over("peer", slack, t0) {
 		t.Fatalf("not over at %d in flight, a byte past a window and the slack", window+slack+1)
 	}
-	if moved, _ := w.ApplyEcho("peer", snapshot(t, w, "peer").sent); !moved || w.Over("peer", slack) {
+	if moved, _ := w.ApplyEcho("peer", snapshot(t, w, "peer").sent); !moved || w.Over("peer", slack, t0) {
 		t.Fatal("still over after the echo of everything sent")
 	}
 }
@@ -665,16 +665,16 @@ func TestAWindowStartedOverIsNotOver(t *testing.T) {
 			w := New(Timing{})
 			w.Arm("peer")
 			w.Sent("peer", window+slack+1, t0)
-			if !w.Over("peer", slack) {
+			if !w.Over("peer", slack, t0) {
 				t.Fatal("the window is not over to start with")
 			}
 			tc.do(w)
-			if w.Over("peer", slack) {
+			if w.Over("peer", slack, t0) {
 				t.Fatalf("over after %s", tc.name)
 			}
 			w.Arm("peer")
 			w.Sent("peer", window+slack, t0)
-			if w.Over("peer", slack) {
+			if w.Over("peer", slack, t0) {
 				t.Fatalf("the window opened after %s counts what was in flight before it", tc.name)
 			}
 		})
@@ -688,7 +688,7 @@ func TestABumpKeepsAWindowOver(t *testing.T) {
 	w.Arm("peer")
 	w.Sent("peer", window+slack+1, t0)
 	w.Bump("peer")
-	if !w.Over("peer", slack) {
+	if !w.Over("peer", slack, t0) {
 		t.Fatal("Bump forgot what is in flight")
 	}
 }
@@ -704,8 +704,68 @@ func TestAWindowLetGoIsNeverOver(t *testing.T) {
 		t.Fatal("not let go after DeadAfter")
 	}
 	w.Sent("peer", 4*window, t0)
-	if w.Over("peer", slack) {
+	if w.Over("peer", slack, t0) {
 		t.Fatal("a destination let go is over")
+	}
+}
+
+// A datagram yields to a sender held on its window for a probe interval. A
+// datagram flow as fast as the destination's leg keeps between a Window and
+// a Window and the slack in flight, takes the room each echo frees before the
+// parked sender looks again, and starts the dead clock over with every one of
+// those echoes: without the yield the byte stream - the tunnel's control
+// pings with it - waits until liveness closes the session. The wait is the
+// sender's own clock: an echo does not start it over, only a Room that lets a
+// sender go or a Bump that sends every parked sender away ends it, and while
+// it runs past a probe interval a datagram yields even to a window an echo
+// has just opened, which the woken sender has not taken yet.
+func TestADatagramYieldsToASenderHeldAProbeInterval(t *testing.T) {
+	w := New(Timing{ProbeAfter: time.Second, DeadAfter: time.Minute})
+	var m marks
+	on(t, w, "peer", frame)
+	for range (window + slack/2) / frame {
+		m.sent(w, "peer", frame, t0)
+	}
+	if ok, _, _ := w.Room("peer", t0); ok {
+		t.Fatal("the window is not on and full")
+	}
+	if w.Over("peer", slack, at(time.Second-time.Nanosecond)) {
+		t.Fatal("a datagram yielded to a sender held for less than a probe interval")
+	}
+	if !w.Over("peer", slack, at(time.Second)) {
+		t.Fatal("a datagram did not yield to a sender held for a probe interval")
+	}
+
+	if moved, _ := w.ApplyEcho("peer", m[0]); !moved || !held(w, "peer") {
+		t.Fatal("the first echo did not move the window and leave it full")
+	}
+	if !w.Over("peer", slack, at(time.Second)) {
+		t.Fatal("an echo that left the window full started the sender's wait over")
+	}
+	if moved, _ := w.ApplyEcho("peer", m.last(t)); !moved || held(w, "peer") {
+		t.Fatal("the echo of everything sent did not open the window")
+	}
+	if !w.Over("peer", slack, at(time.Second)) {
+		t.Fatal("a datagram took the room an echo opened for the sender held on it")
+	}
+	if ok, _, _ := w.Room("peer", at(time.Second)); !ok {
+		t.Fatal("the sender was not let go on an open window")
+	}
+	if w.Over("peer", slack, at(time.Hour)) {
+		t.Fatal("a datagram yielded after the sender was let go")
+	}
+
+	w.Sent("peer", window, at(time.Second))
+	if ok, _, _ := w.Room("peer", at(time.Second)); ok {
+		t.Fatal("the window is not full again")
+	}
+	w.Bump("peer")
+	if w.Over("peer", slack, at(time.Hour)) {
+		t.Fatal("a datagram yielded to senders a Bump sent away")
+	}
+	w.Room("peer", at(2*time.Second))
+	if w.Over("peer", slack, at(3*time.Second-time.Nanosecond)) || !w.Over("peer", slack, at(3*time.Second)) {
+		t.Fatal("a sender held after a Bump did not start a wait of its own")
 	}
 }
 
@@ -719,7 +779,7 @@ func TestOverOnlyLooks(t *testing.T) {
 	wake := w.Wake("peer")
 	before := snapshot(t, w, "peer")
 	for range 3 {
-		w.Over("peer", slack)
+		w.Over("peer", slack, t0)
 	}
 	if after := snapshot(t, w, "peer"); after != before {
 		t.Fatalf("Over changed the window: %+v, then %+v", before, after)
@@ -728,7 +788,7 @@ func TestOverOnlyLooks(t *testing.T) {
 		t.Fatal("Over woke the senders")
 	}
 	w.Room("peer", t0)
-	w.Over("peer", slack)
+	w.Over("peer", slack, t0)
 	if _, probe, _ := w.Room("peer", at(time.Second)); !probe {
 		t.Fatal("Over took the probe a held sender was due")
 	}
@@ -807,7 +867,7 @@ func TestCountingArmingAndLookingDoNotWake(t *testing.T) {
 	w.Sent("peer", window, t0)
 	w.Arm("peer")
 	w.Room("peer", at(time.Hour))
-	w.Over("peer", slack)
+	w.Over("peer", slack, t0)
 	w.Epoch("other")
 	w.Wake("other")
 	w.Timing()

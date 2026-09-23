@@ -109,19 +109,31 @@ func TestSmallFrameLatencyUnderLoad(t *testing.T) {
 	time.Sleep(time.Second)
 
 	budget := time.Duration(relayWindow+slowLegRecord)*time.Second/rate + time.Second
+	pingWithin(t, server, clientGot, fake, to, budget, "the download")
+}
+
+// pingWithin has server send a small frame to the participant named to,
+// beside whatever load the test keeps going, and fails the test unless got
+// has it within budget.
+func pingWithin(t *testing.T, server *Session, got *tally, fake *fakeSFU, to string,
+	budget time.Duration, behind string,
+) {
+	t.Helper()
 	sent := time.Now()
 	pinged := make(chan error, 1)
 	go func() { pinged <- server.SendTo(to, taggedPayload("ping", 0, 64)) }()
 	for {
-		if at, ok := clientGot.arrival("ping", 0); ok {
-			if latency := at.Sub(sent); latency > budget {
-				t.Fatalf("the ping took %s behind the download, over the %s a window allows", latency, budget)
+		if at, ok := got.arrival("ping", 0); ok {
+			latency := at.Sub(sent)
+			if latency > budget {
+				t.Fatalf("the ping took %s behind %s, over the %s a window allows", latency, behind, budget)
 			}
+			t.Logf("the ping took %s behind %s, within %s", latency.Round(time.Millisecond), behind, budget)
 			break
 		}
 		if waited := time.Since(sent); waited > budget+2*time.Second {
-			t.Fatalf("the ping had not arrived %s after it was sent, over the %s a window allows "+
-				"(the leg holds %d KiB)", waited.Round(time.Millisecond), budget, fake.queuedTo(to)>>10)
+			t.Fatalf("the ping had not arrived %s after it was sent behind %s, over the %s a window allows "+
+				"(the leg holds %d KiB)", waited.Round(time.Millisecond), behind, budget, fake.queuedTo(to)>>10)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -793,4 +805,57 @@ func TestUDPUnderConcurrentPull(t *testing.T) {
 	if moved := clientGot.streamBytes() - pulled; moved < int(rate*(float64(datagrams)*every.Seconds()))/2 {
 		t.Fatalf("the pull moved %d bytes beside the datagrams", moved)
 	}
+}
+
+// TestAReliableSendGoesBesideADatagramFlood is the other side of the slack. A
+// datagram flow faster than the leg keeps between a window and a window and
+// the slack in flight to its destination, and takes the room each echo frees
+// before a reliable sender held on that window looks again; each of those
+// echoes starts the dead clock over too, so the byte stream - control pings
+// with it - would wait until liveness closed the session, the #49 close
+// brought about by the lossy lane. Once a reliable send has been held for a
+// probe interval, datagrams to its destination yield to it: it goes when the
+// leg has drained under a window, and arrives behind at most what the flow
+// had queued.
+func TestAReliableSendGoesBesideADatagramFlood(t *testing.T) {
+	url, fake := newFakeConnector(t)
+	server, _, client, clientGot := windowPair(t, url)
+	to := client.localIdentity()
+
+	const (
+		rate  = 64_000
+		size  = 1024
+		every = 4 * time.Millisecond // four times the leg's rate
+	)
+	fake.slowLeg(to, rate)
+	stop, flooded := make(chan struct{}), make(chan error, 1)
+	go func() {
+		tick := time.NewTicker(every)
+		defer tick.Stop()
+		for seq := 0; ; seq++ {
+			select {
+			case <-stop:
+				flooded <- nil
+				return
+			case <-tick.C:
+			}
+			if err := server.SendDatagramTo(to, taggedPayload("flood", seq, size)); err != nil {
+				flooded <- err
+				return
+			}
+		}
+	}()
+	defer func() {
+		close(stop)
+		if err := <-flooded; err != nil {
+			t.Errorf("the flood = %v", err)
+		}
+	}()
+	gen := server.current()
+	waitFor(t, 10*time.Second, "the flood to fill the window and its slack", func() bool {
+		return gen.lossyDrops.Load() > 0
+	})
+
+	budget := time.Duration(relayWindow+datagramSlack)*time.Second/rate + relayProbeAfter + time.Second
+	pingWithin(t, server, clientGot, fake, to, budget, "the datagram flood")
 }

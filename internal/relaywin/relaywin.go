@@ -42,8 +42,14 @@
 //     frame for a session that is over, and must not send it.
 //   - A frame the carrier would rather drop than hold, a datagram, asks Over
 //     instead of Room: it goes until the window is on and more than a Window
-//     and the carrier's slack is in flight. Over only looks, so asking it on
-//     every datagram moves none of the clocks a held sender runs on.
+//     and the carrier's slack is in flight, or a sender has been held on the
+//     window for ProbeAfter. The slack lets datagrams through beside a bulk
+//     sender that keeps the window full, which is let go at every echo; the
+//     yield keeps a datagram flow as fast as the destination's leg from
+//     taking every byte an echo frees before a held sender looks again, which
+//     would hold it until liveness closed the session. Over only looks, so
+//     asking it on every datagram moves none of the clocks a held sender runs
+//     on.
 //
 // A sender that has to wait takes its window's Wake before it asks Room, then
 // waits on that channel and a Retry timer. An echo that moves the window, a
@@ -137,7 +143,12 @@ type state struct {
 	active    bool      // the window holds: an echo came, or Arm
 	markedAt  time.Time // when the last mark went out
 	heldSince time.Time // when the window filled, cleared by every echo
-	epoch     uint64    // replaced by Reset, ResetAll and Bump; never zero
+	// waitingSince is when a sender was first held since Room last let one
+	// go. Unlike heldSince an echo leaves it: an echo whose room a datagram
+	// takes lets nobody go. Room letting a sender go clears it, and so does
+	// Bump, which sends every parked sender away.
+	waitingSince time.Time
+	epoch        uint64 // replaced by Reset, ResetAll and Bump; never zero
 	// wake is closed when a sender held on the window may go on: replaced
 	// by an echo that moves it and by Bump, left closed by Reset and
 	// ResetAll, which drop the window with it.
@@ -183,12 +194,15 @@ func (w *Windows) Room(key string, now time.Time) (bool, bool, uint64) {
 	st := w.windows[key]
 	if st == nil || !st.active || st.sent-st.echoed < w.timing.Window {
 		if st != nil {
-			st.heldSince = time.Time{}
+			st.heldSince, st.waitingSince = time.Time{}, time.Time{}
 		}
 		return true, false, 0
 	}
 	if st.heldSince.IsZero() {
 		st.heldSince = now
+	}
+	if st.waitingSince.IsZero() {
+		st.waitingSince = now
 	}
 	if held := now.Sub(st.heldSince); held >= w.timing.DeadAfter {
 		// The destination is not named: the key is the carrier's address
@@ -196,7 +210,7 @@ func (w *Windows) Room(key string, now time.Time) (bool, bool, uint64) {
 		logger.Infof("relaywin: no echo for %s with %d bytes in flight - window off",
 			held.Round(time.Second), st.sent-st.echoed)
 		st.active = false
-		st.heldSince = time.Time{}
+		st.heldSince, st.waitingSince = time.Time{}, time.Time{}
 		return true, false, 0
 	}
 	if now.Sub(st.markedAt) >= w.timing.ProbeAfter {
@@ -288,12 +302,14 @@ func (w *Windows) ResetAll() {
 // Bump gives key's window a new epoch and keeps its counts: the session a
 // parked sender's frame belongs to is over, but the bytes it handed the relay
 // before are still queued there and their echoes still count. A sender
-// parked on the window is woken, to find its epoch gone.
+// parked on the window is woken, to find its epoch gone, so nobody is waiting
+// on the window any more.
 func (w *Windows) Bump(key string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if st := w.windows[key]; st != nil {
 		st.epoch = w.nextEpoch()
+		st.waitingSince = time.Time{}
 		st.wakeSenders()
 	}
 }
@@ -308,21 +324,31 @@ func (w *Windows) Epoch(key string) uint64 {
 }
 
 // Over reports whether key's window is on with more than a Window and slack
-// in flight. It is for a frame the carrier drops rather than holds, a
-// datagram: one that finds the window over is dropped, and one that does not
-// goes and is counted with Sent like any other. A window that is off is
-// never over - an older build never echoes, so what is in flight to it only
-// grows, and its datagrams go as they did before the window - and neither is
-// a destination with no window.
+// in flight, or has held a sender for ProbeAfter by now. It is for a frame the
+// carrier drops rather than holds, a datagram: one that finds the window over
+// is dropped, and one that does not goes and is counted with Sent like any
+// other. A window that is off is never over - an older build never echoes, so
+// what is in flight to it only grows, and its datagrams go as they did before
+// the window - and neither is a destination with no window.
+//
+// The slack is for a bulk sender that keeps the window full: it is let go at
+// every echo, so its waits are short, and datagrams still go beside it. A
+// sender held for ProbeAfter is one they are starving: a flow as fast as the
+// leg takes the room each echo frees before the sender looks again. From then
+// until Room lets a sender go, every datagram to key is dropped, even one
+// that finds room an echo has just made: that room is the held sender's.
 //
 // Over only looks. It opens no window, starts no hold, takes no probe, lets
 // nothing go and wakes nobody: those are Room's, for the sender that waits.
-func (w *Windows) Over(key string, slack uint64) bool {
+func (w *Windows) Over(key string, slack uint64, now time.Time) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	st := w.windows[key]
 	if st == nil || !st.active {
 		return false
+	}
+	if !st.waitingSince.IsZero() && now.Sub(st.waitingSince) >= w.timing.ProbeAfter {
+		return true
 	}
 	// Compared past the Window, so no slack can wrap the sum.
 	inFlight := st.sent - st.echoed

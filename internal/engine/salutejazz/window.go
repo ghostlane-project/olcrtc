@@ -34,8 +34,12 @@ import (
 // Datagrams count too: the SFU queues them in the same FIFO. They are never
 // held - a datagram late is a datagram lost - so one is dropped instead once
 // more than a window and datagramSlack are in flight to its destination and
-// the window is on. A client's datagrams go to its confirmed server alone,
-// so none of them is queued toward anyone else in the room.
+// the window is on, and also while a reliable send to it has been held for a
+// probe interval: a datagram flow as fast as the leg would otherwise take the
+// room every echo frees, and the byte stream behind it - control pings too -
+// would wait until liveness closed the session. A client's datagrams go to
+// its confirmed server alone, so none of them is queued toward anyone else in
+// the room.
 //
 // The window is on only once the destination has shown it speaks it: its
 // first window frame arms it (a client's ConfirmPeer sends one, a mark of
@@ -100,7 +104,10 @@ const (
 	// datagramSlack is how far past its window a destination may be before
 	// a datagram to it is dropped. A TCP pull keeps the window full, so
 	// without it UDP to the same destination would never go; with it, a
-	// QUIC bulk flow still cannot rebuild the queue the window bounds.
+	// QUIC bulk flow still cannot rebuild the queue the window bounds. A
+	// pull is let go at every echo; a reliable send held for a probe
+	// interval is not being let go, and datagrams yield to it (relaywin's
+	// Over).
 	datagramSlack = 64 << 10
 
 	// windowReportEvery is how often a destination's delivery rate and echo

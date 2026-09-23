@@ -111,7 +111,8 @@ func destinations(peerID string) []string {
 // stream waits for room (awaitSendWindow), because a frame it drops is a
 // frame the peer waits for forever, and the datagram lane drops. A datagram
 // is dropped as well once its destination's relay window is on and more than
-// a window and datagramSlack are in flight to it.
+// a window and datagramSlack are in flight to it, or a reliable send to it
+// has been held for a probe interval.
 //
 // The byte stream then waits for its destination's relay window, which the
 // lane's mark cannot see: the SFU takes everything at once and queues it
@@ -135,7 +136,7 @@ func (s *Session) publish(payload []byte, topic string, dest []string, reliable 
 	if !reliable {
 		dest = gen.datagramDest(dest)
 		key = gen.relayKey(dest)
-		if dc.BufferedAmount() > bufferHighWaterMark || (key != "" && gen.win.Over(key, datagramSlack)) {
+		if dc.BufferedAmount() > bufferHighWaterMark || (key != "" && gen.win.Over(key, datagramSlack, time.Now())) {
 			gen.dropLossy()
 			return nil
 		}
