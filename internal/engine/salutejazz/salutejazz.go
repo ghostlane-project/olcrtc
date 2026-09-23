@@ -206,9 +206,15 @@ type generation struct {
 	// maintain for everyone else in it. It is a read-write lock because the
 	// reads outnumber the writes by the packet: every relayed packet asks
 	// whether it is from someone the roster already names (notePeer), and
-	// almost every one of them is.
+	// almost every one of them is. left is every identity the room has
+	// reported gone during this attempt: the SFU hands every connection
+	// fresh participant ids, so one that has left never comes back under
+	// this attempt, and what still arrives from it - a slow leg delivers a
+	// participant's last frames long after the connector has reported it
+	// gone - does not put it back in the roster.
 	peersMu sync.RWMutex
 	peers   map[string]string
+	left    map[string]struct{}
 
 	// confirmed is the one remote identity the tunnel handshake has
 	// authenticated, and it belongs to this connection attempt: the SFU
@@ -261,6 +267,7 @@ func newGeneration(api *webrtc.API) *generation {
 		answer:      make(chan string, 1),
 		pending:     make(map[string][]webrtc.ICECandidateInit),
 		peers:       make(map[string]string),
+		left:        make(map[string]struct{}),
 		window:      make(chan struct{}),
 		pongWaiters: make(map[int64]chan struct{}),
 		win:         relaywin.New(defaultRelayTiming()),
@@ -330,7 +337,8 @@ func (g *generation) remoteIdentities() []string {
 // applyParticipants folds one roster - rtc:join's otherParticipants, or an
 // rtc:participants:update - into the identity map: a participant that has
 // left is dropped, and this session is never its own peer. A participant that
-// has left takes its relay window with it, as participant-left does.
+// has left takes its relay window with it, as participant-left does, and a
+// roster that names it again later is stale: it stays gone.
 func (g *generation) applyParticipants(list []participant) {
 	local := g.localIdentity()
 	var gone []string
@@ -340,8 +348,11 @@ func (g *generation) applyParticipants(list []participant) {
 			continue
 		}
 		if peer.State == participantDisconnected {
-			delete(g.peers, peer.Identity)
+			g.departLocked(peer.Identity)
 			gone = append(gone, peer.Identity)
+			continue
+		}
+		if _, departed := g.left[peer.Identity]; departed {
 			continue
 		}
 		g.peers[peer.Identity] = peer.SID

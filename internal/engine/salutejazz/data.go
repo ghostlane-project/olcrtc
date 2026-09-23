@@ -490,39 +490,59 @@ func (g *generation) inRoom(identity string) bool {
 	return ok
 }
 
+// hasLeft reports whether the room has reported identity gone during this
+// attempt.
+func (g *generation) hasLeft(identity string) bool {
+	g.peersMu.RLock()
+	defer g.peersMu.RUnlock()
+	_, gone := g.left[identity]
+	return gone
+}
+
 // dropPeer takes one participant out of the roster, on the connector's word
-// that it has left.
+// that it has left, for the rest of the attempt.
 func (g *generation) dropPeer(identity string) {
 	g.peersMu.Lock()
 	defer g.peersMu.Unlock()
+	g.departLocked(identity)
+}
+
+// departLocked takes identity out of the roster for good. Called with peersMu
+// held for writing.
+func (g *generation) departLocked(identity string) {
 	delete(g.peers, identity)
+	g.left[identity] = struct{}{}
 }
 
 // notePeer records a sender the roster has not named yet, so the first
 // packet from a participant counts as that participant appearing. The
 // roster update that follows fills in its sid, and the one that reports it
-// gone removes it again.
+// gone removes it again. A participant the room has reported gone is not
+// recorded again: its last frames can arrive long after it left.
 //
 // Every relayed packet comes through here, and after the first one from a
 // participant there is nothing left to record: that case takes the read lock
 // and leaves, so a session carrying traffic does not serialise its packets
-// behind a map it is not changing.
+// behind a map it is not changing. So does a packet from one that has left.
 func (g *generation) notePeer(identity string) {
 	if identity == "" || identity == g.localIdentity() {
 		return
 	}
 	g.peersMu.RLock()
 	_, known := g.peers[identity]
+	_, gone := g.left[identity]
 	g.peersMu.RUnlock()
-	if known {
+	if known || gone {
 		return
 	}
 	g.peersMu.Lock()
 	defer g.peersMu.Unlock()
 	// Between the two locks the roster may have learned this identity, with
-	// the sid an update carries; the check is made again rather than
-	// overwriting it with the empty one a packet has.
-	if _, known := g.peers[identity]; !known {
+	// the sid an update carries, or lost it; the check is made again rather
+	// than overwriting the one or bringing back the other.
+	_, known = g.peers[identity]
+	_, gone = g.left[identity]
+	if !known && !gone {
 		g.peers[identity] = ""
 	}
 }

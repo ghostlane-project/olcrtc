@@ -219,3 +219,78 @@ func TestTheHelloBeforeConfirmationReachesTheServer(t *testing.T) {
 	sendToTheRoom(t, client, "retry")
 	waitHeard(t, 5*time.Second, "retry", serverGot, otherGot)
 }
+
+// TestAServerThatLeftStaysGone is the way back on a slow leg. The SFU goes on
+// delivering a server's last frames - a backlog of tens of seconds on the
+// slowest legs, the server's marks among them - after the room has reported
+// it gone. The SFU hands every connection fresh participant ids, so an
+// identity that has left never comes back under the attempt: nothing that
+// still arrives from it, and no roster that names it again, puts it back in
+// the client's roster or has the client answer its marks, and what the client
+// sends to the room goes to the room.
+func TestAServerThatLeftStaysGone(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		leave func(server, client *Session)
+	}{
+		{"the connector reports it gone", func(server, client *Session) {
+			client.handleEnvelope(client.current(), envIn{
+				Event: eventParticipantLeft, ParticipantID: server.localIdentity(),
+			})
+		}},
+		{"the roster reports it disconnected", func(server, client *Session) {
+			client.current().applyParticipants([]participant{{
+				SID: "PA_" + server.localIdentity(), Identity: server.localIdentity(), State: participantDisconnected,
+			}})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			url, fake := newFakeConnector(t)
+			server, serverGot := connectTally(t, url, "server")
+			client, clientGot := connectTally(t, url, "client")
+			other, otherGot := connectTally(t, url, "other")
+			waitForRoom(t, server, client, other)
+			pairWindow(t, server, serverGot, client, clientGot)
+			serverID, clientID := server.localIdentity(), client.localIdentity()
+
+			tc.leave(server, client)
+			// The reply the server was sending when it went: past a mark, and
+			// a small frame behind the mark, so that once the frame is in the
+			// client has handled the mark.
+			marks, echoes := fake.framesFrom(serverID, windowTopic), fake.framesFrom(clientID, windowTopic)
+			late := startBulk(func(p []byte) error { return server.SendTo(clientID, p) }, "late", relayMarkEvery+slowLegRecord, slowLegRecord)
+			if err := late.finish(t, 5*time.Second, "the server's last reply"); err != nil {
+				t.Fatalf("the server's last reply = %v", err)
+			}
+			if err := server.SendTo(clientID, taggedPayload("tail", 0, 64)); err != nil {
+				t.Fatal(err)
+			}
+			waitFor(t, 5*time.Second, "the server's last frame at the client", func() bool {
+				_, ok := clientGot.arrival("tail", 0)
+				return ok
+			})
+			if fake.framesFrom(serverID, windowTopic) == marks {
+				t.Fatal("the server's last reply carried no mark")
+			}
+			if slices.Contains(client.remoteIdentities(), serverID) {
+				t.Fatal("a frame from a server that had left put it back in the client's roster")
+			}
+			// An echo would have gone out while the mark was handled, and been
+			// relayed by now.
+			time.Sleep(slowLegSettle)
+			if extra := fake.framesFrom(clientID, windowTopic) - echoes; extra != 0 {
+				t.Fatalf("the client answered a server that had left with %d window frames", extra)
+			}
+
+			client.current().applyParticipants([]participant{{
+				SID: "PA_" + serverID, Identity: serverID, State: "ACTIVE",
+			}})
+			if slices.Contains(client.remoteIdentities(), serverID) {
+				t.Fatal("a roster naming a server that had left put it back in the client's roster")
+			}
+
+			sendToTheRoom(t, client, "again")
+			waitHeard(t, 5*time.Second, "again", otherGot)
+		})
+	}
+}

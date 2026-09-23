@@ -303,8 +303,11 @@ func (s *Session) sendWindowFrame(gen *generation, to string, kind byte, counter
 
 // handleWindowFrame takes a mark or an echo off the receive path. It acts
 // only on a sender the SFU names by identity - the only name a window is
-// kept under - and only on a frame it can read; whatever it does, the frame
-// is not the tunnel's and goes no further.
+// kept under - that has not left the room, and only on a frame it can read;
+// whatever it does, the frame is not the tunnel's and goes no further. A
+// participant that has left can still be heard from, the last of its frames
+// on a slow leg, but its window has gone with it: nothing arms it again and
+// no echo is sent to someone who is not there.
 //
 // The first frame from a peer arms the window toward it. A mark is answered
 // with an echo of its count: packets arrive in order on this channel and each
@@ -313,7 +316,7 @@ func (s *Session) sendWindowFrame(gen *generation, to string, kind byte, counter
 // that one: relaywin takes it only past the last echo and within what was
 // sent.
 func (s *Session) handleWindowFrame(gen *generation, from string, byIdentity bool, payload []byte) {
-	if !byIdentity {
+	if !byIdentity || gen.hasLeft(from) {
 		return
 	}
 	frame, ok := parseWindowFrame(payload)
