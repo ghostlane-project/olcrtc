@@ -73,7 +73,8 @@ func (s *Session) SendTo(peerID string, data []byte) error {
 	return s.publish(data, "", destinations(peerID), true)
 }
 
-// SendDatagram publishes one payload on the lossy lane, to the whole room.
+// SendDatagram publishes one payload on the lossy lane, to the whole room -
+// or, on a client that has confirmed a server, to that server.
 // The lane is ordered and never retransmitted - LiveKit's own _lossy
 // settings, which startPublisher creates it with - so a packet that cannot go
 // now is worth nothing later: a lane that is not up refuses it, and a lane
@@ -108,7 +109,9 @@ func destinations(peerID string) []string {
 //
 // A lane over its high-water mark is where the two lanes part: the byte
 // stream waits for room (awaitSendWindow), because a frame it drops is a
-// frame the peer waits for forever, and the datagram lane drops.
+// frame the peer waits for forever, and the datagram lane drops. A datagram
+// is dropped as well once its destination's relay window is on and more than
+// a window and datagramSlack are in flight to it.
 //
 // The byte stream then waits for its destination's relay window, which the
 // lane's mark cannot see: the SFU takes everything at once and queues it
@@ -128,9 +131,11 @@ func (s *Session) publish(payload []byte, topic string, dest []string, reliable 
 	if dc == nil || dc.ReadyState() != webrtc.DataChannelStateOpen {
 		return ErrNoDataChannel
 	}
-	key := ""
+	var key string
 	if !reliable {
-		if dc.BufferedAmount() > bufferHighWaterMark {
+		dest = gen.datagramDest(dest)
+		key = gen.relayKey(dest)
+		if dc.BufferedAmount() > bufferHighWaterMark || (key != "" && gen.win.Over(key, datagramSlack)) {
 			gen.dropLossy()
 			return nil
 		}
@@ -200,12 +205,13 @@ func (g *generation) openSendWindow() {
 	g.window = make(chan struct{})
 }
 
-// dropLossy records one datagram thrown away because the lossy lane was over
-// its budget, and says so every so often: a lane that is dropping is worth a
-// line in the log, one per packet is not.
+// dropLossy records one datagram thrown away because the lossy lane, or its
+// destination's relay window, was over its budget, and says so every so
+// often: a lane that is dropping is worth a line in the log, one per packet
+// is not.
 func (g *generation) dropLossy() {
 	if dropped := g.lossyDrops.Add(1); dropped%lossyDropLogEvery == 1 {
-		logger.Debugf("salutejazz: the lossy lane is over its budget, %d datagrams dropped", dropped)
+		logger.Debugf("salutejazz: the lossy lane or a relay window is over its budget, %d datagrams dropped", dropped)
 	}
 }
 

@@ -237,7 +237,7 @@ type generation struct {
 	window   chan struct{}
 
 	// lossyDrops counts the datagrams this attempt threw away because the
-	// lossy lane was over its budget.
+	// lossy lane, or their destination's relay window, was over its budget.
 	lossyDrops atomic.Uint64
 
 	// win is the relay window toward every destination this attempt sends

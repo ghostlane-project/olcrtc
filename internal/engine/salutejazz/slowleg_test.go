@@ -75,6 +75,12 @@ func (c *tally) streamBytes() int {
 	return c.stream
 }
 
+func (c *tally) datagramBytes() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.datagrams
+}
+
 // arrival is when the payload tagged kind-seq arrived, and whether it has.
 func (c *tally) arrival(kind string, seq int) (time.Time, bool) {
 	c.mu.Lock()

@@ -31,6 +31,12 @@ import (
 //   - anything else, nothing. A room-wide send before the handshake has
 //     confirmed a server is the hello, and small.
 //
+// Datagrams count too: the SFU queues them in the same FIFO. They are never
+// held - a datagram late is a datagram lost - so one is dropped instead once
+// more than a window and datagramSlack are in flight to its destination and
+// the window is on. A client's datagrams go to its confirmed server alone,
+// so none of them is queued toward anyone else in the room.
+//
 // The window is on only once the destination has shown it speaks it: its
 // first window frame arms it (a client's ConfirmPeer sends one, a mark of
 // count 0, ahead of any data, so a server is armed before its first reply
@@ -91,6 +97,11 @@ const (
 	// a dead one, and liveness closes a dead one long before this: it is a
 	// backstop, not a verdict.
 	relayDeadAfter = 120 * time.Second
+	// datagramSlack is how far past its window a destination may be before
+	// a datagram to it is dropped. A TCP pull keeps the window full, so
+	// without it UDP to the same destination would never go; with it, a
+	// QUIC bulk flow still cannot rebuild the queue the window bounds.
+	datagramSlack = 64 << 10
 
 	// windowReportEvery is how often a destination's delivery rate and echo
 	// round trip go to the debug log, and windowMarksKept how many marks in
@@ -139,6 +150,17 @@ func parseWindowFrame(frame []byte) (windowFrame, bool) {
 		return windowFrame{}, false
 	}
 	return windowFrame{kind: kind, counter: binary.BigEndian.Uint64(frame[2:10])}, true
+}
+
+// datagramDest is where a datagram to dest goes: on a client that has
+// confirmed a server, a datagram to the room goes to that server alone.
+func (g *generation) datagramDest(dest []string) []string {
+	if len(dest) == 0 {
+		if bound := loadString(&g.confirmed); bound != "" {
+			return []string{bound}
+		}
+	}
+	return dest
 }
 
 // relayKey is the window a payload to dest counts against: the participant it

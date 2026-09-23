@@ -602,3 +602,195 @@ func TestParticipantLeftReleasesParkedPublish(t *testing.T) {
 		})
 	}
 }
+
+// TestDatagramsCountAndDropOnlyPastWPlusD is the lossy lane under the window
+// (objection 2 of the challenge). A datagram is queued at the SFU like any
+// other packet, so it counts against its destination's window. It is never
+// held - a datagram late is a datagram lost - but once more than a window
+// and datagramSlack are in flight to a destination whose window is on, it is
+// dropped: a QUIC bulk flow can then no longer rebuild the queue the window
+// bounds, and the slack still lets UDP through beside a TCP pull that keeps
+// the window full. A destination whose window is off - an older build, which
+// never echoes - never has a datagram dropped by this rule.
+func TestDatagramsCountAndDropOnlyPastWPlusD(t *testing.T) {
+	const size = 1024
+	budget := relayWindow + datagramSlack
+
+	t.Run("a window that is on", func(t *testing.T) {
+		url, fake := newFakeConnector(t)
+		server, _, client, clientGot := windowPair(t, url)
+		to := client.localIdentity()
+		fake.slowLeg(to, 0)
+		gen := server.current()
+
+		went := 0
+		for gen.lossyDrops.Load() == 0 && went < 2*budget/size {
+			if err := server.SendDatagramTo(to, taggedPayload("dgram", went, size)); err != nil {
+				t.Fatal(err)
+			}
+			went++
+		}
+		went-- // the one that was dropped
+		if least, most := budget/(size+128), budget/size+1; went < least || went > most {
+			t.Fatalf("the first datagram was dropped after %d went, want between %d and %d for %d KiB",
+				went, least, most, budget>>10)
+		}
+		for seq := range 8 {
+			if err := server.SendDatagramTo(to, taggedPayload("over", seq, size)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if dropped := gen.lossyDrops.Load(); dropped != 9 {
+			t.Fatalf("%d datagrams were dropped past the window and its slack, want every one of the 9", dropped)
+		}
+		// The datagrams filled the window for the byte stream too.
+		held := make(chan error, 1)
+		go func() { held <- server.SendTo(to, taggedPayload("held", 0, 64)) }()
+		select {
+		case err := <-held:
+			t.Fatalf("a reliable send went past a window of datagrams in flight (%v)", err)
+		case <-time.After(slowLegSettle):
+		}
+
+		// The leg moves: what went arrives, the echoes open the window, and
+		// datagrams go again.
+		fake.slowLeg(to, 2_000_000)
+		waitFor(t, 10*time.Second, "the datagrams that went, and the held send", func() bool {
+			_, heldIn := clientGot.arrival("held", 0)
+			return clientGot.datagramBytes() == went*size && heldIn
+		})
+		if err := <-held; err != nil {
+			t.Fatalf("the held send = %v", err)
+		}
+		if err := server.SendDatagramTo(to, taggedPayload("again", 0, size)); err != nil {
+			t.Fatal(err)
+		}
+		waitFor(t, 5*time.Second, "a datagram once the window moved", func() bool {
+			_, ok := clientGot.arrival("again", 0)
+			return ok
+		})
+		if dropped := gen.lossyDrops.Load(); dropped != 9 {
+			t.Fatalf("%d datagrams dropped in all, want the 9 sent past the budget", dropped)
+		}
+	})
+
+	t.Run("a window that is off", func(t *testing.T) {
+		url, fake := newFakeConnector(t)
+		fake.swallow(windowTopic)
+		server, _, client, _ := windowPair(t, url)
+		to := client.localIdentity()
+		fake.slowLeg(to, 0)
+		for seq := range 2 * budget / size {
+			if err := server.SendDatagramTo(to, taggedPayload("dgram", seq, size)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if dropped := server.current().lossyDrops.Load(); dropped != 0 {
+			t.Fatalf("%d datagrams to a peer that never echoes were dropped", dropped)
+		}
+	})
+}
+
+// TestAConfirmedClientsDatagramsGoToItsServer is where a client's datagram
+// goes: to the room until its handshake has confirmed a server, and to that
+// server alone after, where it counts against the server's window. Another
+// participant in the room - a second client - has it queued toward it no
+// more.
+func TestAConfirmedClientsDatagramsGoToItsServer(t *testing.T) {
+	url, _ := newFakeConnector(t)
+	server, serverGot := connectTally(t, url, "server")
+	client, clientGot := connectTally(t, url, "client")
+	other, otherGot := connectTally(t, url, "other")
+	waitForRoom(t, server, client, other)
+
+	if err := client.SendDatagram(taggedPayload("before", 0, 64)); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 5*time.Second, "the room-wide datagram at both others", func() bool {
+		_, atServer := serverGot.arrival("before", 0)
+		_, atOther := otherGot.arrival("before", 0)
+		return atServer && atOther
+	})
+
+	pairWindow(t, server, serverGot, client, clientGot)
+	if err := client.SendDatagram(taggedPayload("after", 0, 64)); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.SendDatagram(taggedPayload("after", 1, 64)); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 5*time.Second, "the datagrams at the confirmed server", func() bool {
+		_, first := serverGot.arrival("after", 0)
+		_, second := serverGot.arrival("after", 1)
+		return first && second
+	})
+	if err := client.SendDatagram(taggedPayload("after", 2, 64)); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 5*time.Second, "the last datagram at the server", func() bool {
+		_, ok := serverGot.arrival("after", 2)
+		return ok
+	})
+	// Room-wide, each would have reached the other participant about when
+	// it reached the server.
+	time.Sleep(slowLegSettle)
+	for seq := range 3 {
+		if _, ok := otherGot.arrival("after", seq); ok {
+			t.Fatalf("datagram %d of a confirmed client reached another participant", seq)
+		}
+	}
+}
+
+// TestUDPUnderConcurrentPull is what datagramSlack is for: a TCP pull keeps
+// the window toward a client full, and UDP to the same client still flows
+// beside it, each datagram waiting at the SFU behind no more than the window
+// and the slack.
+func TestUDPUnderConcurrentPull(t *testing.T) {
+	url, fake := newFakeConnector(t)
+	server, _, client, clientGot := windowPair(t, url)
+	to := client.localIdentity()
+
+	const (
+		rate      = 128_000
+		datagrams = 60
+		every     = 50 * time.Millisecond
+		size      = 512
+	)
+	fake.slowLeg(to, rate)
+	pull := startBulk(func(p []byte) error { return server.SendTo(to, p) }, "bulk", 16<<20, slowLegRecord)
+	t.Cleanup(pull.halt)
+	waitFor(t, 10*time.Second, "the pull to fill the leg", func() bool {
+		return fake.queuedTo(to) >= relayWindow/2
+	})
+	time.Sleep(time.Second)
+	pulled := clientGot.streamBytes()
+
+	sentAt := make([]time.Time, datagrams)
+	for seq := range datagrams {
+		sentAt[seq] = time.Now()
+		if err := server.SendDatagramTo(to, taggedPayload("udp", seq, size)); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(every)
+	}
+	late := time.Duration(relayWindow+datagramSlack)*time.Second/rate + time.Second
+	time.Sleep(late)
+
+	arrived := 0
+	for seq := range datagrams {
+		at, ok := clientGot.arrival("udp", seq)
+		if !ok {
+			continue
+		}
+		arrived++
+		if took := at.Sub(sentAt[seq]); took > late {
+			t.Fatalf("datagram %d took %s beside the pull, over the %s the window and its slack allow", seq, took, late)
+		}
+	}
+	if arrived < datagrams*9/10 {
+		t.Fatalf("%d of %d datagrams arrived beside the pull, %d dropped", arrived, datagrams, server.current().lossyDrops.Load())
+	}
+	if moved := clientGot.streamBytes() - pulled; moved < int(rate*(float64(datagrams)*every.Seconds()))/2 {
+		t.Fatalf("the pull moved %d bytes beside the datagrams", moved)
+	}
+}
