@@ -111,7 +111,8 @@ func (c *Client) openDirectFlow(
 	c.directUDP[key] = flow
 	c.udpMu.Unlock()
 	logger.Infof("direct udp to %s:%d", target.Host, target.Port)
-	c.ensureUDPFlowSweeper(ctx)
+	// The sweeper that closes the flow when it idles is the client's, started
+	// by handleUDPAssociate on the run's context; ctx is the association's.
 	c.goTracked(func() { c.readDirectFlow(ctx, flow) })
 	return flow
 }

@@ -379,6 +379,8 @@ func (s *Session) handleParticipantLeft(gen *generation, frame envIn) {
 		return
 	}
 	gen.dropPeer(identity)
+	gen.forgetRelayPeer(identity)
+	logger.Debugf("salutejazz: participant-left, %d others still in the room", len(gen.remoteIdentities()))
 }
 
 // handleJoinResponse records who we are and the group id every later frame

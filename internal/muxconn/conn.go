@@ -26,6 +26,7 @@ import (
 	"io"
 	"net"
 	"runtime"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -105,7 +106,14 @@ const (
 	// batching sender, several, so a record opened here starts with this
 	// header.
 	smuxHeaderSize = 8
+	smuxCmdSYN     = 0
 	smuxCmdPSH     = 2
+
+	// smuxFirstStream is the id of the first stream a client's smux session
+	// opens: a client numbers its streams from 1 up by two, and the first
+	// id it hands out is 3.
+	// ai-generated (olcrtc#49).
+	smuxFirstStream = 3
 )
 
 // frameBufPool recycles plaintext buffers between Push (decrypts a wire
@@ -181,6 +189,12 @@ type Conn struct {
 	// which says why the first is not enough.
 	inBytes      atomic.Uint64
 	payloadBytes atomic.Uint64
+
+	// opened is set once a SYN from the peer has opened a stream on this
+	// conn, for PushSession: the session's first stream opened after that is
+	// the session after it.
+	// ai-generated (olcrtc#49).
+	opened atomic.Bool
 
 	// writeStalls counts Writes that waited out the full send deadline
 	// without the transport ever accepting data, and is cleared by the
@@ -328,6 +342,66 @@ func (c *Conn) Group() *PinGroup { return c.group }
 // reader would wedge the transport callback and trip its watchdog, so we
 // also bail on closeCh.
 func (c *Conn) Push(ciphertext []byte) {
+	if bufPtr := c.open(ciphertext); bufPtr != nil {
+		c.take(bufPtr)
+	}
+}
+
+// PushSession is Push for a peer that can start its smux session over under
+// the same transport identity, which is what a client does when it gives a
+// handshake up and tries again: a server keys its peer sessions on that
+// identity, so the new session's records arrive on the conn of the old one.
+// A client opens its session's first stream alone, for its hello, before any
+// other stream can exist, so a record that opens that stream on a conn that
+// has seen a stream opened belongs to the session after the one this conn
+// carries. That record is not taken: its plaintext is returned, for the conn
+// built for the new session to take (PushOpened), and every other record is
+// taken as Push takes it and nil returned.
+//
+// No other stream id says which session a record is from. smux hands an id
+// out under a lock it lets go before it writes the SYN, and its shaper writes
+// round robin across streams, so the SYNs of streams opened at once - a
+// tunnel per SOCKS connection, each on its own goroutine - reach the wire in
+// no set order: a SYN below one already seen is still the session's own.
+//
+// ai-generated: the whole method (olcrtc#49).
+func (c *Conn) PushSession(ciphertext []byte) []byte {
+	bufPtr := c.open(ciphertext)
+	if bufPtr == nil {
+		return nil
+	}
+	first, opens := openedStreams(*bufPtr)
+	if first && c.opened.Load() {
+		record := slices.Clone(*bufPtr)
+		releaseFrameBuf(bufPtr)
+		return record
+	}
+	if opens {
+		c.opened.Store(true)
+	}
+	c.take(bufPtr)
+	return nil
+}
+
+// PushOpened takes a record another conn of the same peer has opened and
+// handed back (PushSession), as if this conn had opened it.
+//
+// ai-generated: the whole method (olcrtc#49).
+func (c *Conn) PushOpened(record []byte) {
+	bufPtr := acquireFrameBuf()
+	*bufPtr = append(*bufPtr, record...)
+	if _, opens := openedStreams(record); opens {
+		c.opened.Store(true)
+	}
+	c.take(bufPtr)
+}
+
+// open decrypts one wire payload into a pooled buffer, pinning the group's
+// key on the first record any ring entry opens. A payload that does not open
+// is counted and nil returned.
+//
+// ai-generated: split out of Push as it was, for PushSession (olcrtc#49).
+func (c *Conn) open(ciphertext []byte) *[]byte {
 	bufPtr := acquireFrameBuf()
 	var (
 		pt  []byte
@@ -347,9 +421,17 @@ func (c *Conn) Push(ciphertext []byte) {
 	if err != nil {
 		releaseFrameBuf(bufPtr)
 		c.noteDecryptFailure(len(ciphertext), err)
-		return
+		return nil
 	}
 	*bufPtr = pt
+	return bufPtr
+}
+
+// take counts an opened record and queues it for Read.
+//
+// ai-generated: split out of Push as it was, for PushSession (olcrtc#49).
+func (c *Conn) take(bufPtr *[]byte) {
+	pt := *bufPtr
 	c.inBytes.Add(uint64(len(pt)))
 	c.payloadBytes.Add(streamPayloadLen(pt))
 	c.noteReordering()
@@ -488,6 +570,28 @@ func streamPayloadLen(record []byte) uint64 {
 		record = record[smuxHeaderSize+body:]
 	}
 	return total
+}
+
+// openedStreams reports whether the SYN frames of a plaintext record open a
+// session's first stream (smuxFirstStream), and whether they open any stream.
+// A record holds whole frames, several from a batching sender.
+//
+// ai-generated: the whole function (olcrtc#49).
+func openedStreams(record []byte) (bool, bool) {
+	var first, opens bool
+	for len(record) >= smuxHeaderSize {
+		version, cmd := record[0], record[1]
+		if version != 1 && version != 2 {
+			return first, opens
+		}
+		body := min(int(binary.LittleEndian.Uint16(record[2:4])), len(record)-smuxHeaderSize)
+		if id := binary.LittleEndian.Uint32(record[4:8]); cmd == smuxCmdSYN && id != 0 {
+			first = first || id == smuxFirstStream
+			opens = true
+		}
+		record = record[smuxHeaderSize+body:]
+	}
+	return first, opens
 }
 
 // SendStalled reports whether a Write has waited out the whole send deadline

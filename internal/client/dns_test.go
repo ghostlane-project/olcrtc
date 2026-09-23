@@ -47,6 +47,8 @@ func (l *dnsTestLane) SendDatagram(data []byte) error {
 
 func (*dnsTestLane) DatagramCanSend() bool { return true }
 
+func (*dnsTestLane) Features() transport.Features { return transport.Features{Datagram: true} }
+
 func (l *dnsTestLane) count() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()

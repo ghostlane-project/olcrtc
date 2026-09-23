@@ -3,6 +3,7 @@ package tunnelcore
 import (
 	"context"
 	"fmt"
+	"io"
 
 	"github.com/xtaci/smux"
 
@@ -40,7 +41,10 @@ type ControlRunner struct {
 }
 
 // Run blocks until the control stream stops, then invokes OnDeath unless ctx was canceled.
-func (r ControlRunner) Run(ctx context.Context, stream *smux.Stream) {
+//
+// ai-generated: stream is any io.ReadWriteCloser, as control.Run takes it, so
+// a caller can keep the close for itself (olcrtc#49).
+func (r ControlRunner) Run(ctx context.Context, stream io.ReadWriteCloser) {
 	cfg := r.tunedConfig()
 	cfg.BeforeClose = r.BeforeClose
 	err := control.Run(ctx, stream, cfg)

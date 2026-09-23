@@ -129,6 +129,17 @@ type PeerResetter interface {
 	ResetPeer()
 }
 
+// PeerRetirer is implemented by engines that keep send state per remote peer
+// under the server's peer sessions. RetirePeer is the server's word that its
+// session on peerID has ended (transport.PeerLifecycle); the peer may come
+// back under the same ID, so the engine ends what belonged to the old session
+// and keeps what outlives it.
+//
+// ai-generated: this interface (olcrtc#49).
+type PeerRetirer interface {
+	RetirePeer(peerID string)
+}
+
 // PublishRateLimited is implemented by engines whose service polices how fast
 // one participant may publish. A transport that publishes media asks its
 // session for the ceiling and keeps what it writes under it; an engine that

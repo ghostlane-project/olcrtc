@@ -33,6 +33,7 @@ import (
 	"github.com/openlibrecommunity/olcrtc/internal/engine"
 	"github.com/openlibrecommunity/olcrtc/internal/logger"
 	"github.com/openlibrecommunity/olcrtc/internal/protect"
+	"github.com/openlibrecommunity/olcrtc/internal/relaywin"
 )
 
 const (
@@ -144,6 +145,11 @@ var (
 	ErrNoDescription = errors.New("salutejazz description missing")
 	// ErrNoDataChannel is returned when no data channel can carry a payload.
 	ErrNoDataChannel = errors.New("salutejazz data channel not ready")
+	// ErrDestinationEnded is returned by a send held on its destination's
+	// relay window when the session it belonged to ended while it waited:
+	// the server retired the peer, the binding was dropped or moved, or the
+	// participant left. Its frame was not sent.
+	ErrDestinationEnded = errors.New("salutejazz destination's session ended while the send was held")
 )
 
 // generation is one connection attempt: the peer connections, their
@@ -200,9 +206,15 @@ type generation struct {
 	// maintain for everyone else in it. It is a read-write lock because the
 	// reads outnumber the writes by the packet: every relayed packet asks
 	// whether it is from someone the roster already names (notePeer), and
-	// almost every one of them is.
+	// almost every one of them is. left is every identity the room has
+	// reported gone during this attempt: the SFU hands every connection
+	// fresh participant ids, so one that has left never comes back under
+	// this attempt, and what still arrives from it - a slow leg delivers a
+	// participant's last frames long after the connector has reported it
+	// gone - does not put it back in the roster.
 	peersMu sync.RWMutex
 	peers   map[string]string
+	left    map[string]struct{}
 
 	// confirmed is the one remote identity the tunnel handshake has
 	// authenticated, and it belongs to this connection attempt: the SFU
@@ -231,8 +243,19 @@ type generation struct {
 	window   chan struct{}
 
 	// lossyDrops counts the datagrams this attempt threw away because the
-	// lossy lane was over its budget.
+	// lossy lane, or their destination's relay window, was over its budget.
 	lossyDrops atomic.Uint64
+
+	// win is the relay window toward every destination this attempt sends
+	// to, and relayMu owns relayPeers, what the window's wire knows of each
+	// of them (relaySeq numbers them for the log). All of it belongs to the
+	// attempt: the SFU hands every connection fresh participant ids, so a
+	// window kept under the last attempt's names nobody under this one. See
+	// window.go.
+	win        *relaywin.Windows
+	relayMu    sync.Mutex
+	relayPeers map[string]*relayPeer
+	relaySeq   int
 }
 
 func newGeneration(api *webrtc.API) *generation {
@@ -244,8 +267,11 @@ func newGeneration(api *webrtc.API) *generation {
 		answer:      make(chan string, 1),
 		pending:     make(map[string][]webrtc.ICECandidateInit),
 		peers:       make(map[string]string),
+		left:        make(map[string]struct{}),
 		window:      make(chan struct{}),
 		pongWaiters: make(map[int64]chan struct{}),
+		win:         relaywin.New(defaultRelayTiming()),
+		relayPeers:  make(map[string]*relayPeer),
 	}
 }
 
@@ -310,20 +336,30 @@ func (g *generation) remoteIdentities() []string {
 
 // applyParticipants folds one roster - rtc:join's otherParticipants, or an
 // rtc:participants:update - into the identity map: a participant that has
-// left is dropped, and this session is never its own peer.
+// left is dropped, and this session is never its own peer. A participant that
+// has left takes its relay window with it, as participant-left does, and a
+// roster that names it again later is stale: it stays gone.
 func (g *generation) applyParticipants(list []participant) {
 	local := g.localIdentity()
+	var gone []string
 	g.peersMu.Lock()
-	defer g.peersMu.Unlock()
 	for _, peer := range list {
 		if peer.Identity == "" || peer.Identity == local {
 			continue
 		}
 		if peer.State == participantDisconnected {
-			delete(g.peers, peer.Identity)
+			g.departLocked(peer.Identity)
+			gone = append(gone, peer.Identity)
+			continue
+		}
+		if _, departed := g.left[peer.Identity]; departed {
 			continue
 		}
 		g.peers[peer.Identity] = peer.SID
+	}
+	g.peersMu.Unlock()
+	for _, identity := range gone {
+		g.forgetRelayPeer(identity)
 	}
 }
 
@@ -348,6 +384,13 @@ type Session struct {
 	pass         string
 
 	cur atomic.Pointer[generation]
+
+	// server is the identity the last handshake this session completed
+	// confirmed. It is kept here and not on the attempt, where the binding
+	// is: the binding is dropped before every handshake the client retries
+	// (ResetPeer) and does not survive a rejoin, and PeerSeen asks about the
+	// server across both. See PeerSeen.
+	server atomic.Pointer[string]
 
 	// joinTimeout and pingInterval are the two paces a test shortens: how
 	// long a join may take, and how often the keepalive fires.
@@ -384,6 +427,10 @@ type Session struct {
 	// ownership of it. Tests set it before Connect to land a Close in that
 	// window every time instead of hoping for it.
 	beforePublish func()
+
+	// relayTiming paces the relay window of every attempt this session
+	// makes. Tests shorten it before Connect.
+	relayTiming relaywin.Timing
 }
 
 // New creates a SaluteJazz engine session.
@@ -415,6 +462,7 @@ func New(_ context.Context, cfg engine.Config) (engine.Session, error) {
 		pass:           cfg.Token,
 		joinTimeout:    joinTimeout,
 		pingInterval:   pingInterval,
+		relayTiming:    defaultRelayTiming(),
 		closeCh:        make(chan struct{}),
 	}
 	s.Configure(engine.ReconnectorConfig{
@@ -438,6 +486,7 @@ func (s *Session) Connect(ctx context.Context) error {
 		return err
 	}
 	gen := newGeneration(api)
+	gen.win = relaywin.New(s.relayTiming)
 	if s.beforePublish != nil {
 		s.beforePublish()
 	}
@@ -576,9 +625,14 @@ func (s *Session) terminate() *generation {
 // is closed and both peer connections are released. It runs once however
 // many callers hold the generation - Close and a Connect that is giving up
 // both do.
+//
+// Every relay window of the generation goes with it, which wakes a sender
+// held on one: it finds the generation gone and returns ErrSessionClosed. A
+// new attempt starts with windows of its own.
 func (s *Session) teardown(gen *generation) {
 	gen.closeOnce.Do(func() {
 		engine.CloseSignal(gen.done)
+		gen.win.ResetAll()
 		gen.closeSocket()
 		closePeerConnections(gen)
 	})

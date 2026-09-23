@@ -146,6 +146,8 @@ Load pairs are `jitsi/datachannel`, `telemost/vp8channel`, `wbstream/vp8channel`
 
 A cell has 5 min, S2 and S3 have 10. A server that did not come up gets one more try 30 s later (a missing token or pool room gets none), then its cells fail with the reason and the server's last log line, usually the provider's answer; a client that did not come up fails its cells too. Cells are not retried: a flake under load is a finding.
 
+A failed cell of the local target also names every session the relay ended during it, where the server's engine logs such an end (WB Stream's LiveKit engine does): the reason the relay gave, how far into the cell and how long after the server joined, for example `the relay ended the server's session (PARTICIPANT_REMOVED) 26s into the cell, 39s after it joined`. It judges nothing, and a cell that passed gets no such line. The runner notes where the server's log stands as each cell begins and reads only what the log gained after that, a line at a time; a line longer than 64 KiB is read by its first 64 KiB. So a cell that fails late in a pair does not copy a 20 MB log into the process S7 weighs.
+
 ## Thresholds
 
 The bounds a verdict judges by are in `internal/gate/thresholds.go`: `Local` for the local target, `Link` for a fleet node, the connect budget of S0 and the handshake budget of S6. S0's `handshake_ms` runs from the client's start to a working tunnel, so its bound is the tightest app ready wait, Android's 25 s, not the engine's 15 s reply deadline, which starts only at the first hello. S6 adds the handshake budget (15 s) to how late its server's bridge opens, 3 s and then 8 s, a delay the scenario sets, and fails a client ready sooner than that delay: no handshake completes before the bridge opens, so that bridge was not late and the cell tested nothing. A cell of a report carries the thresholds its pair was judged by, all of them, whatever its scenario: its target's, with its provider's own throughput floors where those are lower (`Thresholds.For`). SaluteJazz has such floors, 1.4 Mbit/s down and 1.6 Mbit/s up, by the same rule as a target's: half of what was measured, and every byte of it crosses Sber's TURN relay, which carried 2.79 Mbit/s down and 3.23 up from a datacenter. A provider's floor never raises a target's own:
@@ -164,6 +166,10 @@ The connect and handshake budgets are not among them, so an S0 or S6 cell does n
 
 S7 weighs the test process, which holds the harness too (the test binary, the origin, the load, what earlier pairs left), so it judges what the client adds. Before each client starts, the runner collects the garbage, hands the freed memory back to the OS and reads a baseline; an S7 cell records it as `heap_baseline_bytes` and `rss_baseline_bytes` next to `heap_peak_bytes` and `rss_peak_bytes`, and the verdict bounds the difference. The two bounds are the spec's for a process that runs the client alone (16 MiB of live heap, 45 MiB RSS) less what such a process holds before its client starts.
 
+The sampler also watches for jumps. When the heap or the RSS rises by more than 6 MiB from one sample to the next, it writes a heap profile of the test process into the pair's directory, `<client>-heap-<t_ms>ms.pb.gz` with `t_ms` on the clock of the samples, and logs the file. Go's heap profile is also its allocs profile: `go tool pprof` shows what was in use at the last GC, `-sample_index=alloc_space` what was allocated since the process began, and `-base` with an earlier profile what was allocated in between. Every jump gets a profile, however many came before, because the one behind S7's peak comes late in a client's run.
+
+A profile is written inside the process S7 weighs, and its garbage stays in the heap in use until the next GC, so a later sample can carry it. The line that names a profile gives what the process allocated while it was written and how far the heap in use moved, and an S7 cell records `heap_profiles_in_window`, the profiles written between S2's start and S4's end. A peak near the bound with a profile beside it may be partly the tool's.
+
 ## Known failures
 
 `internal/gate/known.go` lists the cells an open engine issue fails on every run, one entry per line: a cell id pattern, in which `*` stands for exactly one whole segment (`engine-linux/jitsi/seichannel/*/S0` is that cell of both flavours), the issue's URL and a few words on what fails. Without the list a red gate says nothing about new regressions, because those cells fail every run.
@@ -181,12 +187,13 @@ The unit tests hold the list to these rules: each pattern matches a cell of the 
 ```text
 <gate-dir>/
   gate-report.json
-  jitsi-datachannel/        a directory per pair
-    srv.log                 the pair's server
-    mobile-start.log        the client's start
-    mobile-S2.log           a log per cell
-    mobile-samples.csv      after S7: t_ms,heap_inuse,rss,goroutines
-    delay-3s/srv.log        S6's late servers
+  jitsi-datachannel/           a directory per pair
+    srv.log                    the pair's server
+    mobile-start.log           the client's start
+    mobile-S2.log              a log per cell
+    mobile-samples.csv         after S7: t_ms,heap_inuse,rss,goroutines
+    mobile-heap-41000ms.pb.gz  a heap profile where memory jumped
+    delay-3s/srv.log           S6's late servers
     delay-8s/srv.log
 ```
 
@@ -208,4 +215,4 @@ go run ./cmd/gate-report compare -severity fail previous.json current.json
 The `Test` job runs the unit tests of three builds: the default one, `olcrtc_lean` and `olcrtc_testhooks`, the one the local target's server is built with, so the hook S6 relies on is tested on every event, a fork's pull request included. Two more jobs in `.github/workflows/ci.yml` run the gate:
 
 - `gate-plan` runs the dry run of both builds, needs no secret and so runs for a pull request from a fork too, and puts both plans in the job summary. It fails when a build plans no cell or a cell of the other flavour.
-- `gate-local` needs `gate-plan` and runs the gate on the local target: the `cli` flavour (`-timeout 25m`), then the `mobile` flavour (`-tags olcrtc_lean`, `-timeout 45m`) whatever the first run did. It renders both reports into the job summary and uploads the `gate-local` artifact: the reports, the scrubbed logs and the samples. One run at a time across the repository (`concurrency: gate-rooms`, queued, never cancelled), because every run takes the same pool rooms. A pull request from a fork gets no secrets, so the job does not run for it; the push that merges it runs the gate.
+- `gate-local` needs `gate-plan` and runs the gate on the local target: the `cli` flavour (`-timeout 25m`), then the `mobile` flavour (`-tags olcrtc_lean`, `-timeout 45m`) whatever the first run did. It renders both reports into the job summary and uploads the `gate-local` artifact: the reports, the scrubbed logs, the samples and the heap profiles. One run at a time across the repository (`concurrency: gate-rooms`, queued, never cancelled), because every run takes the same pool rooms. A pull request from a fork gets no secrets, so the job does not run for it; the push that merges it runs the gate.

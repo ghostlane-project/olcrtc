@@ -39,6 +39,11 @@ const (
 	MetricRSSPeakBytes      = "rss_peak_bytes"      // S7: peak RSS over S2-S4
 	MetricGoroutinesIdle    = "goroutines_idle"     // S7: goroutines before the load
 	MetricGoroutinesAfter   = "goroutines_after"    // S7: goroutines 60 s after the load
+	// MetricHeapProfilesInWindow is S7's count of the heap profiles written
+	// over S2-S4. Each write allocates in the process S7 weighs, so a peak
+	// near its bound with a profile beside it may carry the tool's garbage.
+	// It judges nothing.
+	MetricHeapProfilesInWindow = "heap_profiles_in_window" // ai-generated: jump profiles in S7's window
 )
 
 // Evaluate judges a scenario's metrics. An empty result is a pass; every

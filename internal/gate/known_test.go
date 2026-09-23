@@ -219,3 +219,39 @@ func TestAWrittenReportCarriesTheIssueAndTheKnownCount(t *testing.T) {
 		t.Fatalf("a cell off the list carries known:\n%s", raw)
 	}
 }
+
+// TestSaluteJazzIsKnownOnlyForItsBulkCells pins the list for salutejazz
+// once the relay window is in (olcrtc#49): S2 and S3 of either flavour stay
+// known, for what a slow Sber leg still costs them, and every other
+// salutejazz cell (connect, burst, quiet, resolver, memory) blocks again.
+// ai-generated: this test (the narrowed known list).
+func TestSaluteJazzIsKnownOnlyForItsBulkCells(t *testing.T) {
+	lt, err := NewLocalTarget(LocalOptions{WorkDir: t.TempDir(), JitsiHosts: []string{"meet.example.invalid"},
+		Providers: localProviders(), Transports: splitList(allTransports)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bulk := map[string]int{}
+	for _, c := range PlanCells(lt, []string{cliFlavour, mobileFlavour}) {
+		if c.Provider != providerSaluteJazz {
+			continue
+		}
+		k, known := knownFailure(c.ID)
+		want := c.Scenario == "S2" || c.Scenario == "S3"
+		switch {
+		case known != want:
+			t.Errorf("%s: known %t, want %t", c.ID, known, want)
+		case !known:
+		case k.Issue != issues+"49":
+			t.Errorf("%s is known under %s, want olcrtc#49", c.ID, k.Issue)
+		case !strings.Contains(k.Why, "throughput") || !strings.Contains(k.Why, "on-top latency") ||
+			!strings.Contains(k.Why, "slow Sber leg"):
+			t.Errorf("%s is known for %q, want the throughput and on-top latency of a slow Sber leg", c.ID, k.Why)
+		default:
+			bulk[c.Scenario]++
+		}
+	}
+	if bulk["S2"] == 0 || bulk["S3"] == 0 {
+		t.Fatalf("known bulk cells %v: the plan has no salutejazz S2 or S3 to hold the list to", bulk)
+	}
+}

@@ -69,6 +69,11 @@ type Server struct {
 	sessMu      sync.RWMutex
 
 	peerSessions map[string]*peerSession
+	// retiring is the peer session ended for each peer ID whose teardown has
+	// not yet told the transport (retirePeer): whichever comes first, that
+	// teardown or a new session for the ID, retires the peer. Guarded by
+	// sessMu, made on first use. ai-generated: the field (olcrtc#49).
+	retiring map[string]*peerSession
 	// peerLimitWarn rate-limits the peer-cap warning.
 	peerLimitWarn atomic.Int64
 	peersMu       sync.Mutex

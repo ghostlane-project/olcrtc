@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -674,6 +676,45 @@ func TestRunPlanKeepsTheRunsSecretsOut(t *testing.T) {
 	}
 }
 
+// TestTheRunKeepsASecretWhileAnotherGoroutineLogs: a sampler logs a jump's
+// profile from its own goroutine while S6, on the cell's, keeps a late
+// server's room and key. The list they share must take the secret under
+// -race, and a line logged after the keep is scrubbed of it.
+func TestTheRunKeepsASecretWhileAnotherGoroutineLogs(t *testing.T) {
+	var (
+		mu    sync.Mutex
+		lines []string
+	)
+	o := prepared(Options{Recorder: NewRecorder(Report{}), Logf: func(format string, args ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		lines = append(lines, fmt.Sprintf(format, args...))
+	}})
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				o.Logf("a jump's profile")
+			}
+		}
+	}()
+	for i := range 100 {
+		o.keep(fmt.Sprintf("gate-fakeroom%04d", i))
+	}
+	close(stop)
+	<-done
+	o.Logf("late servers in %s and %s", "gate-fakeroom0000", "gate-fakeroom0099")
+	mu.Lock()
+	defer mu.Unlock()
+	if last := lines[len(lines)-1]; last != "late servers in <room> and <room>" {
+		t.Fatalf("logged %q after the keeps, want it scrubbed of both", last)
+	}
+}
+
 func TestRunPlanWritesNoCellLogForALinkTarget(t *testing.T) {
 	resetRegistryForTest(t)
 	delayed := true
@@ -750,5 +791,49 @@ i=0; while [ "$i" -lt 600 ]; do sleep 0.05; i=$((i+1)); done`)
 	}
 	if left, _ := os.ReadDir(work); len(left) != 0 {
 		t.Fatalf("private files left after the run: %v", left)
+	}
+}
+
+// TestRunPlanReadsAFailedCellsOwnPartOfTheServerLog holds the runner to the
+// mark it takes as a cell begins: a failed cell names the drop its scenario
+// saw, with the join the target noted, which is not in the cell's part of
+// the log, and never copies the 16 MiB before that part into the process.
+// ai-generated: this test (the streaming reader).
+func TestRunPlanReadsAFailedCellsOwnPartOfTheServerLog(t *testing.T) {
+	resetRegistryForTest(t)
+	path := filepath.Join(t.TempDir(), "srv.log")
+	line := time.Now().Add(-time.Hour).Format(logTimeLayout) + " datachannel: frame sid=3 len=16384\n"
+	if err := os.WriteFile(path, []byte(strings.Repeat(line, 16<<20/len(line))), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	joined := time.Now().Add(-time.Hour).Truncate(time.Second)
+	Register(Scenario{ID: "S0", Applies: always, Run: func(context.Context, *Env) (Metrics, error) {
+		// A log stamps whole seconds: a drop stamped in the second the cell
+		// began reads as before it. The relay drops this one a second later.
+		time.Sleep(time.Until(time.Now().Truncate(time.Second).Add(time.Second)))
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			return nil, err
+		}
+		defer f.Close()
+		_, err = f.WriteString(time.Now().Format(logTimeLayout) +
+			" livekit: disconnected from the room, reason=PARTICIPANT_REMOVED\n")
+		return Metrics{}, err
+	}})
+	target := &scriptTarget{pairs: []Pair{{"telemost", "vp8channel"}},
+		ep: Endpoint{ServerLog: path, ServerJoined: joined}}
+	h := newHarness(t, target, &fakeClient{name: "cli"})
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	rep := h.run(context.Background(), t)
+	runtime.ReadMemStats(&after)
+	c := cellsByID(rep)["engine-test/telemost/vp8channel/cli/S0"]
+	drop := regexp.MustCompile(`^the relay ended the server's session \(PARTICIPANT_REMOVED\) \d+s into the cell, ` +
+		`1h0m[0-2]s after it joined$`)
+	if c.Status != StatusFail || !slices.ContainsFunc(c.Failures, drop.MatchString) {
+		t.Fatalf("the failed cell = %+v, want the drop and the join the target noted", c)
+	}
+	if alloc := after.TotalAlloc - before.TotalAlloc; alloc >= 8<<20 {
+		t.Fatalf("the run allocated %d KiB over a 16 MiB log: the cell read more than its own part", alloc>>10)
 	}
 }

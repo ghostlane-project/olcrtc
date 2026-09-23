@@ -355,7 +355,8 @@ func TestS6RecordsNeverReadyAndStillStopsTheServer(t *testing.T) {
 // TestS7ReadsTheWindowAndTheMarks gives S7 a sampler that saw the runner's
 // baseline and S0 to S6: the peaks come from S2's start to S4's end alone,
 // the baseline and the goroutines from the marks, and nothing from after S4,
-// where S5's queries and S6's clients still run.
+// where S5's queries and S6's clients still run. The heap profiles counted
+// are the ones written in the window, whose garbage its peak may carry.
 func TestS7ReadsTheWindowAndTheMarks(t *testing.T) {
 	s := NewSampler(time.Second)
 	t0 := time.Now()
@@ -372,12 +373,14 @@ func TestS7ReadsTheWindowAndTheMarks(t *testing.T) {
 	}
 	s.marks[markBaseline] = at(-10)
 	s.marks[markIdle], s.marks[markLoadStart], s.marks[markQuietEnd] = at(10), at(20), at(40)
+	s.profiled = []time.Time{at(15), at(20), at(30), at(40), at(50)} // ai-generated: profiles on jumps
 	m, err := scenario(t, "S7").Run(context.Background(), &Env{Sampler: s})
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := Metrics{MetricHeapBaselineBytes: 3 << 20, MetricRSSBaselineBytes: 28 << 20,
-		MetricHeapPeakBytes: 9 << 20, MetricRSSPeakBytes: 33 << 20, MetricGoroutinesIdle: 40, MetricGoroutinesAfter: 45}
+		MetricHeapPeakBytes: 9 << 20, MetricRSSPeakBytes: 33 << 20, MetricGoroutinesIdle: 40, MetricGoroutinesAfter: 45,
+		MetricHeapProfilesInWindow: 2}
 	if !maps.Equal(m, want) {
 		t.Fatalf("S7 = %v\nwant %v", m, want)
 	}

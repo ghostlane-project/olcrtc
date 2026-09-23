@@ -58,21 +58,25 @@ var (
 	_ engine.PeerReadySession    = (*Session)(nil)
 	_ engine.PeerIdentity        = (*Session)(nil)
 	_ engine.PeerResetter        = (*Session)(nil)
+	_ engine.PeerRetirer         = (*Session)(nil)
 )
 
-// Send publishes one payload on the reliable lane, to the whole room.
+// Send publishes one payload on the reliable lane, to the whole room - or, on
+// a client whose confirmed server is still in the room, to that server.
 func (s *Session) Send(data []byte) error {
 	return s.publish(data, "", nil, true)
 }
 
 // SendTo publishes one payload on the reliable lane, to a single
 // participant. An empty peerID addresses the room, as every engine here
-// treats it.
+// treats it, and goes where Send does.
 func (s *Session) SendTo(peerID string, data []byte) error {
 	return s.publish(data, "", destinations(peerID), true)
 }
 
-// SendDatagram publishes one payload on the lossy lane, to the whole room.
+// SendDatagram publishes one payload on the lossy lane, to the whole room -
+// or, on a client whose confirmed server is still in the room, to that
+// server.
 // The lane is ordered and never retransmitted - LiveKit's own _lossy
 // settings, which startPublisher creates it with - so a packet that cannot go
 // now is worth nothing later: a lane that is not up refuses it, and a lane
@@ -105,9 +109,23 @@ func destinations(peerID string) []string {
 // write closes itself: teardown closes the peer connections, and pion then
 // refuses the write with an error of its own.
 //
+// A payload to the room from a client goes to the server the client
+// confirmed, while that server is still in the room (roomDest).
+//
 // A lane over its high-water mark is where the two lanes part: the byte
 // stream waits for room (awaitSendWindow), because a frame it drops is a
-// frame the peer waits for forever, and the datagram lane drops.
+// frame the peer waits for forever, and the datagram lane drops. A datagram
+// is dropped as well once its destination's relay window is on and more than
+// a window and datagramSlack are in flight to it, or a reliable send to it
+// has been held for a probe interval.
+//
+// The byte stream then waits for its destination's relay window, which the
+// lane's mark cannot see: the SFU takes everything at once and queues it
+// toward a slow receiver without a limit. What went out is counted against
+// the window afterwards, and a mark follows it when one is due (window.go).
+// A send that was held while its destination's session ended is refused with
+// ErrDestinationEnded, and its frame never reaches the wire. A destination
+// the room has reported gone has no window at all (windowKey).
 func (s *Session) publish(payload []byte, topic string, dest []string, reliable bool) error {
 	if s.closed.Load() {
 		return ErrSessionClosed
@@ -120,13 +138,21 @@ func (s *Session) publish(payload []byte, topic string, dest []string, reliable 
 	if dc == nil || dc.ReadyState() != webrtc.DataChannelStateOpen {
 		return ErrNoDataChannel
 	}
+	dest = gen.roomDest(dest)
+	key := gen.windowKey(dest)
 	if !reliable {
-		if dc.BufferedAmount() > bufferHighWaterMark {
+		if dc.BufferedAmount() > bufferHighWaterMark || (key != "" && gen.win.Over(key, datagramSlack, time.Now())) {
 			gen.dropLossy()
 			return nil
 		}
-	} else if err := s.awaitSendWindow(gen, dc); err != nil {
-		return err
+	} else {
+		epoch := gen.relayEpoch(key)
+		if err := s.awaitSendWindow(gen, dc); err != nil {
+			return err
+		}
+		if err := s.awaitRelayWindow(gen, key, epoch); err != nil {
+			return err
+		}
 	}
 	frame, err := proto.Marshal(dataPacket(payload, topic, dest, reliable))
 	if err != nil {
@@ -135,6 +161,7 @@ func (s *Session) publish(payload []byte, topic string, dest []string, reliable 
 	if err := dc.Send(frame); err != nil {
 		return fmt.Errorf("salutejazz data channel send: %w", err)
 	}
+	s.countRelayed(gen, key, len(frame))
 	return nil
 }
 
@@ -183,12 +210,13 @@ func (g *generation) openSendWindow() {
 	g.window = make(chan struct{})
 }
 
-// dropLossy records one datagram thrown away because the lossy lane was over
-// its budget, and says so every so often: a lane that is dropping is worth a
-// line in the log, one per packet is not.
+// dropLossy records one datagram thrown away because the lossy lane, or its
+// destination's relay window, was over its budget, and says so every so
+// often: a lane that is dropping is worth a line in the log, one per packet
+// is not.
 func (g *generation) dropLossy() {
 	if dropped := g.lossyDrops.Add(1); dropped%lossyDropLogEvery == 1 {
-		logger.Debugf("salutejazz: the lossy lane is over its budget, %d datagrams dropped", dropped)
+		logger.Debugf("salutejazz: the lossy lane or a relay window is over its budget, %d datagrams dropped", dropped)
 	}
 }
 
@@ -224,10 +252,11 @@ func (s *Session) receiveOn(gen *generation, dc *webrtc.DataChannel) {
 	})
 }
 
-// handleDataPacket routes one relayed packet by topic: the datagram topic
-// feeds the lossy lane, everything else the byte stream. A packet that
-// arrives on a generation that has been torn down belongs to a connection
-// this session has already replaced, and is dropped.
+// handleDataPacket routes one relayed packet by topic: a window frame is the
+// relay window's and goes no further, the datagram topic feeds the lossy
+// lane, everything else the byte stream. A packet that arrives on a
+// generation that has been torn down belongs to a connection this session has
+// already replaced, and is dropped.
 func (s *Session) handleDataPacket(gen *generation, frame []byte) {
 	if s.closed.Load() || gen.isDone() {
 		return
@@ -258,11 +287,14 @@ func (s *Session) handleDataPacket(gen *generation, frame []byte) {
 		// caller of the peer list a participant they cannot reach.
 		gen.notePeer(sender)
 	}
-	if user.GetTopic() == datagramPublishTopic {
+	switch user.GetTopic() {
+	case windowTopic:
+		s.handleWindowFrame(gen, sender, byIdentity, user.GetPayload())
+	case datagramPublishTopic:
 		s.deliver(sender, user.GetPayload(), s.onPeerDatagram, s.onDatagram)
-		return
+	default:
+		s.deliver(sender, user.GetPayload(), s.onPeerData, s.onData)
 	}
-	s.deliver(sender, user.GetPayload(), s.onPeerData, s.onData)
 }
 
 // deliver hands one payload to the lane's callbacks: the per-peer one when
@@ -372,7 +404,18 @@ func (s *Session) LocalPeerID() string { return s.localIdentity() }
 // made, and a rejoin does not carry it over: the SFU hands every connection
 // fresh participant ids, so an identity confirmed under the previous attempt
 // names nobody under the next one. The upper layer runs its handshake again
-// after a reconnect and confirms again.
+// after a reconnect and confirms again. What PeerSeen asks about is kept
+// apart from the binding and outlives it: the server the last handshake
+// confirmed.
+//
+// The confirmed server is also where this client's payloads to the room go
+// while it is in the room, and what its relay window is kept toward; the
+// server's window toward this client has to be on before the server's first
+// reply byte. So the binding puts a mark of count 0 on the wire here, ahead
+// of any data: the server arms its window on it, and a server of a build
+// before the window drops it as a frame it cannot decrypt.
+// A binding that moves to another identity ends the window toward the old
+// one, and a send held on it with it.
 func (s *Session) ConfirmPeer(peerID string) error {
 	if peerID == "" {
 		return fmt.Errorf("%w: empty identity", engine.ErrInvalidPeerID)
@@ -381,16 +424,26 @@ func (s *Session) ConfirmPeer(peerID string) error {
 	if gen == nil || gen.isDone() {
 		return ErrSessionClosed
 	}
-	storeString(&gen.confirmed, peerID)
+	if old := gen.confirmed.Swap(&peerID); old != nil && *old != peerID {
+		gen.forgetRelayPeer(*old)
+	}
+	s.server.Store(&peerID)
+	s.sendWindowFrame(gen, peerID, windowMark, 0)
 	return nil
 }
 
 // ResetPeer drops the confirmed binding, after an upper-layer handshake
 // failure. The room roster is left alone: who is in the room is the
-// connector's statement, not this session's.
+// connector's statement, not this session's. The relay window toward the
+// server that was bound goes with the binding, and a send held on it is
+// refused: the session it belonged to is over.
 func (s *Session) ResetPeer() {
-	if gen := s.current(); gen != nil {
-		gen.confirmed.Store(nil)
+	gen := s.current()
+	if gen == nil {
+		return
+	}
+	if old := gen.confirmed.Swap(nil); old != nil {
+		gen.forgetRelayPeer(*old)
 	}
 }
 
@@ -423,6 +476,28 @@ func (s *Session) hasPeer() bool {
 	return loadString(&gen.confirmed) != "" || gen.hasRemote()
 }
 
+// PeerSeen implements transport.PeerObserver: the server the last handshake
+// this session completed confirmed is in the room, by the roster of the
+// attempt that is live now. The client asks when a handshake has gone
+// unanswered, to tell a server that is there and silent - its hello queued at
+// the SFU behind a dead session's backlog - from an empty room.
+//
+// Nobody else counts. A room whose server has been retired can still hold a
+// client of another device, and taking that for a peer had a client retry a
+// dead room instead of failing over to the next. The binding cannot answer
+// either: the client drops it before every handshake it retries, and a rejoin
+// starts without one. The identity can, across both: the SFU hands out a new
+// one only to a connection that joins again, so a server that stayed is in
+// the rejoined attempt's roster under the name it was confirmed by.
+func (s *Session) PeerSeen() bool {
+	server := loadString(&s.server)
+	gen := s.current()
+	if server == "" || gen == nil || gen.isDone() {
+		return false
+	}
+	return gen.inRoom(server)
+}
+
 // hasRemote reports whether anyone else is in the room, without building the
 // list: WaitForPeer asks on a poll.
 func (g *generation) hasRemote() bool {
@@ -431,39 +506,69 @@ func (g *generation) hasRemote() bool {
 	return len(g.peers) > 0
 }
 
+// inRoom reports whether the roster names identity. Every payload a confirmed
+// client sends to the room asks it, so it reads the map under the read lock
+// and builds nothing.
+func (g *generation) inRoom(identity string) bool {
+	g.peersMu.RLock()
+	defer g.peersMu.RUnlock()
+	_, ok := g.peers[identity]
+	return ok
+}
+
+// hasLeft reports whether the room has reported identity gone during this
+// attempt.
+func (g *generation) hasLeft(identity string) bool {
+	g.peersMu.RLock()
+	defer g.peersMu.RUnlock()
+	_, gone := g.left[identity]
+	return gone
+}
+
 // dropPeer takes one participant out of the roster, on the connector's word
-// that it has left.
+// that it has left, for the rest of the attempt.
 func (g *generation) dropPeer(identity string) {
 	g.peersMu.Lock()
 	defer g.peersMu.Unlock()
+	g.departLocked(identity)
+}
+
+// departLocked takes identity out of the roster for good. Called with peersMu
+// held for writing.
+func (g *generation) departLocked(identity string) {
 	delete(g.peers, identity)
+	g.left[identity] = struct{}{}
 }
 
 // notePeer records a sender the roster has not named yet, so the first
 // packet from a participant counts as that participant appearing. The
 // roster update that follows fills in its sid, and the one that reports it
-// gone removes it again.
+// gone removes it again. A participant the room has reported gone is not
+// recorded again: its last frames can arrive long after it left.
 //
 // Every relayed packet comes through here, and after the first one from a
 // participant there is nothing left to record: that case takes the read lock
 // and leaves, so a session carrying traffic does not serialise its packets
-// behind a map it is not changing.
+// behind a map it is not changing. So does a packet from one that has left.
 func (g *generation) notePeer(identity string) {
 	if identity == "" || identity == g.localIdentity() {
 		return
 	}
 	g.peersMu.RLock()
 	_, known := g.peers[identity]
+	_, gone := g.left[identity]
 	g.peersMu.RUnlock()
-	if known {
+	if known || gone {
 		return
 	}
 	g.peersMu.Lock()
 	defer g.peersMu.Unlock()
 	// Between the two locks the roster may have learned this identity, with
-	// the sid an update carries; the check is made again rather than
-	// overwriting it with the empty one a packet has.
-	if _, known := g.peers[identity]; !known {
+	// the sid an update carries, or lost it; the check is made again rather
+	// than overwriting the one or bringing back the other.
+	_, known = g.peers[identity]
+	_, gone = g.left[identity]
+	if !known && !gone {
 		g.peers[identity] = ""
 	}
 }

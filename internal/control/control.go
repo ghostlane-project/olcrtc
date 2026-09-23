@@ -43,16 +43,39 @@ const (
 	// the stream is marked unhealthy.
 	DefaultFailures = 4
 	// maxStalledProbes bounds how many probes in a row payload progress may
-	// excuse. The queue a pong can sit behind is bounded now: below smux
-	// the bridge holds at most 32 frames plus 512 KB in flight
-	// (olcbox#23), about a megabyte, which at the 5 Mbit/s the relays
-	// carry is two seconds against a 15 s pong timeout. A pong is
-	// therefore never minutes late, and three excused probes - 30 s at
-	// the default 10 s interval - is already many times the delay the
-	// queue can add. Eighteen, plus the four failures that follow, was 220
-	// seconds: the three and a half minutes a client sat on a session the
-	// server had already closed while the server's next session kept the
-	// counter moving (olcbox#25). Now it is seven probes, 70 seconds.
+	// excuse. What bounds the queue a pong can sit behind is not the relay.
+	// Neither relay pushes back on a sender - the JVB queues about 2 MB
+	// toward a receiver and drops the rest, Sber's LiveKit 1.5.3 queues
+	// without a limit - so the Jitsi and SaluteJazz engines keep a window
+	// per destination instead. A sender holds back once it has handed the relay
+	// a window of bytes for one peer that the peer has not yet echoed.
+	// Jitsi's (engine/jitsi/relaywindow.go, olcrtc#15) is 512 KiB, on top
+	// of the 256 KB its own send path may hold (bridge.go): under two
+	// seconds each way at the ~5 Mbit/s a JVB carries. SaluteJazz's
+	// (engine/salutejazz/window.go, olcrtc#49) is 192 KiB, sized so that a
+	// ping behind one window and its pong behind another come back inside
+	// the 15 s timeout even on the 34 kB/s SFU-to-receiver leg the gate has
+	// measured through Sber's relay. On those carriers a pong is therefore
+	// never minutes late, and three excused probes - 30 s at the default
+	// 10 s interval - is already more than the delay a window can add.
+	// Eighteen, plus the four failures that follow, was 220 seconds: the
+	// three and a half minutes a client sat on a session the server had
+	// already closed while the server's next session kept the counter
+	// moving (olcbox#25). Now it is seven probes, 70 seconds.
+	//
+	// On a transport with no control plane of its own - datachannel, on
+	// every carrier, and videochannel and seichannel - the excuse cannot
+	// tell a transfer from the peer's own pings. The control stream shares
+	// the data session there, and Progress counts payload on every stream
+	// of it, the control stream's included, so a link that carries the
+	// peer's pings to us but not ours to it has its first three timeouts
+	// excused as if a transfer were in flight. vp8channel runs the control
+	// stream on a conn of its own (muxconn.NewControl), and Progress reads
+	// only the data conn, which the peer's pings never reach. That is a
+	// known limitation, and an issue apart from the queue.
+	//
+	// ai-generated: the account of the windows and of the limitation
+	// (olcrtc#49).
 	maxStalledProbes = 3
 )
 

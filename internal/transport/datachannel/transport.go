@@ -31,6 +31,12 @@ var _ transport.PeerResetter = (*streamTransport)(nil)
 // PeerIdentity is satisfied when the underlying engine exposes routing epochs.
 var _ transport.PeerIdentity = (*streamTransport)(nil)
 
+// PeerLifecycle is satisfied so the server's peer retirements reach engines
+// that keep send state per peer.
+//
+// ai-generated: this assertion (olcrtc#49).
+var _ transport.PeerLifecycle = (*streamTransport)(nil)
+
 type streamTransport struct {
 	common.Lifecycle
 
@@ -166,6 +172,16 @@ func (p *streamTransport) Close() error {
 func (p *streamTransport) ResetPeer() {
 	if resetter, ok := p.session.(engine.PeerResetter); ok {
 		resetter.ResetPeer()
+	}
+}
+
+// RetirePeer passes the server's word that its session on peerID has ended to
+// an engine that keeps send state per peer. The transport itself keeps none.
+//
+// ai-generated: this method (olcrtc#49).
+func (p *streamTransport) RetirePeer(peerID string) {
+	if retirer, ok := p.session.(engine.PeerRetirer); ok {
+		retirer.RetirePeer(peerID)
 	}
 }
 

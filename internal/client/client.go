@@ -185,6 +185,11 @@ type Client struct {
 	udpSweepOnce sync.Once
 	udpDisabled  bool
 	maxUDPFlows  int
+	// datagramReadyTimeout is how long one datagram waits for the lane to
+	// take it; zero means the default, and only tests set it.
+	//
+	// ai-generated: the field (olcrtc#49).
+	datagramReadyTimeout time.Duration
 
 	// DNS over the stream (dns.go): queries in flight, and the session the
 	// info line was last written for.

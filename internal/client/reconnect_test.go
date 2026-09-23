@@ -804,3 +804,40 @@ func TestRefusedRoundsNeverAskTheProvider(t *testing.T) {
 		t.Fatalf("handshakes over the second = %d, want the refused rounds to go on", got)
 	}
 }
+
+// A hello queued at the relay behind a dead session's backlog reaches a
+// server that is in the room after the attempt that sent it has given up.
+// The transport says the peer it would handshake with is there (PeerSeen),
+// so the timeout is a silent peer, not an empty room: the round goes on to
+// its next attempt at once, even for a client that ends its run on an empty
+// room, instead of stopping at one attempt and pausing for a whole recovery
+// window before it asks the provider for a new connection.
+//
+// ai-generated: the whole test (PeerObserver bound to the confirmed server,
+// olcrtc#49).
+func TestAQueuedHelloIsRetriedInsideTheRound(t *testing.T) {
+	r := newRig(t, func(c *Client) {
+		c.endOnEmptyRoom = true
+		c.livenessFallback = time.Hour
+		c.handshakeTimeout = 200 * time.Millisecond
+		c.retryDelay = 10 * time.Millisecond
+	})
+	first := r.sessionID()
+	before := r.server.sessions.Load()
+	// The round's first hello is never answered; its second is.
+	r.server.answerFrom.Store(before + 2)
+
+	r.link.callback()
+	r.waitNewSession(first, 3*time.Second)
+	if got := r.server.sessions.Load() - before; got != 2 {
+		t.Fatalf("handshake attempts in the round = %d, want the silent one and the retry inside the round", got)
+	}
+	if r.ctx.Err() != nil {
+		t.Fatal("a silent peer ended the run of a client that ends it on an empty room")
+	}
+	select {
+	case reason := <-r.link.requests:
+		t.Fatalf("the client asked the provider to reconnect (%s) although the retry inside the round was answered", reason)
+	default:
+	}
+}
