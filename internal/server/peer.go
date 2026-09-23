@@ -633,30 +633,36 @@ func (s *Server) closePeerSession(peer *peerSession, reason string) {
 // nothing: its conns close before anything else, so not even the stream
 // closes below put a frame on the wire.
 //
-// ai-generated: notify (olcrtc#49); the rest is closePeerSession as it was.
+// ai-generated: notify, and the sessions closed before the control stream
+// (olcrtc#49); the rest is closePeerSession as it was.
 func (s *Server) endPeerSession(peer *peerSession, reason string, notify bool) {
 	peer.closeOnce.Do(func() {
 		teardown := peer.closeSnapshot()
 		peer.signalReady()
 		if notify {
-			tunnelcore.NotifyControlClose(teardown.controlStrm)
+			notifyPeerClose(teardown.controlStrm)
 		} else {
 			teardown.closeConns()
 		}
 		if teardown.controlStop != nil {
 			teardown.controlStop()
 		}
-		if teardown.controlStrm != nil {
-			_ = teardown.controlStrm.Close()
+		// The sessions close first: a closed session closes its streams, so
+		// the stream's own close below queues no FIN behind a send loop the
+		// link has stalled, which smux would wait 30 s on and then send into
+		// whatever the peer runs next under the same identity. What is still
+		// queued is dropped with the session.
+		if teardown.session != nil {
+			_ = teardown.session.Close()
 		}
 		if teardown.controlSess != nil {
 			_ = teardown.controlSess.Close()
 		}
+		if teardown.controlStrm != nil {
+			_ = teardown.controlStrm.Close()
+		}
 		if teardown.controlConn != nil {
 			_ = teardown.controlConn.Close()
-		}
-		if teardown.session != nil {
-			_ = teardown.session.Close()
 		}
 		if teardown.conn != nil {
 			_ = teardown.conn.Close()
@@ -666,6 +672,36 @@ func (s *Server) endPeerSession(peer *peerSession, reason string, notify bool) {
 			s.trackPeerClose(teardown.sessionID, reason)
 		}
 	})
+}
+
+// peerCloseNoticeBudget bounds the close notice a peer is sent, as control's
+// closeNoticeBudget bounds its own: long enough for the frame on a link that
+// still works, short enough that one the relay has stalled cannot hold the
+// teardown - onClose, retirePeer - behind it.
+//
+// ai-generated (olcrtc#49).
+const peerCloseNoticeBudget = 1500 * time.Millisecond
+
+// notifyPeerClose tells the peer on stream that its session is over, waiting
+// at most peerCloseNoticeBudget. A notice still queued when the budget runs
+// out is released, and dropped, by the session's close.
+//
+// ai-generated: the whole function (olcrtc#49).
+func notifyPeerClose(stream *smux.Stream) {
+	if stream == nil {
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		tunnelcore.NotifyControlClose(stream)
+	}()
+	timer := time.NewTimer(peerCloseNoticeBudget)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+	}
 }
 
 func (s *Server) trackPeerOpen(sessionID, deviceID string) {

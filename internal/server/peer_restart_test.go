@@ -378,3 +378,130 @@ func TestStreamsOpenedAtOnceStayOnThePeersSession(t *testing.T) {
 		t.Fatal("streams opened at once were taken for the peer starting its session over")
 	}
 }
+
+// A peer that liveness ends on a stalled link - the relay window toward it
+// full, the conn's flusher parked in SendTo, smux's send loop stuck behind it -
+// is told it is closed as far as the link lets it, and no further: the close
+// notice has a budget, and the session is closed when it runs out. Queued
+// behind that send loop, the notice waited out its write deadline, and the FIN
+// of CloseWrite and the FIN of Close each waited out smux's 30 s stream close
+// timeout, a minute in which onClose and retirePeer did not run. Once the link
+// moved again, all of it went to the peer's identity: onto stream 3 of the
+// session it runs next there, where its retried hello or its new control
+// stream is.
+func TestAPeerEndedOnAStalledLinkIsClosedWithinTheNoticeBudget(t *testing.T) {
+	link := &relayLinkStub{features: datachannelFeatures}
+	s := newRelayServer(t, link)
+	s.liveness = control.Config{Interval: 50 * time.Millisecond, Timeout: 150 * time.Millisecond}
+	closed := make(chan struct{}, 1)
+	s.onClose = func(string, string) {
+		select {
+		case closed <- struct{}{}:
+		default:
+		}
+	}
+	client := newRelayClient(t, s, "peer")
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseLink := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseLink)
+	var (
+		stalled atomic.Bool
+		lateMu  sync.Mutex
+		late    [][]byte
+	)
+	link.mu.Lock()
+	link.toPeer = func(_ string, data []byte) {
+		if !stalled.Load() {
+			client.conn.Push(data)
+			return
+		}
+		<-release
+		lateMu.Lock()
+		late = append(late, data)
+		lateMu.Unlock()
+	}
+	link.mu.Unlock()
+
+	stream := client.handshake(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = control.Run(ctx, stream, control.Config{Interval: time.Hour}) }()
+	peer := lookupPeer(s, "peer")
+	if peer == nil {
+		t.Fatal("the server built no session for the peer")
+	}
+	waitPeerControl(t, peer)
+
+	// The link stalls with a batch due: bulk on a stream of the server's.
+	stalled.Store(true)
+	bulk, err := peer.dataSession().OpenStream()
+	if err != nil {
+		t.Fatalf("OpenStream() error = %v", err)
+	}
+	go func() { _, _ = bulk.Write(make([]byte, 256*1024)) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for lookupPeer(s, "peer") == peer {
+		if time.Now().After(deadline) {
+			t.Fatal("liveness never ended the peer on a stalled link")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	removed := time.Now()
+	const budget = 3 * time.Second
+	select {
+	case <-closed:
+	case <-time.After(budget):
+	}
+	took := time.Since(removed)
+	releaseLink()
+	time.Sleep(300 * time.Millisecond)
+
+	if took >= budget {
+		t.Errorf("the session was reported closed %v after its peer was ended, want under %v", took, budget)
+	}
+	keys, err := cryptopkg.NewKeySet([]byte("01234567890123456789012345678901"), cryptopkg.Client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lateMu.Lock()
+	defer lateMu.Unlock()
+	for _, record := range late {
+		opened, err := keys.Open(record, []byte("olcrtc/muxconn/v2/data"))
+		if err != nil {
+			continue
+		}
+		for _, frame := range smuxFrames(opened) {
+			switch {
+			case frame.sid != 3:
+			case frame.cmd == smuxFIN:
+				t.Error("a FIN for stream 3 reached the peer after the link moved again")
+			case bytes.Contains(frame.data, []byte(control.TypeClose)):
+				t.Error("CONTROL_CLOSE reached the peer after the link moved again")
+			}
+		}
+	}
+}
+
+// smuxFIN is smux's stream close command.
+const smuxFIN = 1
+
+type smuxFrameView struct {
+	cmd  byte
+	sid  uint32
+	data []byte
+}
+
+// smuxFrames splits a record into the smux frames it carries.
+func smuxFrames(record []byte) []smuxFrameView {
+	var frames []smuxFrameView
+	for len(record) >= 8 {
+		body := min(int(binary.LittleEndian.Uint16(record[2:4])), len(record)-8)
+		frames = append(frames, smuxFrameView{
+			cmd: record[1], sid: binary.LittleEndian.Uint32(record[4:8]), data: record[8 : 8+body],
+		})
+		record = record[8+body:]
+	}
+	return frames
+}
