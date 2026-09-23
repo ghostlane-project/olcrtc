@@ -61,20 +61,22 @@ var (
 	_ engine.PeerRetirer         = (*Session)(nil)
 )
 
-// Send publishes one payload on the reliable lane, to the whole room.
+// Send publishes one payload on the reliable lane, to the whole room - or, on
+// a client whose confirmed server is still in the room, to that server.
 func (s *Session) Send(data []byte) error {
 	return s.publish(data, "", nil, true)
 }
 
 // SendTo publishes one payload on the reliable lane, to a single
 // participant. An empty peerID addresses the room, as every engine here
-// treats it.
+// treats it, and goes where Send does.
 func (s *Session) SendTo(peerID string, data []byte) error {
 	return s.publish(data, "", destinations(peerID), true)
 }
 
 // SendDatagram publishes one payload on the lossy lane, to the whole room -
-// or, on a client that has confirmed a server, to that server.
+// or, on a client whose confirmed server is still in the room, to that
+// server.
 // The lane is ordered and never retransmitted - LiveKit's own _lossy
 // settings, which startPublisher creates it with - so a packet that cannot go
 // now is worth nothing later: a lane that is not up refuses it, and a lane
@@ -107,6 +109,9 @@ func destinations(peerID string) []string {
 // write closes itself: teardown closes the peer connections, and pion then
 // refuses the write with an error of its own.
 //
+// A payload to the room from a client goes to the server the client
+// confirmed, while that server is still in the room (roomDest).
+//
 // A lane over its high-water mark is where the two lanes part: the byte
 // stream waits for room (awaitSendWindow), because a frame it drops is a
 // frame the peer waits for forever, and the datagram lane drops. A datagram
@@ -132,16 +137,14 @@ func (s *Session) publish(payload []byte, topic string, dest []string, reliable 
 	if dc == nil || dc.ReadyState() != webrtc.DataChannelStateOpen {
 		return ErrNoDataChannel
 	}
-	var key string
+	dest = gen.roomDest(dest)
+	key := relayKey(dest)
 	if !reliable {
-		dest = gen.datagramDest(dest)
-		key = gen.relayKey(dest)
 		if dc.BufferedAmount() > bufferHighWaterMark || (key != "" && gen.win.Over(key, datagramSlack, time.Now())) {
 			gen.dropLossy()
 			return nil
 		}
 	} else {
-		key = gen.relayKey(dest)
 		epoch := gen.relayEpoch(key)
 		if err := s.awaitSendWindow(gen, dc); err != nil {
 			return err
@@ -402,11 +405,12 @@ func (s *Session) LocalPeerID() string { return s.localIdentity() }
 // names nobody under the next one. The upper layer runs its handshake again
 // after a reconnect and confirms again.
 //
-// The confirmed server is also what this client's relay window is kept
-// toward, and the server's window toward this client has to be on before the
-// server's first reply byte. So the binding puts a mark of count 0 on the
-// wire here, ahead of any data: the server arms its window on it, and a
-// server of a build before the window drops it as a frame it cannot decrypt.
+// The confirmed server is also where this client's payloads to the room go
+// while it is in the room, and what its relay window is kept toward; the
+// server's window toward this client has to be on before the server's first
+// reply byte. So the binding puts a mark of count 0 on the wire here, ahead
+// of any data: the server arms its window on it, and a server of a build
+// before the window drops it as a frame it cannot decrypt.
 // A binding that moves to another identity ends the window toward the old
 // one, and a send held on it with it.
 func (s *Session) ConfirmPeer(peerID string) error {
@@ -474,6 +478,16 @@ func (g *generation) hasRemote() bool {
 	g.peersMu.RLock()
 	defer g.peersMu.RUnlock()
 	return len(g.peers) > 0
+}
+
+// inRoom reports whether the roster names identity. Every payload a confirmed
+// client sends to the room asks it, so it reads the map under the read lock
+// and builds nothing.
+func (g *generation) inRoom(identity string) bool {
+	g.peersMu.RLock()
+	defer g.peersMu.RUnlock()
+	_, ok := g.peers[identity]
+	return ok
 }
 
 // dropPeer takes one participant out of the roster, on the connector's word

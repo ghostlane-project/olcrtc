@@ -25,21 +25,28 @@ const windowBound = relayWindow + slowLegRecord + 8<<10
 // handled at each end. The room has to be up: see waitForRoom.
 func pairWindow(t *testing.T, server *Session, serverGot *tally, client *Session, clientGot *tally) {
 	t.Helper()
+	pairWindowNth(t, 0, server, serverGot, client, clientGot)
+}
+
+// pairWindowNth is pairWindow for the nth pairing a test makes. Its hello and
+// welcome carry n, so a pairing earlier in the test cannot stand in for them.
+func pairWindowNth(t *testing.T, n int, server *Session, serverGot *tally, client *Session, clientGot *tally) {
+	t.Helper()
 	if err := client.ConfirmPeer(server.localIdentity()); err != nil {
 		t.Fatal(err)
 	}
-	if err := client.SendTo(server.localIdentity(), taggedPayload("hello", 0, 64)); err != nil {
+	if err := client.SendTo(server.localIdentity(), taggedPayload("hello", n, 64)); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, 5*time.Second, "the hello at the server", func() bool {
-		_, ok := serverGot.arrival("hello", 0)
+		_, ok := serverGot.arrival("hello", n)
 		return ok
 	})
-	if err := server.SendTo(client.localIdentity(), taggedPayload("welcome", 0, 64)); err != nil {
+	if err := server.SendTo(client.localIdentity(), taggedPayload("welcome", n, 64)); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, 5*time.Second, "the welcome at the client", func() bool {
-		_, ok := clientGot.arrival("welcome", 0)
+		_, ok := clientGot.arrival("welcome", n)
 		return ok
 	})
 }

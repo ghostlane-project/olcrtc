@@ -27,9 +27,12 @@ import (
 //   - a payload addressed to one participant, that participant: the server's
 //     reply to a client, keyed by the identity the SFU stamps on the client's
 //     packets;
-//   - a payload to the room, on a client, the server its ConfirmPeer bound;
-//   - anything else, nothing. A room-wide send before the handshake has
-//     confirmed a server is the hello, and small.
+//   - a payload to the room, on a client, the server its ConfirmPeer bound
+//     while that server is in the room, which is where the payload then goes
+//     (see roomDest);
+//   - anything else, nothing: a payload to the room before the handshake has
+//     confirmed a server - the hello, and small - or once the server it
+//     confirmed has left.
 //
 // Datagrams count too: the SFU queues them in the same FIFO. They are never
 // held - a datagram late is a datagram lost - so one is dropped instead once
@@ -37,9 +40,9 @@ import (
 // the window is on, and also while a reliable send to it has been held for a
 // probe interval: a datagram flow as fast as the leg would otherwise take the
 // room every echo frees, and the byte stream behind it - control pings too -
-// would wait until liveness closed the session. A client's datagrams go to
-// its confirmed server alone, so none of them is queued toward anyone else in
-// the room.
+// would wait until liveness closed the session. A client's datagrams, like
+// the rest of what it sends to the room, go to its confirmed server alone, so
+// none of them is queued toward anyone else in the room.
 //
 // The window is on only once the destination has shown it speaks it: its
 // first window frame arms it (a client's ConfirmPeer sends one, a mark of
@@ -159,29 +162,36 @@ func parseWindowFrame(frame []byte) (windowFrame, bool) {
 	return windowFrame{kind: kind, counter: binary.BigEndian.Uint64(frame[2:10])}, true
 }
 
-// datagramDest is where a datagram to dest goes: on a client that has
-// confirmed a server, a datagram to the room goes to that server alone.
-func (g *generation) datagramDest(dest []string) []string {
-	if len(dest) == 0 {
-		if bound := loadString(&g.confirmed); bound != "" {
-			return []string{bound}
-		}
+// roomDest is where a payload to dest goes. One addressed to someone goes to
+// them. One to the room goes, on a client, to the server its ConfirmPeer bound
+// while that server is still in the room: the SFU hands a packet to the room
+// to every participant in it, so each upload - and whatever backlog a slow leg
+// builds of it - would otherwise be queued toward every other client too,
+// where no window of this client's counts it (Jitsi's #25, ported). Before the
+// handshake has confirmed a server, and once the one it confirmed has left,
+// a payload to the room goes to the room: the hello has to reach a server the
+// client has not confirmed yet. A server confirms nobody, so what it sends to
+// the room goes to the room.
+func (g *generation) roomDest(dest []string) []string {
+	if len(dest) > 0 {
+		return dest
 	}
-	return dest
+	bound := loadString(&g.confirmed)
+	if bound == "" || !g.inRoom(bound) {
+		return nil
+	}
+	return []string{bound}
 }
 
-// relayKey is the window a payload to dest counts against: the participant it
-// is addressed to, the confirmed server for a payload to the room, and none
-// for anything else.
-func (g *generation) relayKey(dest []string) string {
-	switch len(dest) {
-	case 0:
-		return loadString(&g.confirmed)
-	case 1:
+// relayKey is the window a payload to dest counts against: the one
+// participant it is addressed to, and none for a payload to the room or to
+// several participants. roomDest has already addressed a client's payload to
+// its confirmed server where that applies.
+func relayKey(dest []string) string {
+	if len(dest) == 1 {
 		return dest[0]
-	default:
-		return ""
 	}
+	return ""
 }
 
 // relayEpoch is the epoch of the window a send to key belongs to, taken
