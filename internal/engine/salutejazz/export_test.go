@@ -9,17 +9,26 @@ import (
 // ai-generated: the whole file (olcrtc#49).
 
 // What the external test package takes from this one. The tunnel test there
-// runs the client and the server, which reach this package through the engine
-// registry, so it cannot be a test of this package; it gets the fake SFU and
-// the window's bound from here.
+// runs the client and the server, and the budget test reads the gate's
+// thresholds; both reach this package through the engine registry, so neither
+// can be a test of this package. They get the fake SFU, the window's bound and
+// the window's numbers from here.
 
 // RelayWindowBound is the most a leg may hold toward one destination while
 // the relay window works (windowBound).
 const RelayWindowBound = windowBound
 
-// RelayWindow is what a sender may have in flight toward one destination
-// (relayWindow).
-const RelayWindow = relayWindow
+// The window's own numbers and the ones its budget answers to
+// (window_budget_test.go): what a sender may have in flight toward one
+// destination (relayWindow), how often it marks (relayMarkEvery), what the
+// lane may hold for every destination at once (bufferHighWaterMark) and one
+// full record of the byte stream (slowLegRecord).
+const (
+	RelayWindow       = relayWindow
+	RelayMarkEvery    = relayMarkEvery
+	LaneHighWaterMark = bufferHighWaterMark
+	SlowLegRecord     = slowLegRecord
+)
 
 // FakeRoom is the fake SFU (fakeconnector_test.go) and the one room on it the
 // tunnel test joins.
