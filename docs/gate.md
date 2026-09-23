@@ -166,6 +166,8 @@ The connect and handshake budgets are not among them, so an S0 or S6 cell does n
 
 S7 weighs the test process, which holds the harness too (the test binary, the origin, the load, what earlier pairs left), so it judges what the client adds. Before each client starts, the runner collects the garbage, hands the freed memory back to the OS and reads a baseline; an S7 cell records it as `heap_baseline_bytes` and `rss_baseline_bytes` next to `heap_peak_bytes` and `rss_peak_bytes`, and the verdict bounds the difference. The two bounds are the spec's for a process that runs the client alone (16 MiB of live heap, 45 MiB RSS) less what such a process holds before its client starts.
 
+The sampler also watches for jumps. When the heap or the RSS rises by more than 6 MiB from one sample to the next, it writes a heap profile of the test process into the pair's directory, `<client>-heap-<t_ms>ms.pb.gz` with `t_ms` on the clock of the samples, and logs the file. Go's heap profile is also its allocs profile: `go tool pprof` shows what was in use at the last GC, `-sample_index=alloc_space` what was allocated since the process began, and `-base` with an earlier profile what was allocated in between. A client writes at most 8 on a pair, because a heap with no memory limit can saw by more than 6 MiB every few seconds under bulk load.
+
 ## Known failures
 
 `internal/gate/known.go` lists the cells an open engine issue fails on every run, one entry per line: a cell id pattern, in which `*` stands for exactly one whole segment (`engine-linux/jitsi/seichannel/*/S0` is that cell of both flavours), the issue's URL and a few words on what fails. Without the list a red gate says nothing about new regressions, because those cells fail every run.
@@ -183,12 +185,13 @@ The unit tests hold the list to these rules: each pattern matches a cell of the 
 ```text
 <gate-dir>/
   gate-report.json
-  jitsi-datachannel/        a directory per pair
-    srv.log                 the pair's server
-    mobile-start.log        the client's start
-    mobile-S2.log           a log per cell
-    mobile-samples.csv      after S7: t_ms,heap_inuse,rss,goroutines
-    delay-3s/srv.log        S6's late servers
+  jitsi-datachannel/           a directory per pair
+    srv.log                    the pair's server
+    mobile-start.log           the client's start
+    mobile-S2.log              a log per cell
+    mobile-samples.csv         after S7: t_ms,heap_inuse,rss,goroutines
+    mobile-heap-41000ms.pb.gz  a heap profile where memory jumped
+    delay-3s/srv.log           S6's late servers
     delay-8s/srv.log
 ```
 
@@ -210,4 +213,4 @@ go run ./cmd/gate-report compare -severity fail previous.json current.json
 The `Test` job runs the unit tests of three builds: the default one, `olcrtc_lean` and `olcrtc_testhooks`, the one the local target's server is built with, so the hook S6 relies on is tested on every event, a fork's pull request included. Two more jobs in `.github/workflows/ci.yml` run the gate:
 
 - `gate-plan` runs the dry run of both builds, needs no secret and so runs for a pull request from a fork too, and puts both plans in the job summary. It fails when a build plans no cell or a cell of the other flavour.
-- `gate-local` needs `gate-plan` and runs the gate on the local target: the `cli` flavour (`-timeout 25m`), then the `mobile` flavour (`-tags olcrtc_lean`, `-timeout 45m`) whatever the first run did. It renders both reports into the job summary and uploads the `gate-local` artifact: the reports, the scrubbed logs and the samples. One run at a time across the repository (`concurrency: gate-rooms`, queued, never cancelled), because every run takes the same pool rooms. A pull request from a fork gets no secrets, so the job does not run for it; the push that merges it runs the gate.
+- `gate-local` needs `gate-plan` and runs the gate on the local target: the `cli` flavour (`-timeout 25m`), then the `mobile` flavour (`-tags olcrtc_lean`, `-timeout 45m`) whatever the first run did. It renders both reports into the job summary and uploads the `gate-local` artifact: the reports, the scrubbed logs, the samples and the heap profiles. One run at a time across the repository (`concurrency: gate-rooms`, queued, never cancelled), because every run takes the same pool rooms. A pull request from a fork gets no secrets, so the job does not run for it; the push that merges it runs the gate.

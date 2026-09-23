@@ -200,7 +200,7 @@ func pause(ctx context.Context, d time.Duration) bool {
 func runClient(ctx context.Context, o Options, pair Pair, client Client, ep Endpoint, dir string,
 	run func(string, func() error),
 ) {
-	sampler := baselineSampler()
+	sampler := baselineSampler(dir, client.Name(), o.Logf)
 	defer sampler.Stop()
 	env := newEnv(o, pair, client, ep, dir, sampler)
 	tun, err := startClient(ctx, o, env)
@@ -222,12 +222,15 @@ func runClient(ctx context.Context, o Options, pair Pair, client Client, ep Endp
 // FreeOSMemory's own GC, hand back what earlier pairs left (a sync.Pool's
 // objects outlive one cycle as its victim cache) and return the freed pages,
 // and the baseline mark reads the process before the client starts. S7
-// judges the client's memory by how far it rose over that reading.
-func baselineSampler() *Sampler {
+// judges the client's memory by how far it rose over that reading. A jump
+// in memory leaves a heap profile in the pair's directory dir, under the
+// client's name.
+func baselineSampler(dir, client string, logf func(format string, args ...any)) *Sampler {
 	// ai-generated: the clean baseline S7's memory growth is judged over.
 	runtime.GC() //nolint:revive // a clean baseline for a memory verdict, not a tuning knob
 	debug.FreeOSMemory()
 	s := NewSampler(time.Second)
+	s.ProfileJumps(dir, client, logf) // ai-generated: a profile when memory jumps
 	s.Start()
 	s.Mark(markBaseline)
 	return s

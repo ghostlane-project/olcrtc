@@ -3,7 +3,9 @@ package gate
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
+	"runtime/pprof"
 	"slices"
 	"strconv"
 	"strings"
@@ -35,6 +37,13 @@ type Sampler struct {
 	start   time.Time
 	stop    chan struct{}
 	done    chan struct{}
+	// ai-generated: where a jump's profile goes, under what name, who hears
+	// of it and how many jumps there were; no directory, no profiles
+	// (ProfileJumps).
+	profileDir    string
+	profilePrefix string
+	logf          func(format string, args ...any)
+	jumps         int
 }
 
 // NewSampler samples every interval once started. An interval that is not
@@ -94,21 +103,28 @@ func (s *Sampler) loop(stop <-chan struct{}, done chan<- struct{}) {
 
 // take adds one reading of the process.
 func (s *Sampler) take() {
-	sm := readSample()
-	s.mu.Lock()
-	s.add(sm)
-	s.mu.Unlock()
+	s.record(readSample())
 }
 
-// add puts a reading among the samples in time order: a tick's and a mark's
-// are read before the lock is taken and may reach it in either order. The
-// caller holds the lock.
-func (s *Sampler) add(sm Sample) {
+// record adds a reading, and writes a profile when it jumped over the
+// reading before it (ProfileJumps), outside the lock.
+func (s *Sampler) record(sm Sample) {
+	s.mu.Lock()
+	jump := s.jumpAt(s.add(sm))
+	s.mu.Unlock()
+	jump.write()
+}
+
+// add puts a reading among the samples in time order and returns where: a
+// tick's and a mark's are read before the lock is taken and may reach it in
+// either order. The caller holds the lock.
+func (s *Sampler) add(sm Sample) int {
 	i := len(s.samples)
 	for i > 0 && s.samples[i-1].At.After(sm.At) {
 		i--
 	}
 	s.samples = slices.Insert(s.samples, i, sm)
+	return i
 }
 
 // readSample reads the process once.
@@ -125,11 +141,13 @@ func readSample() Sample {
 func (s *Sampler) Mark(name string) {
 	sm := readSample()
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.marks[name] = sm.At
+	var jump jumpProfile
 	if s.stop != nil {
-		s.add(sm)
+		jump = s.jumpAt(s.add(sm))
 	}
+	s.mu.Unlock()
+	jump.write()
 }
 
 // PeakBetween returns the highest heap and the highest RSS sampled between
@@ -234,3 +252,98 @@ func parseVMRSS(status string) uint64 {
 	}
 	return 0
 }
+
+// ai-generated: the rest of the file (a profile when memory jumps).
+
+const (
+	// profileJump is how far the heap or the RSS must rise from one sample
+	// to the next for the sampler to write a heap profile. S7 failed on such
+	// jumps, and the samples alone cannot say what allocated them.
+	profileJump = 6 << 20
+	// maxJumpProfiles bounds the profiles one sampler writes: a heap with no
+	// memory limit can saw by more than the jump every few seconds under
+	// bulk load, and the first jumps are the ones worth a look.
+	maxJumpProfiles = 8
+)
+
+// ProfileJumps makes the sampler write a heap profile into dir whenever the
+// heap or the RSS rises by more than profileJump from one sample to the
+// next: <prefix>-heap-<t_ms>ms.pb.gz, t_ms on the clock of the CSV, at most
+// maxJumpProfiles of them, each told to logf. Go's heap profile is the allocs
+// profile too: it carries what is in use, as of the last GC, and what was
+// allocated since the process began (-sample_index=alloc_space), so one file
+// holds both. Call it before Start.
+func (s *Sampler) ProfileJumps(dir, prefix string, logf func(format string, args ...any)) {
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.profileDir, s.profilePrefix, s.logf = dir, prefix, logf
+}
+
+// jumpProfile is what one sample calls for: nothing (the zero value), a
+// profile at path, or, once the bound is reached, a word that no more come.
+type jumpProfile struct {
+	logf           func(format string, args ...any)
+	path           string
+	before, sample Sample
+}
+
+// jumpAt is what the sample at i calls for: a profile when it rose by more
+// than profileJump over the one before it in time. The caller holds the lock.
+func (s *Sampler) jumpAt(i int) jumpProfile {
+	if s.profileDir == "" || i == 0 {
+		return jumpProfile{}
+	}
+	before, sample := s.samples[i-1], s.samples[i]
+	if sample.HeapInuse <= before.HeapInuse+profileJump && sample.RSS <= before.RSS+profileJump {
+		return jumpProfile{}
+	}
+	s.jumps++
+	switch {
+	case s.jumps == maxJumpProfiles+1:
+		return jumpProfile{logf: s.logf}
+	case s.jumps > maxJumpProfiles:
+		return jumpProfile{}
+	}
+	name := fmt.Sprintf("%s-heap-%dms.pb.gz", s.profilePrefix, sample.At.Sub(s.start).Milliseconds())
+	return jumpProfile{logf: s.logf, path: filepath.Join(s.profileDir, name), before: before, sample: sample}
+}
+
+// write does what the jump calls for and says so.
+func (j jumpProfile) write() {
+	switch {
+	case j.logf == nil:
+		return
+	case j.path == "":
+		j.logf("memory jumped again: %d heap profiles written, no more for this client", maxJumpProfiles)
+		return
+	}
+	name := filepath.Join(filepath.Base(filepath.Dir(j.path)), filepath.Base(j.path))
+	if err := writeHeapProfile(j.path); err != nil {
+		j.logf("%s: %v", name, err)
+		return
+	}
+	j.logf("heap %.1f -> %.1f MiB, rss %.1f -> %.1f MiB from one sample to the next: %s",
+		mib(j.before.HeapInuse), mib(j.sample.HeapInuse), mib(j.before.RSS), mib(j.sample.RSS), name)
+}
+
+// writeHeapProfile writes the process's heap profile to path.
+func writeHeapProfile(path string) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("heap profile: %w", err)
+	}
+	if err := pprof.Lookup("heap").WriteTo(f, 0); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("heap profile: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("heap profile: %w", err)
+	}
+	return nil
+}
+
+// mib is a byte count in MiB, for a log line.
+func mib(n uint64) float64 { return float64(n) / (1 << 20) }

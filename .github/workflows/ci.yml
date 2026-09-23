@@ -374,6 +374,7 @@ jobs:
           path: |
             gate-artifacts/**/*.log
             gate-artifacts/**/*.csv
+            gate-artifacts/**/*.pb.gz
             gate-artifacts/**/gate-report.json
 
   build-cli:
