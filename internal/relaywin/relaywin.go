@@ -366,6 +366,15 @@ func (w *Windows) Wake(key string) <-chan struct{} {
 	return w.open(key).wake
 }
 
+// Len is how many destinations have a window open. It only looks. A window
+// stays open until Reset or ResetAll: a carrier that sends to a destination
+// gone for good opens one it keeps, and Len is how that shows.
+func (w *Windows) Len() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return len(w.windows)
+}
+
 // open returns key's window, opening one at the session's count if there is
 // none: no mark sent before it is past that count, so no echo of one can move
 // the new window. Called with mu held.

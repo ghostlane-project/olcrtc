@@ -124,7 +124,8 @@ func destinations(peerID string) []string {
 // toward a slow receiver without a limit. What went out is counted against
 // the window afterwards, and a mark follows it when one is due (window.go).
 // A send that was held while its destination's session ended is refused with
-// ErrDestinationEnded, and its frame never reaches the wire.
+// ErrDestinationEnded, and its frame never reaches the wire. A destination
+// the room has reported gone has no window at all (windowKey).
 func (s *Session) publish(payload []byte, topic string, dest []string, reliable bool) error {
 	if s.closed.Load() {
 		return ErrSessionClosed
@@ -138,7 +139,7 @@ func (s *Session) publish(payload []byte, topic string, dest []string, reliable 
 		return ErrNoDataChannel
 	}
 	dest = gen.roomDest(dest)
-	key := relayKey(dest)
+	key := gen.windowKey(dest)
 	if !reliable {
 		if dc.BufferedAmount() > bufferHighWaterMark || (key != "" && gen.win.Over(key, datagramSlack, time.Now())) {
 			gen.dropLossy()

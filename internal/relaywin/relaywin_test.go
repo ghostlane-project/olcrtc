@@ -453,6 +453,39 @@ func TestResetAllStartsEveryWindowOver(t *testing.T) {
 	}
 }
 
+// Len counts the windows open: what a sender counts or waits on opens one,
+// and so does arming it; looking, echoing and bumping open none; a Reset or
+// ResetAll closes them. A carrier that opens a window for a destination gone
+// for good holds it until the whole Windows goes, and Len is how it sees that.
+func TestLenCountsTheWindowsOpen(t *testing.T) {
+	w := New(Timing{})
+	if n := w.Len(); n != 0 {
+		t.Fatalf("a new Windows has %d windows open, want 0", n)
+	}
+	w.Epoch("a")
+	w.Wake("b")
+	w.Sent("c", frame, t0)
+	w.Arm("d")
+	if n := w.Len(); n != 4 {
+		t.Fatalf("Len = %d after Epoch, Wake, Sent and Arm on four keys, want 4", n)
+	}
+	w.Room("e", t0)
+	w.Over("e", slack, t0)
+	w.ApplyEcho("e", 1)
+	w.Bump("e")
+	if n := w.Len(); n != 4 {
+		t.Fatalf("Len = %d after Room, Over, ApplyEcho and Bump on a fifth key, want 4", n)
+	}
+	w.Reset("a")
+	if n := w.Len(); n != 3 {
+		t.Fatalf("Len = %d after a Reset, want 3", n)
+	}
+	w.ResetAll()
+	if n := w.Len(); n != 0 {
+		t.Fatalf("Len = %d after ResetAll, want 0", n)
+	}
+}
+
 // Arm turns a window on before any echo, for a destination that has said it
 // speaks the window some other way: a sender can be held from its first
 // byte. An armed window is marked by bytes, like any window on.

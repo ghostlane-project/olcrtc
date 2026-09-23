@@ -654,6 +654,56 @@ func TestParticipantLeftReleasesParkedPublish(t *testing.T) {
 	}
 }
 
+// TestAPeerThatLeftKeepsNoWindow is a server that stays joined while its
+// clients come and go. The room reports a client gone with a send to it held
+// on a full window, and the server's session for that client goes on sending
+// until liveness ends it - pings, keepalives, stream data, datagrams - and is
+// then retired. None of it opens a window toward the client again: the SFU
+// drops what is addressed to someone who is not there, and a window opened
+// for them would stay, with its wake channel, until the generation goes - one
+// for every client that ever left.
+func TestAPeerThatLeftKeepsNoWindow(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		leave func(server, client *Session)
+	}{
+		{"the connector reports it gone", func(server, client *Session) {
+			server.handleEnvelope(server.current(), envIn{
+				Event: eventParticipantLeft, ParticipantID: client.localIdentity(),
+			})
+		}},
+		{"the roster reports it disconnected", func(_, client *Session) {
+			_ = client.Close()
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			url, fake := newFakeConnector(t)
+			server, _, client, _ := windowPair(t, url)
+			to := client.localIdentity()
+			fake.slowLeg(to, 0)
+
+			writer := startBulk(func(p []byte) error { return server.SendTo(to, p) }, "bulk", 4<<20, slowLegRecord)
+			writer.waitHeld(t, "the server to hold on a full window")
+			tc.leave(server, client)
+			if err := writer.finish(t, 5*time.Second, "the held send once its destination left"); !errors.Is(err, ErrDestinationEnded) {
+				t.Fatalf("the held send = %v, want %v", err, ErrDestinationEnded)
+			}
+			for i := range 3 {
+				if err := server.SendTo(to, taggedPayload("after", i, 64)); err != nil {
+					t.Fatalf("a send to a participant that has left = %v", err)
+				}
+				if err := server.SendDatagramTo(to, taggedPayload("datagram", i, 64)); err != nil {
+					t.Fatalf("a datagram to a participant that has left = %v", err)
+				}
+			}
+			server.RetirePeer(to)
+			if n := server.current().win.Len(); n != 0 {
+				t.Fatalf("the server keeps %d relay windows once its only client has left, want 0", n)
+			}
+		})
+	}
+}
+
 // TestDatagramsCountAndDropOnlyPastWPlusD is the lossy lane under the window
 // (objection 2 of the challenge). A datagram is queued at the SFU like any
 // other packet, so it counts against its destination's window. It is never

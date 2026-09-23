@@ -194,6 +194,21 @@ func relayKey(dest []string) string {
 	return ""
 }
 
+// windowKey is relayKey, and no window for a participant the room has
+// reported gone. Its server session goes on sending until liveness ends it,
+// and a window opened for those sends would never be dropped again - the
+// Reset that departure made is its last - so it would stay until the
+// generation goes, one for every client that ever left. The SFU drops what is
+// addressed to someone who is not there, and a send held when they left was
+// released by that Reset.
+func (g *generation) windowKey(dest []string) string {
+	key := relayKey(dest)
+	if key != "" && g.hasLeft(key) {
+		return ""
+	}
+	return key
+}
+
 // relayEpoch is the epoch of the window a send to key belongs to, taken
 // before the send waits for anything: 0 for a send with no window.
 func (g *generation) relayEpoch(key string) uint64 {
@@ -221,6 +236,11 @@ func (g *generation) relayEpoch(key string) uint64 {
 // window that lets the send go. Either answer is checked against the
 // generation first: the session closing is ErrSessionClosed, whatever the
 // window said.
+//
+// A destination the room has reported gone is refused before the wake is
+// taken: the room records the departure before its Reset wakes the sender,
+// and taking the wake would open a window again for someone who is not
+// there, which nothing would ever drop (windowKey).
 func (s *Session) awaitRelayWindow(gen *generation, key string, epoch uint64) error {
 	if key == "" {
 		return nil
@@ -229,6 +249,9 @@ func (s *Session) awaitRelayWindow(gen *generation, key string, epoch uint64) er
 	for {
 		if gen.isDone() || s.closed.Load() {
 			return ErrSessionClosed
+		}
+		if gen.hasLeft(key) {
+			return s.closedOr(gen, ErrDestinationEnded)
 		}
 		wake := gen.win.Wake(key)
 		if gen.win.Epoch(key) != epoch {
