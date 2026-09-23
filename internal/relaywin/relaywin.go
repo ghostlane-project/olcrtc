@@ -40,12 +40,18 @@
 //   - Each window has an epoch, which Reset, ResetAll and Bump replace. A
 //     sender that parked under one epoch and wakes under another holds a
 //     frame for a session that is over, and must not send it.
+//   - A frame the carrier would rather drop than hold, a datagram, asks Over
+//     instead of Room: it goes until the window is on and more than a Window
+//     and the carrier's slack is in flight. Over only looks, so asking it on
+//     every datagram moves none of the clocks a held sender runs on.
 //
-// A sender that has to wait takes Wake before it asks Room, then waits on
-// that channel and a Retry timer. An echo that moves a window, Reset,
-// ResetAll and Bump close the channel, so a wake between the question and
-// the wait is not missed, and one wake releases every sender parked on any
-// window.
+// A sender that has to wait takes its window's Wake before it asks Room, then
+// waits on that channel and a Retry timer. An echo that moves the window, a
+// Reset or a Bump of it, and ResetAll close the channel, so a wake between
+// the question and the wait is not missed. One wake releases every sender
+// parked on that window and none parked on another: a server with a sender
+// parked per client wakes the one an echo made room for, not all of them on
+// every echo from any of them.
 //
 // Jitsi keeps its own copy of the mechanism, where it was proved
 // (internal/engine/jitsi/relaywindow.go); this is that mechanism without a
@@ -132,6 +138,10 @@ type state struct {
 	markedAt  time.Time // when the last mark went out
 	heldSince time.Time // when the window filled, cleared by every echo
 	epoch     uint64    // replaced by Reset, ResetAll and Bump; never zero
+	// wake is closed when a sender held on the window may go on: replaced
+	// by an echo that moves it and by Bump, left closed by Reset and
+	// ResetAll, which drop the window with it.
+	wake chan struct{}
 }
 
 // Windows is the window toward every destination of one sender, keyed by
@@ -146,8 +156,6 @@ type Windows struct {
 	// window's count starts. epochs is the last epoch handed out.
 	count  uint64
 	epochs uint64
-	// wake is closed and replaced whenever a held sender may go on.
-	wake chan struct{}
 }
 
 // New returns a Windows with no window open, sized by t.
@@ -155,7 +163,6 @@ func New(t Timing) *Windows {
 	return &Windows{
 		timing:  t.withDefaults(),
 		windows: make(map[string]*state),
-		wake:    make(chan struct{}),
 	}
 }
 
@@ -224,8 +231,8 @@ func (w *Windows) Sent(key string, n int, now time.Time) (bool, uint64) {
 // ApplyEcho takes the destination's echo of counter. It moves key's window
 // only past the last echo and within what was sent, and reports whether it
 // moved and whether that turned the window on. A window that moved wakes
-// every parked sender. The caller has checked that the echo came from the
-// destination key names: anyone who can see a count can send it back.
+// every sender parked on it. The caller has checked that the echo came from
+// the destination key names: anyone who can see a count can send it back.
 func (w *Windows) ApplyEcho(key string, counter uint64) (bool, bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -237,7 +244,7 @@ func (w *Windows) ApplyEcho(key string, counter uint64) (bool, bool) {
 	st.active = true
 	st.echoed = counter
 	st.heldSince = time.Time{}
-	w.wakeLocked()
+	st.wakeSenders()
 	return true, turnedOn
 }
 
@@ -261,17 +268,21 @@ func (w *Windows) Arm(key string) {
 func (w *Windows) Reset(key string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	delete(w.windows, key)
-	w.wakeLocked()
+	if st := w.windows[key]; st != nil {
+		close(st.wake)
+		delete(w.windows, key)
+	}
 }
 
-// ResetAll forgets every window, as Reset does one. The count of bytes and
-// the epochs go on.
+// ResetAll forgets every window, as Reset does one, and wakes every parked
+// sender. The count of bytes and the epochs go on.
 func (w *Windows) ResetAll() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	for _, st := range w.windows {
+		close(st.wake)
+	}
 	clear(w.windows)
-	w.wakeLocked()
 }
 
 // Bump gives key's window a new epoch and keeps its counts: the session a
@@ -283,8 +294,8 @@ func (w *Windows) Bump(key string) {
 	defer w.mu.Unlock()
 	if st := w.windows[key]; st != nil {
 		st.epoch = w.nextEpoch()
+		st.wakeSenders()
 	}
-	w.wakeLocked()
 }
 
 // Epoch is the epoch of key's window, opening the window if there is none.
@@ -296,13 +307,37 @@ func (w *Windows) Epoch(key string) uint64 {
 	return w.open(key).epoch
 }
 
-// Wake is the channel closed the next time a held sender may go on: an echo
-// moved a window, or a Reset, a ResetAll or a Bump changed one. A sender
-// takes it before it asks Room, so a wake between the two is not missed.
-func (w *Windows) Wake() <-chan struct{} {
+// Over reports whether key's window is on with more than a Window and slack
+// in flight. It is for a frame the carrier drops rather than holds, a
+// datagram: one that finds the window over is dropped, and one that does not
+// goes and is counted with Sent like any other. A window that is off is
+// never over - an older build never echoes, so what is in flight to it only
+// grows, and its datagrams go as they did before the window - and neither is
+// a destination with no window.
+//
+// Over only looks. It opens no window, starts no hold, takes no probe, lets
+// nothing go and wakes nobody: those are Room's, for the sender that waits.
+func (w *Windows) Over(key string, slack uint64) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.wake
+	st := w.windows[key]
+	if st == nil || !st.active {
+		return false
+	}
+	// Compared past the Window, so no slack can wrap the sum.
+	inFlight := st.sent - st.echoed
+	return inFlight > w.timing.Window && inFlight-w.timing.Window > slack
+}
+
+// Wake is the channel closed the next time a sender held on key's window may
+// go on: an echo moved the window, a Reset or a Bump changed it, or ResetAll
+// changed every window. A sender takes it before it asks Room, so a wake
+// between the two is not missed. It opens the window if there is none, as
+// Epoch does, so the channel is the one of the window Room will look at.
+func (w *Windows) Wake(key string) <-chan struct{} {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.open(key).wake
 }
 
 // open returns key's window, opening one at the session's count if there is
@@ -311,7 +346,11 @@ func (w *Windows) Wake() <-chan struct{} {
 func (w *Windows) open(key string) *state {
 	st := w.windows[key]
 	if st == nil {
-		st = &state{sent: w.count, marked: w.count, echoed: w.count, epoch: w.nextEpoch()}
+		st = &state{
+			sent: w.count, marked: w.count, echoed: w.count,
+			epoch: w.nextEpoch(),
+			wake:  make(chan struct{}),
+		}
 		w.windows[key] = st
 	}
 	return st
@@ -323,9 +362,9 @@ func (w *Windows) nextEpoch() uint64 {
 	return w.epochs
 }
 
-// wakeLocked releases every sender parked on Wake and arms the next wait.
-// Called with mu held.
-func (w *Windows) wakeLocked() {
-	close(w.wake)
-	w.wake = make(chan struct{})
+// wakeSenders releases every sender parked on the window and arms the next
+// wait. Called with mu held.
+func (st *state) wakeSenders() {
+	close(st.wake)
+	st.wake = make(chan struct{})
 }

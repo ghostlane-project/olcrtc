@@ -10,7 +10,7 @@ import (
 
 // ai-generated: the whole file (the window core's tests, olcrtc#49). The cases
 // are Jitsi's relaywindow_test (olcrtc#15) without the bridge, on a fake
-// clock, plus Arm and the epochs.
+// clock, plus Arm, the epochs, Over and the per-window wake.
 
 // t0 is the fake clock. Nothing here reads the real one for the window: every
 // call is handed its now, and a test steps time where it needs to.
@@ -590,7 +590,8 @@ func TestABumpKeepsTheCounts(t *testing.T) {
 	before := snapshot(t, w, "peer")
 	w.Bump("peer")
 	after := snapshot(t, w, "peer")
-	after.epoch = before.epoch
+	// The epoch and the wake channel are Bump's to replace; the counts are not.
+	after.epoch, after.wake = before.epoch, before.wake
 	if after != before {
 		t.Fatalf("Bump changed the counts: %+v, then %+v", before, after)
 	}
@@ -602,29 +603,173 @@ func TestABumpKeepsTheCounts(t *testing.T) {
 	}
 }
 
-// An echo that moves a window closes the wake channel a held sender took
-// before it looked; one that moves nothing does not. The next channel is a
-// new one.
-func TestAnEchoThatMovesAWindowWakes(t *testing.T) {
+// slack is the room past a window the SaluteJazz datagram rule leaves (D in
+// the spec): a datagram is dropped only past W + D in flight.
+const slack = 64 << 10
+
+// A window that is off is never over, however much is in flight: an older
+// build never echoes, and its datagrams go as they did before the window. A
+// destination with no window is not over either, and the question opens
+// none.
+func TestAWindowOffIsNeverOver(t *testing.T) {
+	w := New(Timing{})
+	if w.Over("peer", slack) {
+		t.Fatal("a destination with no window is over")
+	}
+	if _, open := w.windows["peer"]; open {
+		t.Fatal("Over opened a window")
+	}
+	w.Sent("peer", 16*window, t0)
+	if w.Over("peer", slack) {
+		t.Fatalf("a destination that never echoed is over with %d in flight", 16*window)
+	}
+}
+
+// Once on, a window is over past a window and the slack, not at a window: a
+// sender is held at W, a datagram only dropped past W + D.
+func TestAWindowOnIsOverPastAWindowAndItsSlack(t *testing.T) {
+	w := New(Timing{})
+	on(t, w, "peer", frame)
+	w.Sent("peer", window, t0)
+	if ok, _, _ := w.Room("peer", t0); ok {
+		t.Fatal("the window is not on and full")
+	}
+	if w.Over("peer", slack) {
+		t.Fatal("over at a window in flight: a datagram is dropped only past the slack")
+	}
+	w.Sent("peer", slack, t0)
+	if w.Over("peer", slack) {
+		t.Fatalf("over at exactly a window and the slack (%d) in flight", window+slack)
+	}
+	w.Sent("peer", 1, t0)
+	if !w.Over("peer", slack) {
+		t.Fatalf("not over at %d in flight, a byte past a window and the slack", window+slack+1)
+	}
+	if moved, _ := w.ApplyEcho("peer", snapshot(t, w, "peer").sent); !moved || w.Over("peer", slack) {
+		t.Fatal("still over after the echo of everything sent")
+	}
+}
+
+// A window started over is empty: what was in flight before a Reset or a
+// ResetAll does not count against the window opened after it, even once that
+// one is on.
+func TestAWindowStartedOverIsNotOver(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		do   func(*Windows)
+	}{
+		{"Reset", func(w *Windows) { w.Reset("peer") }},
+		{"ResetAll", func(w *Windows) { w.ResetAll() }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := New(Timing{})
+			w.Arm("peer")
+			w.Sent("peer", window+slack+1, t0)
+			if !w.Over("peer", slack) {
+				t.Fatal("the window is not over to start with")
+			}
+			tc.do(w)
+			if w.Over("peer", slack) {
+				t.Fatalf("over after %s", tc.name)
+			}
+			w.Arm("peer")
+			w.Sent("peer", window+slack, t0)
+			if w.Over("peer", slack) {
+				t.Fatalf("the window opened after %s counts what was in flight before it", tc.name)
+			}
+		})
+	}
+}
+
+// Bump keeps the counts, so a window over stays over: the bytes are still
+// queued at the relay.
+func TestABumpKeepsAWindowOver(t *testing.T) {
+	w := New(Timing{})
+	w.Arm("peer")
+	w.Sent("peer", window+slack+1, t0)
+	w.Bump("peer")
+	if !w.Over("peer", slack) {
+		t.Fatal("Bump forgot what is in flight")
+	}
+}
+
+// A destination let go after DeadAfter is off, and is never over again until
+// it echoes: liveness, not the window, decides it is gone.
+func TestAWindowLetGoIsNeverOver(t *testing.T) {
+	w := New(Timing{ProbeAfter: time.Second, DeadAfter: time.Minute})
+	on(t, w, "peer", frame)
+	w.Sent("peer", window+slack+1, t0)
+	w.Room("peer", t0)
+	if ok, _, _ := w.Room("peer", at(time.Minute)); !ok {
+		t.Fatal("not let go after DeadAfter")
+	}
+	w.Sent("peer", 4*window, t0)
+	if w.Over("peer", slack) {
+		t.Fatal("a destination let go is over")
+	}
+}
+
+// Over only looks. It does not start the hold, take the probe a held sender
+// is due, let a silent destination go or wake anyone: a datagram asks it on
+// every send, and must not move a clock the reliable sender runs on.
+func TestOverOnlyLooks(t *testing.T) {
+	w := New(Timing{ProbeAfter: time.Second, DeadAfter: time.Minute})
+	on(t, w, "peer", frame)
+	w.Sent("peer", window+slack+1, t0)
+	wake := w.Wake("peer")
+	before := snapshot(t, w, "peer")
+	for range 3 {
+		w.Over("peer", slack)
+	}
+	if after := snapshot(t, w, "peer"); after != before {
+		t.Fatalf("Over changed the window: %+v, then %+v", before, after)
+	}
+	if closed(wake) {
+		t.Fatal("Over woke the senders")
+	}
+	w.Room("peer", t0)
+	w.Over("peer", slack)
+	if _, probe, _ := w.Room("peer", at(time.Second)); !probe {
+		t.Fatal("Over took the probe a held sender was due")
+	}
+	if ok, _, _ := w.Room("peer", at(time.Minute-time.Nanosecond)); ok {
+		t.Fatal("Over moved the dead clock")
+	}
+}
+
+// An echo that moves a window closes the wake channel a sender held on that
+// window took before it looked; one that moves nothing does not, and neither
+// does one that moves another window: a server's senders to other clients
+// stay parked. The next channel is a new one.
+func TestAnEchoThatMovesAWindowWakesThatWindow(t *testing.T) {
 	w := New(Timing{})
 	_, counter := w.Sent("peer", frame, t0)
-	wake := w.Wake()
+	_, otherCounter := w.Sent("other", frame, t0)
+	wake, other := w.Wake("peer"), w.Wake("other")
 	w.ApplyEcho("peer", counter+1)
 	w.ApplyEcho("stranger", counter)
-	if closed(wake) {
+	if closed(wake) || closed(other) {
 		t.Fatal("an echo that moved nothing woke the senders")
 	}
 	w.ApplyEcho("peer", counter)
 	if !closed(wake) {
 		t.Fatal("an echo that moved the window woke nobody")
 	}
-	if closed(w.Wake()) {
+	if closed(other) {
+		t.Fatal("an echo that moved one window woke the senders held on another")
+	}
+	if closed(w.Wake("peer")) {
 		t.Fatal("the next wake channel came closed")
+	}
+	w.ApplyEcho("other", otherCounter)
+	if !closed(other) {
+		t.Fatal("an echo that moved the other window woke nobody")
 	}
 }
 
-// Reset, ResetAll and Bump each wake a held sender, which then finds its
-// window gone or its epoch replaced.
+// Reset, ResetAll and Bump each wake a sender held on the window they
+// change, which then finds its window gone or its epoch replaced. A Reset or
+// a Bump of another window leaves it parked.
 func TestResetsAndBumpsWake(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -636,9 +781,16 @@ func TestResetsAndBumpsWake(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := New(Timing{})
-			on(t, w, "peer", frame)
-			w.Sent("peer", window, t0)
-			wake := w.Wake()
+			for _, key := range []string{"peer", "other"} {
+				on(t, w, key, frame)
+				w.Sent(key, window, t0)
+			}
+			wake := w.Wake("peer")
+			w.Reset("other")
+			w.Bump("other")
+			if closed(wake) {
+				t.Fatal("a Reset or a Bump of another window woke the senders held on this one")
+			}
 			tc.do(w)
 			if !closed(wake) {
 				t.Fatalf("%s woke nobody", tc.name)
@@ -651,42 +803,69 @@ func TestResetsAndBumpsWake(t *testing.T) {
 // sender would find itself held again.
 func TestCountingArmingAndLookingDoNotWake(t *testing.T) {
 	w := New(Timing{})
-	wake := w.Wake()
+	wake := w.Wake("peer")
 	w.Sent("peer", window, t0)
 	w.Arm("peer")
 	w.Room("peer", at(time.Hour))
+	w.Over("peer", slack)
 	w.Epoch("other")
+	w.Wake("other")
 	w.Timing()
 	if closed(wake) {
 		t.Fatal("counting, Arm or a look woke the senders")
 	}
 }
 
-// A server has a sender parked per client; one wake releases all of them, so
-// the one whose window moved is not left to its retry timer behind another
-// that took the wake.
-func TestOneWakeReleasesEveryParkedSender(t *testing.T) {
-	w := New(Timing{})
-	const parked = 3
+// parkOn parks n senders on key's wake channel and returns a channel closed
+// once every one of them is released.
+func parkOn(w *Windows, key string, n int) <-chan struct{} {
 	var ready, released sync.WaitGroup
-	ready.Add(parked)
-	released.Add(parked)
-	for range parked {
+	ready.Add(n)
+	released.Add(n)
+	for range n {
 		go func() {
-			wake := w.Wake()
+			wake := w.Wake(key)
 			ready.Done()
 			<-wake
 			released.Done()
 		}()
 	}
 	ready.Wait()
-	w.ResetAll()
 	done := make(chan struct{})
 	go func() {
 		released.Wait()
 		close(done)
 	}()
-	closedWithin(t, done, 5*time.Second, "one wake did not release every parked sender")
+	return done
+}
+
+// Several senders held on one window are all released by the one wake, so
+// the one that can go is not left to its retry timer behind another that
+// took the wake. Senders held on another window stay parked.
+func TestOneWakeReleasesEverySenderParkedOnItsWindow(t *testing.T) {
+	w := New(Timing{})
+	_, counter := w.Sent("peer", frame, t0)
+	otherWake := w.Wake("other")
+	done := parkOn(w, "peer", 3)
+	w.ApplyEcho("peer", counter)
+	closedWithin(t, done, 5*time.Second, "one wake did not release every sender parked on the window")
+	if closed(otherWake) {
+		t.Fatal("the wake of one window released a sender parked on another")
+	}
+}
+
+// ResetAll releases every parked sender, whatever window it waits on.
+func TestResetAllReleasesEveryParkedSender(t *testing.T) {
+	w := New(Timing{})
+	keys := []string{"a", "b", "c"}
+	done := make([]<-chan struct{}, 0, len(keys))
+	for _, key := range keys {
+		done = append(done, parkOn(w, key, 2))
+	}
+	w.ResetAll()
+	for _, d := range done {
+		closedWithin(t, d, 5*time.Second, "ResetAll did not release every parked sender")
+	}
 }
 
 var errStaleEpoch = errors.New("the window's epoch changed while the sender was held")
@@ -706,7 +885,7 @@ type sender struct {
 
 func (s sender) waitRoom(epoch uint64) error {
 	for {
-		wake := s.w.Wake()
+		wake := s.w.Wake(s.key)
 		if s.w.Epoch(s.key) != epoch {
 			return errStaleEpoch
 		}
