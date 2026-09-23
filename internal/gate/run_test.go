@@ -676,6 +676,45 @@ func TestRunPlanKeepsTheRunsSecretsOut(t *testing.T) {
 	}
 }
 
+// TestTheRunKeepsASecretWhileAnotherGoroutineLogs: a sampler logs a jump's
+// profile from its own goroutine while S6, on the cell's, keeps a late
+// server's room and key. The list they share must take the secret under
+// -race, and a line logged after the keep is scrubbed of it.
+func TestTheRunKeepsASecretWhileAnotherGoroutineLogs(t *testing.T) {
+	var (
+		mu    sync.Mutex
+		lines []string
+	)
+	o := prepared(Options{Recorder: NewRecorder(Report{}), Logf: func(format string, args ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		lines = append(lines, fmt.Sprintf(format, args...))
+	}})
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				o.Logf("a jump's profile")
+			}
+		}
+	}()
+	for i := range 100 {
+		o.keep(fmt.Sprintf("gate-fakeroom%04d", i))
+	}
+	close(stop)
+	<-done
+	o.Logf("late servers in %s and %s", "gate-fakeroom0000", "gate-fakeroom0099")
+	mu.Lock()
+	defer mu.Unlock()
+	if last := lines[len(lines)-1]; last != "late servers in <room> and <room>" {
+		t.Fatalf("logged %q after the keeps, want it scrubbed of both", last)
+	}
+}
+
 func TestRunPlanWritesNoCellLogForALinkTarget(t *testing.T) {
 	resetRegistryForTest(t)
 	delayed := true

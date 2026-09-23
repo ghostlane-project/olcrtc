@@ -10,6 +10,7 @@ import (
 	"runtime/debug"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/openlibrecommunity/olcrtc/internal/engine/builtin"
@@ -57,7 +58,11 @@ type Options struct {
 	// caller's (a token, a link, the pools) and, as each server comes up,
 	// its room, key and channel, which RunPlan adds.
 	Secrets *[]string
-	Logf    func(format string, args ...any)
+	// ai-generated: secretsMu guards *Secrets once RunPlan has prepared the
+	// options: a sampler logs a jump from its own goroutine while S6 keeps a
+	// late server's room and key on the cell's.
+	secretsMu *sync.Mutex
+	Logf      func(format string, args ...any)
 	// ReportPath is where the report is kept as the run goes, rewritten
 	// after the plan and after every cell: a process that dies mid-run (a
 	// panic outside a scenario, a -timeout kill) still leaves every cell it
@@ -94,27 +99,39 @@ func RunPlan(ctx context.Context, opt Options, run func(name string, cell func()
 
 // prepared fills what a caller may leave out, makes every line the run logs
 // scrubbed of the secrets known when it is written, and hands the recorder
-// those known up front.
+// those known up front. From here on the run's secrets are read and added
+// under a lock of their own: lines are logged from more than one goroutine.
 func prepared(opt Options) Options {
 	o := opt
 	if o.Secrets == nil {
 		o.Secrets = &[]string{}
 	}
-	logf, secrets := o.Logf, o.Secrets
+	o.secretsMu = &sync.Mutex{}
+	logf, known := o.Logf, o.secrets
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
 	o.Logf = func(format string, args ...any) {
-		logf("%s", Scrub(fmt.Sprintf(format, args...), *secrets...))
+		logf("%s", Scrub(fmt.Sprintf(format, args...), known()...))
 	}
-	o.Recorder.Withhold(*o.Secrets...)
+	o.Recorder.Withhold(o.secrets()...)
 	return o
+}
+
+// secrets is a copy of the run's secrets as they stand, taken under their
+// lock, so a Scrub never reads the list while keep grows it.
+func (o Options) secrets() []string {
+	o.secretsMu.Lock()
+	defer o.secretsMu.Unlock()
+	return slices.Clone(*o.Secrets)
 }
 
 // keep adds secrets of the run: every log line and cell log from now on is
 // scrubbed of them, and the report of all of them.
 func (o Options) keep(secrets ...string) {
+	o.secretsMu.Lock()
 	*o.Secrets = append(*o.Secrets, secrets...)
+	o.secretsMu.Unlock()
 	o.Recorder.Withhold(secrets...)
 }
 
@@ -432,7 +449,7 @@ func (o Options) writeLog(l *CellLog, dir, name string) string {
 		return ""
 	}
 	path := filepath.Join(dir, name)
-	if err := l.WriteScrubbed(path, *o.Secrets...); err != nil {
+	if err := l.WriteScrubbed(path, o.secrets()...); err != nil {
 		o.Logf("%s: %v", name, err)
 		return ""
 	}
