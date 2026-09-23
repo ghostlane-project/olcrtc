@@ -30,9 +30,18 @@ type KnownFailure struct{ Cell, Issue, Why string }
 // cell may be on it for an engine bug: without the WB token, or with a room
 // that will not open, the server never comes up, its cells never run, and a
 // cell that never ran is never known, so configuration stays blocking.
+//
+// ai-generated: the salutejazz entries, narrowed to S2 and S3. With the
+// relay window bounding what Sber's SFU queues toward a peer, a salutejazz
+// session that ends on liveness is a regression again, so S0, S1, S4, S5
+// and S7 block. A bulk transfer on a slow Sber leg can still fall under the
+// floor, and a connect on top still waits behind up to a window of data:
+// S2 and S3 stay on #49 until an issue of their own replaces it.
 var knownFailures = []KnownFailure{ //nolint:gochecknoglobals // edited by hand as issues open and close; tests swap it
-	{Cell: "engine-linux/salutejazz/datachannel/*/*", Issue: issues + "49",
-		Why: "a bulk transfer stalls through Sber's TURN, the session ends on liveness, mobile does not recover"},
+	{Cell: "engine-linux/salutejazz/datachannel/*/S2", Issue: issues + "49",
+		Why: "throughput and on-top latency on a slow Sber leg"},
+	{Cell: "engine-linux/salutejazz/datachannel/*/S3", Issue: issues + "49",
+		Why: "throughput and on-top latency on a slow Sber leg"},
 }
 
 // knownFailure is the entry of the list a cell id matches, the first one if
