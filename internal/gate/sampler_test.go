@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strconv"
@@ -316,23 +317,57 @@ func TestASteadySeriesWritesNoProfile(t *testing.T) {
 	}
 }
 
-// TestJumpProfilesStopAtTheirBound keeps a heap that saws by more than the
-// jump every other second, the way a flavour without a memory limit can,
-// from filling the artifacts: the first maxJumpProfiles are written and the
-// sampler says once that it writes no more.
-func TestJumpProfilesStopAtTheirBound(t *testing.T) {
+// TestEveryJumpIsProfiledHoweverManyCameBefore writes a profile for each of
+// twelve jumps. The one S7's peak calls for comes after the regrowth past
+// the baseline, S0, S1's burst and the first pulls of S2 have jumped, so no
+// count of earlier jumps may use it up.
+func TestEveryJumpIsProfiledHoweverManyCameBefore(t *testing.T) {
 	dir := t.TempDir()
-	heap, rss := make([]uint64, 60), make([]uint64, 60)
+	heap, rss := make([]uint64, 24), make([]uint64, 24)
 	for i := range heap {
 		heap[i], rss[i] = 10+uint64(i%2)*20, 40
 	}
 	_, log := series(t, dir, heap, rss)
-	if got := profilesIn(t, dir); len(got) != maxJumpProfiles {
-		t.Fatalf("%d profiles for 30 jumps, want %d", len(got), maxJumpProfiles)
+	if got := profilesIn(t, dir); len(got) != 12 {
+		t.Fatalf("%d profiles for 12 jumps, want 12", len(got))
 	}
 	lines := log.all()
-	if len(lines) != maxJumpProfiles+1 || !strings.Contains(lines[len(lines)-1], "no more") {
-		t.Fatalf("logged %q, want a line per profile and one saying no more", lines)
+	if len(lines) != 12 || slices.ContainsFunc(lines, func(l string) bool { return !strings.Contains(l, ".pb.gz") }) {
+		t.Fatalf("logged %q, want a line naming each profile", lines)
+	}
+}
+
+// TestAJumpsLineSaysWhatWritingItsProfileCost: the profile is written inside
+// the process S7 weighs, so its line gives what the write allocated and how
+// far the heap in use moved over it, and a peak near S7's bound can be put
+// down to the tool or to the client.
+func TestAJumpsLineSaysWhatWritingItsProfileCost(t *testing.T) {
+	_, log := series(t, t.TempDir(), []uint64{10, 17}, []uint64{40, 40})
+	lines := log.all()
+	cost := regexp.MustCompile(`/mobile-heap-1000ms\.pb\.gz \(writing it allocated \d+\.\d MiB, heap in use [+-]\d+\.\d MiB\)$`)
+	if len(lines) != 1 || !cost.MatchString(lines[0]) {
+		t.Fatalf("logged %q, want the profile named with what writing it cost", lines)
+	}
+}
+
+// TestProfilesBetweenCountsTheWritesThatCanMoveAWindowsPeak: a profile is
+// written just after its sample, so one at the window's first mark or inside
+// it can leave garbage in a later sample of the window, and one at its last
+// mark cannot.
+func TestProfilesBetweenCountsTheWritesThatCanMoveAWindowsPeak(t *testing.T) {
+	s, _ := series(t, t.TempDir(),
+		[]uint64{10, 17, 10, 17, 10, 17, 10, 17, 10},
+		[]uint64{40, 40, 40, 40, 40, 40, 40, 40, 40})
+	at := func(i int) time.Time { return s.start.Add(time.Duration(i) * time.Second) }
+	s.marks["from"], s.marks["to"], s.marks["after"] = at(3), at(7), at(8)
+	if got := s.ProfilesBetween("from", "to"); got != 2 {
+		t.Fatalf("profiles between the marks = %d, want 2: the ones at 3 s and 5 s, not 7 s", got)
+	}
+	if got := s.ProfilesBetween("to", "after"); got != 1 {
+		t.Fatalf("profiles from the last mark on = %d, want the one at 7 s", got)
+	}
+	if got := s.ProfilesBetween("from", "unknown"); got != 0 {
+		t.Fatalf("profiles up to an unknown mark = %d, want 0", got)
 	}
 }
 

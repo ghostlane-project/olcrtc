@@ -38,12 +38,12 @@ type Sampler struct {
 	stop    chan struct{}
 	done    chan struct{}
 	// ai-generated: where a jump's profile goes, under what name, who hears
-	// of it and how many jumps there were; no directory, no profiles
-	// (ProfileJumps).
+	// of it, and the sample each profile written was for; no directory, no
+	// profiles (ProfileJumps).
 	profileDir    string
 	profilePrefix string
 	logf          func(format string, args ...any)
-	jumps         int
+	profiled      []time.Time
 }
 
 // NewSampler samples every interval once started. An interval that is not
@@ -112,7 +112,7 @@ func (s *Sampler) record(sm Sample) {
 	s.mu.Lock()
 	jump := s.jumpAt(s.add(sm))
 	s.mu.Unlock()
-	jump.write()
+	s.profile(jump)
 }
 
 // add puts a reading among the samples in time order and returns where: a
@@ -147,7 +147,7 @@ func (s *Sampler) Mark(name string) {
 		jump = s.jumpAt(s.add(sm))
 	}
 	s.mu.Unlock()
-	jump.write()
+	s.profile(jump)
 }
 
 // PeakBetween returns the highest heap and the highest RSS sampled between
@@ -255,24 +255,19 @@ func parseVMRSS(status string) uint64 {
 
 // ai-generated: the rest of the file (a profile when memory jumps).
 
-const (
-	// profileJump is how far the heap or the RSS must rise from one sample
-	// to the next for the sampler to write a heap profile. S7 failed on such
-	// jumps, and the samples alone cannot say what allocated them.
-	profileJump = 6 << 20
-	// maxJumpProfiles bounds the profiles one sampler writes: a heap with no
-	// memory limit can saw by more than the jump every few seconds under
-	// bulk load, and the first jumps are the ones worth a look.
-	maxJumpProfiles = 8
-)
+// profileJump is how far the heap or the RSS must rise from one sample to
+// the next for the sampler to write a heap profile. S7 failed on such jumps,
+// and the samples alone cannot say what allocated them.
+const profileJump = 6 << 20
 
 // ProfileJumps makes the sampler write a heap profile into dir whenever the
 // heap or the RSS rises by more than profileJump from one sample to the
-// next: <prefix>-heap-<t_ms>ms.pb.gz, t_ms on the clock of the CSV, at most
-// maxJumpProfiles of them, each told to logf. Go's heap profile is the allocs
-// profile too: it carries what is in use, as of the last GC, and what was
-// allocated since the process began (-sample_index=alloc_space), so one file
-// holds both. Call it before Start.
+// next: <prefix>-heap-<t_ms>ms.pb.gz, t_ms on the clock of the CSV, each
+// told to logf with what writing it cost. Every jump gets one, however many
+// came before: the one S7's peak calls for comes late in a client's run. Go's
+// heap profile is the allocs profile too: it carries what is in use, as of
+// the last GC, and what was allocated since the process began
+// (-sample_index=alloc_space), so one file holds both. Call it before Start.
 func (s *Sampler) ProfileJumps(dir, prefix string, logf func(format string, args ...any)) {
 	if logf == nil {
 		logf = func(string, ...any) {}
@@ -282,8 +277,30 @@ func (s *Sampler) ProfileJumps(dir, prefix string, logf func(format string, args
 	s.profileDir, s.profilePrefix, s.logf = dir, prefix, logf
 }
 
-// jumpProfile is what one sample calls for: nothing (the zero value), a
-// profile at path, or, once the bound is reached, a word that no more come.
+// ProfilesBetween counts the heap profiles written from the first mark up to
+// the second, the second's own left out: a profile is written just after its
+// sample, in the process the samples weigh, so one written inside a window
+// can leave garbage in a later sample of it, and one at its last mark comes
+// after every sample the window holds. It is 0 when a mark is unknown.
+func (s *Sampler) ProfilesBetween(fromMark, toMark string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	from, okFrom := s.marks[fromMark]
+	to, okTo := s.marks[toMark]
+	if !okFrom || !okTo {
+		return 0
+	}
+	n := 0
+	for _, at := range s.profiled {
+		if !at.Before(from) && at.Before(to) {
+			n++
+		}
+	}
+	return n
+}
+
+// jumpProfile is what one sample calls for: nothing (the zero value) or a
+// profile at path.
 type jumpProfile struct {
 	logf           func(format string, args ...any)
 	path           string
@@ -300,33 +317,35 @@ func (s *Sampler) jumpAt(i int) jumpProfile {
 	if sample.HeapInuse <= before.HeapInuse+profileJump && sample.RSS <= before.RSS+profileJump {
 		return jumpProfile{}
 	}
-	s.jumps++
-	switch {
-	case s.jumps == maxJumpProfiles+1:
-		return jumpProfile{logf: s.logf}
-	case s.jumps > maxJumpProfiles:
-		return jumpProfile{}
-	}
 	name := fmt.Sprintf("%s-heap-%dms.pb.gz", s.profilePrefix, sample.At.Sub(s.start).Milliseconds())
 	return jumpProfile{logf: s.logf, path: filepath.Join(s.profileDir, name), before: before, sample: sample}
 }
 
-// write does what the jump calls for and says so.
-func (j jumpProfile) write() {
-	switch {
-	case j.logf == nil:
-		return
-	case j.path == "":
-		j.logf("memory jumped again: %d heap profiles written, no more for this client", maxJumpProfiles)
+// profile writes the profile a jump calls for, outside the lock, says so with
+// what writing it cost, and notes the sample it was for (ProfilesBetween).
+// The write allocates in the process S7 weighs, and its garbage stays in the
+// heap in use until the next GC, so the line gives the process's allocation
+// over the write and how far the heap in use moved.
+func (s *Sampler) profile(j jumpProfile) {
+	if j.path == "" {
 		return
 	}
 	name := filepath.Join(filepath.Base(filepath.Dir(j.path)), filepath.Base(j.path))
-	if err := writeHeapProfile(j.path); err != nil {
+	var pre, post runtime.MemStats
+	runtime.ReadMemStats(&pre)
+	err := writeHeapProfile(j.path)
+	runtime.ReadMemStats(&post)
+	if err != nil {
 		j.logf("%s: %v", name, err)
 		return
 	}
-	j.logf("heap %.1f -> %.1f MiB, rss %.1f -> %.1f MiB from one sample to the next: %s",
-		mib(j.before.HeapInuse), mib(j.sample.HeapInuse), mib(j.before.RSS), mib(j.sample.RSS), name)
+	s.mu.Lock()
+	s.profiled = append(s.profiled, j.sample.At)
+	s.mu.Unlock()
+	j.logf("heap %.1f -> %.1f MiB, rss %.1f -> %.1f MiB from one sample to the next: %s "+
+		"(writing it allocated %.1f MiB, heap in use %+.1f MiB)",
+		mib(j.before.HeapInuse), mib(j.sample.HeapInuse), mib(j.before.RSS), mib(j.sample.RSS), name,
+		mib(post.TotalAlloc-pre.TotalAlloc), (float64(post.HeapInuse)-float64(pre.HeapInuse))/(1<<20))
 }
 
 // writeHeapProfile writes the process's heap profile to path.

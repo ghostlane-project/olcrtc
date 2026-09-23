@@ -302,6 +302,8 @@ func readyAfterLateBridge(ctx context.Context, env *Env, delay time.Duration) fl
 // client started, whose difference the verdict judges, and the goroutines
 // at S1's mark against those at S4's end, 60 s after the load. S5 and S6 run
 // after S4 and before S7, and what they still hold is not what S7 judges.
+// Beside them it counts the heap profiles written over the window, whose
+// garbage the peak may carry.
 func runS7(_ context.Context, env *Env) (Metrics, error) {
 	heap, rss, ok := env.Sampler.PeakBetween(markLoadStart, markQuietEnd)
 	if !ok {
@@ -324,5 +326,7 @@ func runS7(_ context.Context, env *Env) (Metrics, error) {
 		MetricHeapBaselineBytes: float64(base.HeapInuse), MetricRSSBaselineBytes: float64(base.RSS),
 		MetricHeapPeakBytes: float64(heap), MetricRSSPeakBytes: float64(rss),
 		MetricGoroutinesIdle: float64(idle.Goroutines), MetricGoroutinesAfter: float64(after.Goroutines),
+		// ai-generated: the jump profiles whose garbage the peak may carry.
+		MetricHeapProfilesInWindow: float64(env.Sampler.ProfilesBetween(markLoadStart, markQuietEnd)),
 	}, nil
 }
