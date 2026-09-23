@@ -165,7 +165,8 @@ func startFakeTunnel(t *testing.T, room *salutejazz.FakeRoom) *fakeTunnel {
 	go func() {
 		serverDone <- server.Run(ctx, server.Config{
 			Transport: "datachannel", Provider: provider, RoomURL: "room", KeyHex: tunnelKeyHex,
-			DNSServer: "127.0.0.1:53", Liveness: x.serverLive.config(),
+			// ai-generated: the policy lift, the echo target is on loopback (egress hardening).
+			DNSServer: "127.0.0.1:53", Liveness: x.serverLive.config(), UnsafeAllowPrivateTargets: true,
 			OnSessionClose: func(_, reason string) {
 				x.closedMu.Lock()
 				defer x.closedMu.Unlock()

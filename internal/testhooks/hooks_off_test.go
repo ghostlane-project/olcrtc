@@ -29,3 +29,12 @@ func TestProviderDropIgnoredWithoutTheTag(t *testing.T) {
 	t.Setenv("OLCRTC_TEST_PROVIDER_DROP_AFTER", "1ms")
 	DropProviderAfter(context.Background(), func() { t.Error("an untagged build dropped its provider") })
 }
+
+// A release build keeps its egress policy whatever the variable says.
+// ai-generated (egress hardening).
+func TestPrivateTargetsIgnoredWithoutTheTag(t *testing.T) {
+	t.Setenv("OLCRTC_TEST_ALLOW_PRIVATE_TARGETS", "1")
+	if AllowPrivateTargets() {
+		t.Fatal("an untagged build lifted the egress policy")
+	}
+}

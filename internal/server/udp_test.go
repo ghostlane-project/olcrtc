@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"net"
-	"net/netip"
 	"testing"
 	"time"
 
@@ -220,11 +219,15 @@ func TestReadSocks5UDPAssociateReply(t *testing.T) {
 	}
 }
 
-func TestValidateResolvedUDPAddrBlocksSpecialTargets(t *testing.T) {
+// The UDP relay goes through the egress policy a TCP CONNECT does: a blocked
+// literal is refused, behind an upstream proxy too, where a name is left to
+// the proxy. ai-generated: rewritten onto resolveUDPTarget (egress hardening).
+func TestResolveUDPTargetBlocksSpecialTargets(t *testing.T) {
 	s := &Server{}
 	tests := []string{
 		"127.0.0.1",
 		"10.0.0.1",
+		"100.64.0.1",
 		"169.254.1.1",
 		"224.0.0.1",
 		"255.255.255.255",
@@ -235,38 +238,51 @@ func TestValidateResolvedUDPAddrBlocksSpecialTargets(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc, func(t *testing.T) {
-			addr, err := netip.ParseAddr(tc)
-			if err != nil {
-				t.Fatalf("parse addr: %v", err)
-			}
-			if _, err := s.validateResolvedUDPAddr(addr); !errors.Is(err, errBlockedUDPTarget) {
-				t.Fatalf("validateResolvedUDPAddr(%s) error = %v, want %v", tc, err, errBlockedUDPTarget)
+			for _, viaProxy := range []bool{false, true} {
+				_, err := s.resolveUDPTarget(udpwire.Endpoint{Host: tc, Port: 53}, viaProxy)
+				if !errors.Is(err, errBlockedTarget) {
+					t.Fatalf("resolveUDPTarget(%s, proxy=%v) error = %v, want %v", tc, viaProxy, err, errBlockedTarget)
+				}
 			}
 		})
 	}
 }
 
-func TestValidateResolvedUDPAddrSelectsNetwork(t *testing.T) {
+// A name that resolves to a blocked address is refused as the literal is;
+// behind a proxy it is never resolved here. ai-generated (egress hardening).
+func TestResolveUDPTargetBlocksNamesResolvingInside(t *testing.T) {
+	stub := &stubLookup{answers: map[string][]net.IP{"inside.test": {net.IPv4(127, 0, 0, 1)}}}
+	s := &Server{resolver: stub}
+	if _, err := s.resolveUDPTarget(udpwire.Endpoint{Host: "inside.test", Port: 53}, false); !errors.Is(err, errBlockedTarget) {
+		t.Fatalf("resolveUDPTarget(inside.test) error = %v, want %v", err, errBlockedTarget)
+	}
+	target, err := s.resolveUDPTarget(udpwire.Endpoint{Host: "inside.test", Port: 53}, true)
+	if err != nil || target.endpoint.Host != "inside.test" || stub.calls() != 1 {
+		t.Fatalf("via proxy: target = %+v, err = %v, lookups = %d; want the name passed on, unresolved",
+			target, err, stub.calls())
+	}
+}
+
+func TestResolveUDPTargetSelectsNetwork(t *testing.T) {
 	s := &Server{}
+	const udp4 = "udp4"
 	tests := []struct {
 		addr        string
 		wantNetwork string
+		wantHost    string
 	}{
-		{addr: testUDPDNSGoogle, wantNetwork: "udp4"},
-		{addr: "2001:4860:4860::8888", wantNetwork: "udp6"},
+		{addr: testUDPDNSGoogle, wantNetwork: udp4, wantHost: testUDPDNSGoogle},
+		{addr: "2001:4860:4860::8888", wantNetwork: "udp6", wantHost: "2001:4860:4860::8888"},
+		{addr: "::ffff:8.8.8.8", wantNetwork: udp4, wantHost: testUDPDNSGoogle},
 	}
 	for _, tt := range tests {
 		t.Run(tt.addr, func(t *testing.T) {
-			addr, err := netip.ParseAddr(tt.addr)
+			got, err := s.resolveUDPTarget(udpwire.Endpoint{Host: tt.addr, Port: 53}, false)
 			if err != nil {
-				t.Fatalf("parse addr: %v", err)
+				t.Fatalf("resolveUDPTarget() error = %v", err)
 			}
-			got, err := s.validateResolvedUDPAddr(addr)
-			if err != nil {
-				t.Fatalf("validateResolvedUDPAddr() error = %v", err)
-			}
-			if got.network != tt.wantNetwork {
-				t.Fatalf("network = %q, want %q", got.network, tt.wantNetwork)
+			if got.network != tt.wantNetwork || got.host != tt.wantHost || got.endpoint.Port != 53 {
+				t.Fatalf("target = %+v, want %s %s:53", got, tt.wantNetwork, tt.wantHost)
 			}
 		})
 	}

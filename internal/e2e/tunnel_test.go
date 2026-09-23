@@ -1054,7 +1054,8 @@ type tunnelRuntime struct {
 
 func startTunnel(t *testing.T) *tunnelRuntime {
 	t.Helper()
-	return startMemoryTunnel(t, transportData, false)
+	// ai-generated: true, the echo servers are on loopback (egress hardening).
+	return startMemoryTunnel(t, transportData, true)
 }
 
 func startRealTunnel(
@@ -1082,6 +1083,8 @@ func startRealTunnel(
 			DNSServer:        *realE2EDNSServer,
 			TransportOptions: e2eTransportOptions(transportName),
 			Liveness:         control.Config{Interval: 10 * time.Second, Timeout: 60 * time.Second, Failures: 10},
+			// ai-generated: the echo server is on loopback (egress hardening).
+			UnsafeAllowPrivateTargets: true,
 		})
 	}()
 
@@ -1554,6 +1557,8 @@ func failoverSessionConfig(mode, providerName, socksHost string, socksPort int) 
 		RoomID:    testRoom,
 		KeyHex:    testKeyHex,
 		DNSServer: localDNSServer,
+		// ai-generated: the echo server is on loopback (egress hardening).
+		UnsafeAllowPrivateTargets: true,
 	}
 	if mode == "cnc" {
 		cfg.SOCKSHost = socksHost

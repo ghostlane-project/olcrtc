@@ -18,3 +18,8 @@ func BeforeBridgeOpen() {}
 // DropProviderAfter does nothing in a build without the hooks. ai-generated
 // (olcrtc#19).
 func DropProviderAfter(context.Context, func()) {}
+
+// AllowPrivateTargets is false in a build without the hooks, whatever the
+// environment says: a release server always keeps its egress policy.
+// ai-generated (egress hardening).
+func AllowPrivateTargets() bool { return false }

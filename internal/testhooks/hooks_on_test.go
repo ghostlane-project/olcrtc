@@ -71,3 +71,14 @@ func TestNoDropUnlessPositive(t *testing.T) {
 		})
 	}
 }
+
+// The tagged build lifts the egress policy for exactly "1", the value the
+// gate's local target sets. ai-generated (egress hardening).
+func TestAllowPrivateTargetsOnlyForOne(t *testing.T) {
+	for v, want := range map[string]bool{"1": true, "": false, "0": false, "true": false} {
+		t.Setenv("OLCRTC_TEST_ALLOW_PRIVATE_TARGETS", v)
+		if got := AllowPrivateTargets(); got != want {
+			t.Errorf("AllowPrivateTargets() with %q = %v, want %v", v, got, want)
+		}
+	}
+}

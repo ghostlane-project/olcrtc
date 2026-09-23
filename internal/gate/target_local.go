@@ -85,6 +85,10 @@ const (
 	serverLogName = "srv.log"
 	// bridgeDelayEnv is what internal/testhooks reads in the child.
 	bridgeDelayEnv = "OLCRTC_TEST_BRIDGE_DELAY"
+	// privateTargetsEnv lifts the child's egress policy, which refuses the
+	// loopback origin the local target pulls from. ai-generated (egress
+	// hardening).
+	privateTargetsEnv = "OLCRTC_TEST_ALLOW_PRIVATE_TARGETS"
 )
 
 // localProviders is every provider the local target carries, in the order a
@@ -433,7 +437,7 @@ func startServer(ctx context.Context, binary, work, cfg string, opt OpenOptions)
 	runCtx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(runCtx, binary, cfgPath)
 	cmd.Stdout, cmd.Stderr = logFile, logFile
-	cmd.Env = append(os.Environ(), bridgeDelayEnv+"="+opt.BridgeDelay.String())
+	cmd.Env = append(os.Environ(), bridgeDelayEnv+"="+opt.BridgeDelay.String(), privateTargetsEnv+"=1")
 	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
 	cmd.WaitDelay = stopGrace
 	err = cmd.Start()

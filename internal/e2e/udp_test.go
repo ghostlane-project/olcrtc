@@ -35,9 +35,10 @@ func startUDPEchoServer(t *testing.T) string {
 }
 
 // startMemoryTunnel brings up a server and a client over the memory provider
-// on transportName. unsafeAllowPrivateUDP lets the server's UDP relay reach
-// the loopback echo server.
-func startMemoryTunnel(t *testing.T, transportName string, unsafeAllowPrivateUDP bool) *tunnelRuntime {
+// on transportName. allowPrivate lifts the server's egress policy, so a
+// CONNECT or a UDP flow reaches the loopback echo servers. ai-generated: the
+// switch covers TCP too (egress hardening).
+func startMemoryTunnel(t *testing.T, transportName string, allowPrivate bool) *tunnelRuntime {
 	t.Helper()
 
 	providerName, room := registerMemoryProvider(t)
@@ -48,13 +49,13 @@ func startMemoryTunnel(t *testing.T, transportName string, unsafeAllowPrivateUDP
 	serverErr := make(chan error, 1)
 	go func() {
 		serverErr <- server.Run(ctx, server.Config{
-			Transport:                    transportName,
-			Provider:                     providerName,
-			RoomURL:                      testRoom,
-			KeyHex:                       testKeyHex,
-			DNSServer:                    localDNSServer,
-			TransportOptions:             e2eTransportOptions(transportName),
-			UnsafeAllowPrivateUDPTargets: unsafeAllowPrivateUDP,
+			Transport:                 transportName,
+			Provider:                  providerName,
+			RoomURL:                   testRoom,
+			KeyHex:                    testKeyHex,
+			DNSServer:                 localDNSServer,
+			TransportOptions:          e2eTransportOptions(transportName),
+			UnsafeAllowPrivateTargets: allowPrivate,
 		})
 	}()
 	room.waitConnected(t, 1)

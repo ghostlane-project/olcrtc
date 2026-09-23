@@ -338,7 +338,8 @@ func TestLocalTargetRunsTheServerAndLeavesOnlyAScrubbedLog(t *testing.T) {
 		Providers: []string{"wbstream"}, Transports: []string{"vp8channel"},
 		WBStreamRooms: []string{"https://stream.wb.ru/room/fake-wb-room-1"}, WBStreamToken: "fake-wb-token-0001",
 	}, `trap 'echo "leaving fake-wb-room-1"; exit 0' TERM
-echo "bridge delay $OLCRTC_TEST_BRIDGE_DELAY"; echo "joining fake-wb-room-1"; echo "Link connected"
+echo "bridge delay $OLCRTC_TEST_BRIDGE_DELAY"; echo "private targets $OLCRTC_TEST_ALLOW_PRIVATE_TARGETS"
+echo "joining fake-wb-room-1"; echo "Link connected"
 i=0; while [ "$i" -lt 600 ]; do sleep 0.05; i=$((i+1)); done`)
 	ep, stop, err := lt.Open(context.Background(), Pair{"wbstream", "vp8channel"}, dir, OpenOptions{BridgeDelay: 1500 * time.Millisecond})
 	if err != nil {
@@ -368,7 +369,10 @@ i=0; while [ "$i" -lt 600 ]; do sleep 0.05; i=$((i+1)); done`)
 			t.Fatalf("scrubbed log keeps %q:\n%s", secret, log)
 		}
 	}
-	for _, kept := range []string{"Link connected", "bridge delay 1.5s", "joining <room>", "<key>", "leaving <room>"} {
+	// ai-generated: "private targets 1", the loopback origin's hook (egress hardening).
+	for _, kept := range []string{
+		"Link connected", "bridge delay 1.5s", "private targets 1", "joining <room>", "<key>", "leaving <room>",
+	} {
 		if !strings.Contains(log, kept) {
 			t.Fatalf("scrubbed log lost %q:\n%s", kept, log)
 		}

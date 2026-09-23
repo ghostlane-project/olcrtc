@@ -168,7 +168,8 @@ func startRoomServer(ctx context.Context, t *testing.T, name string, room *memRo
 		defer close(done)
 		err := server.Run(ctx, server.Config{
 			Transport: name, Provider: "memory", RoomURL: "room", KeyHex: roomKeyHex,
-			DNSServer: "127.0.0.1:53", Liveness: liveness,
+			// ai-generated: the policy lift, the echo target is on loopback (egress hardening).
+			DNSServer: "127.0.0.1:53", Liveness: liveness, UnsafeAllowPrivateTargets: true,
 			OnSessionClose: func(id, reason string) { closed <- id + " " + reason },
 		})
 		if err != nil && ctx.Err() == nil {

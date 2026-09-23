@@ -25,6 +25,10 @@ const bridgeDelayEnv = "OLCRTC_TEST_BRIDGE_DELAY"
 // (olcrtc#19).
 const providerDropEnv = "OLCRTC_TEST_PROVIDER_DROP_AFTER"
 
+// privateTargetsEnv names the variable AllowPrivateTargets reads.
+// ai-generated (egress hardening).
+const privateTargetsEnv = "OLCRTC_TEST_ALLOW_PRIVATE_TARGETS"
+
 // BeforeBridgeOpen sleeps for OLCRTC_TEST_BRIDGE_DELAY (a Go duration) before
 // a Jitsi session opens its bridge. The gate's S6 uses it to make a server
 // come up after the client, the ordering that lost the hello in olcbox#22.
@@ -79,4 +83,18 @@ func DropProviderAfter(ctx context.Context, drop func()) {
 	}
 	logger.Infof("testhooks: dropping the provider")
 	drop()
+}
+
+// AllowPrivateTargets reports whether OLCRTC_TEST_ALLOW_PRIVATE_TARGETS is
+// "1". The gate's local target sets it: its server must reach the gate's
+// origin on loopback, a target the egress policy refuses. Anything else,
+// unset included, keeps the policy.
+//
+// ai-generated: the whole function (egress hardening).
+func AllowPrivateTargets() bool {
+	if os.Getenv(privateTargetsEnv) != "1" {
+		return false
+	}
+	logger.Infof("testhooks: the egress policy is off, private targets allowed")
+	return true
 }

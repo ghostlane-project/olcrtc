@@ -341,7 +341,8 @@ func TestDialWithoutProxy(t *testing.T) {
 	if !ok {
 		t.Fatalf("listener addr type = %T, want *net.TCPAddr", ln.Addr())
 	}
-	s := &Server{resolver: net.DefaultResolver}
+	// ai-generated: the loopback listener needs the egress policy lifted (egress hardening).
+	s := &Server{resolver: net.DefaultResolver, unsafeAllowPrivateTargets: true}
 	conn, err := s.dial(context.Background(), ConnectRequest{Addr: testConnectAddr, Port: tcpAddr.Port})
 	if err != nil {
 		t.Fatalf("dial() error = %v", err)
@@ -665,6 +666,8 @@ func TestDispatchFiresOnTraffic(t *testing.T) {
 	s := &Server{
 		sessionID: "traffic-sid",
 		resolver:  net.DefaultResolver,
+		// ai-generated: the loopback listener needs the egress policy lifted (egress hardening).
+		unsafeAllowPrivateTargets: true,
 		onTraffic: func(sid, addr string, in, out uint64) {
 			rec.sid = sid
 			rec.addr = addr
@@ -1044,7 +1047,10 @@ func TestDispatchAcksDialFailure(t *testing.T) {
 	go func() {
 		stream, err := serverSess.AcceptStream()
 		if err == nil {
-			(&Server{resolver: net.DefaultResolver}).handleStream(context.Background(), stream, "sid")
+			// ai-generated: the policy is lifted so port 1 is a real refused
+			// dial, not a blocked target (egress hardening).
+			s := &Server{resolver: net.DefaultResolver, unsafeAllowPrivateTargets: true}
+			s.handleStream(context.Background(), stream, "sid")
 		}
 	}()
 

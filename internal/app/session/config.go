@@ -176,6 +176,12 @@ type Config struct {
 	// through the tunnel, one rule per line (see internal/route); empty
 	// tunnels everything.
 	DirectRules string
+	// UnsafeAllowPrivateTargets lifts a server's egress policy, so a CONNECT
+	// or a UDP flow may reach loopback and private targets. Not read from
+	// YAML: a test sets it for its loopback echo server.
+	//
+	// ai-generated: the field (egress hardening).
+	UnsafeAllowPrivateTargets bool
 }
 
 // RegisterDefaults registers built-in providers and transports.

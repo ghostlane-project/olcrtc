@@ -34,13 +34,12 @@ const (
 	udpRelayBufferSize = 64 * 1024
 	udpFlowIdleTimeout = 2 * time.Minute
 	defaultMaxUDPFlows = 1024
+	udpLookupTimeout   = 5 * time.Second
 )
 
 var (
-	errBlockedUDPTarget = errors.New("blocked udp target")
-	errNoUDPRecords     = errors.New("resolve udp target: no A records")
-	errTooManyUDPFlows  = errors.New("too many udp flows")
-	errSocksUDPReply    = errors.New("bad socks5 udp associate reply")
+	errTooManyUDPFlows = errors.New("too many udp flows")
+	errSocksUDPReply   = errors.New("bad socks5 udp associate reply")
 )
 
 type udpDialTarget struct {
@@ -513,55 +512,25 @@ func (s *Server) pinnedDatagramEntry(peerID string) *crypto.RingEntry {
 	return group.Pinned()
 }
 
+// resolveUDPTarget turns a flow's endpoint into what dialUDPFlow dials,
+// through the egress policy a TCP CONNECT goes through (targetAddrs). Behind
+// an upstream proxy a name goes out as it is, for the proxy to resolve.
+//
+// ai-generated: rewritten onto targetAddrs (egress hardening).
 func (s *Server) resolveUDPTarget(endpoint udpwire.Endpoint, viaProxy bool) (udpDialTarget, error) {
 	if endpoint.Port == 0 || endpoint.Host == "" {
 		return udpDialTarget{}, udpwire.ErrInvalidEndpoint
 	}
-	if addr, err := netip.ParseAddr(endpoint.Host); err == nil {
-		target, err := s.validateResolvedUDPAddr(addr)
-		target.endpoint.Port = endpoint.Port
-		return target, err
-	}
-	if viaProxy {
+	if viaProxy && !isLiteral(endpoint.Host) {
 		return udpDialTarget{endpoint: endpoint}, nil
 	}
-	addrs, err := s.lookupUDPTarget(endpoint.Host)
+	ctx, cancel := context.WithTimeout(s.udpBaseCtx(), udpLookupTimeout)
+	defer cancel()
+	addrs, err := s.targetAddrs(ctx, "ip", endpoint.Host)
 	if err != nil {
 		return udpDialTarget{}, err
 	}
-	for _, addr := range addrs {
-		if _, err := s.validateResolvedUDPAddr(addr); err != nil {
-			return udpDialTarget{}, err
-		}
-	}
-	return udpTargetFromAddr(addrs[0].Unmap(), endpoint.Port), nil
-}
-
-func (s *Server) lookupUDPTarget(host string) ([]netip.Addr, error) {
-	ctx, cancel := context.WithTimeout(s.udpBaseCtx(), 5*time.Second)
-	defer cancel()
-	ips, err := s.resolver.LookupIP(ctx, "ip", host)
-	if err != nil {
-		return nil, fmt.Errorf("resolve udp target: %w", err)
-	}
-	addrs := make([]netip.Addr, 0, len(ips))
-	for _, ip := range ips {
-		if addr, ok := netip.AddrFromSlice(ip); ok {
-			addrs = append(addrs, addr)
-		}
-	}
-	if len(addrs) == 0 {
-		return nil, errNoUDPRecords
-	}
-	return addrs, nil
-}
-
-func (s *Server) validateResolvedUDPAddr(addr netip.Addr) (udpDialTarget, error) {
-	addr = addr.Unmap()
-	if !s.unsafeAllowPrivateUDPTargets && blockedUDPAddr(addr) {
-		return udpDialTarget{}, errBlockedUDPTarget
-	}
-	return udpTargetFromAddr(addr, 0), nil
+	return udpTargetFromAddr(addrs[0], endpoint.Port), nil
 }
 
 func udpTargetFromAddr(addr netip.Addr, port uint16) udpDialTarget {
@@ -570,10 +539,6 @@ func udpTargetFromAddr(addr netip.Addr, port uint16) udpDialTarget {
 		return udpDialTarget{network: "udp4", host: addr.String(), endpoint: endpoint}
 	}
 	return udpDialTarget{network: "udp6", host: addr.String(), endpoint: endpoint}
-}
-
-func blockedUDPAddr(addr netip.Addr) bool {
-	return !addr.IsGlobalUnicast() || addr.IsPrivate()
 }
 
 func encodeSocks5UDPPacket(endpoint udpwire.Endpoint, payload []byte) ([]byte, error) {

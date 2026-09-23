@@ -91,7 +91,7 @@ func TestMultiKeyUDPDatagramMetersByPinnedKeyFullStack(t *testing.T) {
 	echoAddr := startUDPEchoServer(t)
 	tunnel := startRingTunnel(t, ringTunnelSpec{
 		ring: []string{testKeyHex, altKeyHex}, clientKey: altKeyHex, transport: transportVP8,
-		withStats: true, allowPrivateUDP: true, readyBudget: 30 * time.Second,
+		withStats: true, readyBudget: 30 * time.Second,
 	})
 	if !tunnel.ready {
 		t.Fatal("client holding the second ring key never became ready over vp8channel")

@@ -27,15 +27,15 @@ type ringTunnel struct {
 
 // ringTunnelSpec describes a ring tunnel to bring up: the server's ring and
 // the client's key, the transport (datachannel when empty), whether the
-// server serves /stats, whether its UDP relay may reach private targets, and
-// how long the client gets to become ready.
+// server serves /stats, and how long the client gets to become ready. The
+// server's egress policy is lifted, since every target here is a loopback
+// echo server. ai-generated: that last sentence (egress hardening).
 type ringTunnelSpec struct {
-	ring            []string
-	clientKey       string
-	transport       string
-	withStats       bool
-	allowPrivateUDP bool
-	readyBudget     time.Duration
+	ring        []string
+	clientKey   string
+	transport   string
+	withStats   bool
+	readyBudget time.Duration
 }
 
 // startRingTunnel runs a server holding the ring and a client holding the
@@ -58,7 +58,7 @@ func startRingTunnel(t *testing.T, spec ringTunnelSpec) ringTunnel {
 		_ = server.Run(ctx, server.Config{
 			Transport: transportName, TransportOptions: e2eTransportOptions(transportName),
 			Provider: providerName, RoomURL: testRoom, Keys: spec.ring, StatsListen: statsAddr,
-			UnsafeAllowPrivateUDPTargets: spec.allowPrivateUDP, DNSServer: localDNSServer,
+			UnsafeAllowPrivateTargets: true, DNSServer: localDNSServer,
 		})
 	}()
 	room.waitConnected(t, 1)
