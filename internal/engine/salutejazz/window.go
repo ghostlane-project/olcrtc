@@ -205,6 +205,12 @@ func (g *generation) relayEpoch(key string) uint64 {
 // moved on belongs to a session that has ended since - retired, reset, left
 // - and the frame held for it is refused rather than sent into whatever
 // comes after under the same identity.
+//
+// Teardown ends the generation before it drops the windows, so a teardown
+// that lands while the sender looks can show up as an epoch gone or as a
+// window that lets the send go. Either answer is checked against the
+// generation first: the session closing is ErrSessionClosed, whatever the
+// window said.
 func (s *Session) awaitRelayWindow(gen *generation, key string, epoch uint64) error {
 	if key == "" {
 		return nil
@@ -216,14 +222,14 @@ func (s *Session) awaitRelayWindow(gen *generation, key string, epoch uint64) er
 		}
 		wake := gen.win.Wake(key)
 		if gen.win.Epoch(key) != epoch {
-			return ErrDestinationEnded
+			return s.closedOr(gen, ErrDestinationEnded)
 		}
 		ok, probe, counter := gen.win.Room(key, time.Now())
 		if probe {
 			s.markRelay(gen, key, counter)
 		}
 		if ok {
-			return nil
+			return s.closedOr(gen, nil)
 		}
 		timer := time.NewTimer(retry)
 		select {
@@ -234,6 +240,15 @@ func (s *Session) awaitRelayWindow(gen *generation, key string, epoch uint64) er
 		}
 		timer.Stop()
 	}
+}
+
+// closedOr is ErrSessionClosed once the generation or the session has ended,
+// and err otherwise.
+func (s *Session) closedOr(gen *generation, err error) error {
+	if gen.isDone() || s.closed.Load() {
+		return ErrSessionClosed
+	}
+	return err
 }
 
 // countRelayed counts n bytes handed to the relay for key and, when a mark is

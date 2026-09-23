@@ -314,6 +314,38 @@ func TestGenerationTeardownReleasesWithErrSessionClosed(t *testing.T) {
 	}
 }
 
+// TestATeardownMidLookIsSessionClosed is the same way out, landing while the
+// held sender is looking at its window rather than parked on it: teardown
+// ends the generation and then drops its windows, so a sender that looked
+// at the generation just before may find its epoch gone. That is still the
+// session closing, not its destination's session ending, and says so. The
+// sender here looks again every nanosecond, and each trial lands the
+// teardown somewhere in its loop.
+func TestATeardownMidLookIsSessionClosed(t *testing.T) {
+	const trials = 500
+	for trial := range trials {
+		s := &Session{closeCh: make(chan struct{})}
+		gen := newGeneration(nil)
+		gen.win = relaywin.New(relaywin.Timing{Window: 1, Retry: time.Nanosecond})
+		gen.win.Arm("peer")
+		gen.win.Sent("peer", 1, time.Now())
+		epoch := gen.win.Epoch("peer")
+
+		held := make(chan error, 1)
+		go func() { held <- s.awaitRelayWindow(gen, "peer", epoch) }()
+		time.Sleep(time.Duration(trial%10) * time.Microsecond)
+		s.teardown(gen)
+		select {
+		case err := <-held:
+			if !errors.Is(err, ErrSessionClosed) {
+				t.Fatalf("trial %d: the held send = %v, want %v", trial, err, ErrSessionClosed)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("trial %d: the held send outlived its generation", trial)
+		}
+	}
+}
+
 // TestWindowFramesNeverReachOnData covers the receive side of the topic:
 // marks and echoes are the window's, and nothing under the topic reaches the
 // tunnel - not a frame it answers, not one it cannot read, not one from a
