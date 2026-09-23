@@ -83,6 +83,15 @@ const (
 	udpFlowIdleTimeout           = 2 * time.Minute
 	udpFlowSweepInterval         = 30 * time.Second
 	defaultMaxUDPFlows           = 1024
+	// defaultDatagramReadyTimeout bounds how long one datagram waits for the
+	// lane to take it. A lane that is there can say no for a moment - over
+	// its mark, or still negotiating behind the reliable one - and the wait
+	// rides that out; a datagram held longer is stale for the calls and
+	// games the lane is for, and the lane is lossy by contract, so it is
+	// dropped. ai-generated: the constant (olcrtc#49).
+	defaultDatagramReadyTimeout = time.Second
+	// datagramPollDelay is how often a waiting datagram asks the lane again.
+	datagramPollDelay = 2 * time.Millisecond
 )
 
 // udpAssociationReadBufferSize picks the association's read buffer for the
@@ -147,10 +156,20 @@ func (c *Client) handleUDPAssociate(ctx context.Context, tcpConn net.Conn, req s
 	}
 	logger.Infof("SOCKS5 UDP associate listening on %s", addr.String())
 
-	done := make(chan struct{})
+	// The association's own context ends when its control connection
+	// closes. Everything a datagram of it starts runs under it - a wait for
+	// the lane, a DNS query, a direct flow - since an answer has nowhere to
+	// go once the socket is closed. The wait for the lane is the one that
+	// matters: the read loop sits in it, and on the run's context an
+	// association whose lane never opened kept its SOCKS slot until the run
+	// ended. The sweeper above is the client's and keeps the run's context.
+	//
+	// ai-generated: assocCtx in place of the done channel (olcrtc#49).
+	assocCtx, endAssoc := context.WithCancel(ctx)
+	defer endAssoc()
 	go func() {
 		_, _ = io.Copy(io.Discard, tcpConn)
-		close(done)
+		endAssoc()
 		_ = udpConn.Close()
 	}()
 
@@ -158,13 +177,8 @@ func (c *Client) handleUDPAssociate(ctx context.Context, tcpConn net.Conn, req s
 	for {
 		n, src, err := udpConn.ReadFromUDP(buf)
 		if err != nil {
-			select {
-			case <-ctx.Done():
-			case <-done:
-			default:
-				if !errors.Is(err, net.ErrClosed) {
-					logger.Debugf("socks udp read failed: %v", err)
-				}
+			if assocCtx.Err() == nil && !errors.Is(err, net.ErrClosed) {
+				logger.Debugf("socks udp read failed: %v", err)
 			}
 			return
 		}
@@ -172,7 +186,7 @@ func (c *Client) handleUDPAssociate(ctx context.Context, tcpConn net.Conn, req s
 			logger.Debugf("drop socks udp packet from unbound source: %s", src.String())
 			continue
 		}
-		c.forwardLocalUDP(ctx, dg, udpConn, src, buf[:n])
+		c.forwardLocalUDP(assocCtx, dg, udpConn, src, buf[:n])
 	}
 }
 
@@ -185,8 +199,12 @@ func (c *Client) prepareUDPAssociate(
 	if c.udpDisabled {
 		return nil, udpAssociationSource{}, false
 	}
+	// The methods are not the lane: the datachannel has them whatever its
+	// engine, and over one without a lane (Jitsi) DatagramCanSend never
+	// turns true, so an association accepted there never carries a
+	// datagram. ai-generated: the Features check (olcrtc#49).
 	dg, ok := c.ln.(transport.DatagramTransport)
-	if !ok {
+	if !ok || !dg.Features().Datagram {
 		return nil, udpAssociationSource{}, false
 	}
 	// With rules on, an association may carry direct flows and direct DNS
@@ -299,7 +317,8 @@ func (c *Client) forwardLocalUDP(
 		logger.Debugf("drop udp packet encrypt failed: %v", err)
 		return
 	}
-	if !waitDatagramReady(ctx, dg) {
+	if !waitDatagramReady(ctx, dg, c.datagramWait()) {
+		logger.Debugf("drop udp packet: the datagram lane did not take it")
 		return
 	}
 	if err := dg.SendDatagram(enc); err != nil {
@@ -515,16 +534,37 @@ func normalizeMaxUDPFlows(maxFlows int) int {
 	return maxFlows
 }
 
-func waitDatagramReady(ctx context.Context, dg transport.DatagramTransport) bool {
-	const pollDelay = 2 * time.Millisecond
+// datagramWait is how long a datagram waits for the lane.
+//
+// ai-generated: the method (olcrtc#49).
+func (c *Client) datagramWait() time.Duration {
+	if c.datagramReadyTimeout > 0 {
+		return c.datagramReadyTimeout
+	}
+	return defaultDatagramReadyTimeout
+}
+
+// waitDatagramReady holds a datagram until the lane can take it: for at most
+// wait, and no longer than ctx, its association, lasts. It reports false
+// when the datagram is to be dropped.
+//
+// ai-generated: the bound, wait and ctx being the association's (olcrtc#49).
+func waitDatagramReady(ctx context.Context, dg transport.DatagramTransport, wait time.Duration) bool {
+	if dg.DatagramCanSend() {
+		return true
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, wait)
+	defer cancel()
+	poll := time.NewTicker(datagramPollDelay)
+	defer poll.Stop()
 	for {
-		if dg.DatagramCanSend() {
-			return true
-		}
 		select {
-		case <-ctx.Done():
+		case <-waitCtx.Done():
 			return false
-		case <-time.After(pollDelay):
+		case <-poll.C:
+			if dg.DatagramCanSend() {
+				return true
+			}
 		}
 	}
 }
