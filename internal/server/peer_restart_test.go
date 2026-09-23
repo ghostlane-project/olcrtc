@@ -18,6 +18,7 @@ import (
 	"github.com/openlibrecommunity/olcrtc/internal/handshake"
 	"github.com/openlibrecommunity/olcrtc/internal/muxconn"
 	"github.com/openlibrecommunity/olcrtc/internal/runtime"
+	"github.com/openlibrecommunity/olcrtc/internal/transport"
 	"github.com/openlibrecommunity/olcrtc/internal/tunnelcore"
 )
 
@@ -33,9 +34,12 @@ var peerTestLiveness = control.Config{Interval: time.Hour}
 // to a peer go to toPeer.
 type relayLinkStub struct {
 	peerRoutingStub
-	mu     sync.Mutex
-	toPeer func(peerID string, data []byte)
+	features transport.Features
+	mu       sync.Mutex
+	toPeer   func(peerID string, data []byte)
 }
+
+func (l *relayLinkStub) Features() transport.Features { return l.features }
 
 func (l *relayLinkStub) SendTo(peerID string, data []byte) error {
 	l.mu.Lock()
@@ -62,8 +66,7 @@ func newRelayServer(t *testing.T, link *relayLinkStub) *Server {
 	}
 	t.Cleanup(func() {
 		cancel()
-		s.closeSession()
-		s.doneOnce.Do(func() { close(s.done) })
+		s.shutdown()
 		s.wg.Wait()
 	})
 	return s
@@ -80,8 +83,11 @@ type relayClient struct {
 // the peer's.
 type clientLinkStub struct {
 	serverLinkStub
-	send func([]byte)
+	features transport.Features
+	send     func([]byte)
 }
+
+func (l *clientLinkStub) Features() transport.Features { return l.features }
 
 func (l *clientLinkStub) Send(data []byte) error {
 	l.send(append([]byte(nil), data...))
@@ -94,7 +100,7 @@ func newRelayClient(t *testing.T, s *Server, peerID string) *relayClient {
 	if err != nil {
 		t.Fatal(err)
 	}
-	link := &clientLinkStub{send: func(data []byte) { s.onPeerData(peerID, data) }}
+	link := &clientLinkStub{features: s.ln.Features(), send: func(data []byte) { s.onPeerData(peerID, data) }}
 	conn := muxconn.New(link, keys)
 	session, err := tunnelcore.NewSession(conn, tunnelcore.ClientRole, runtime.SmuxConfigFor(link))
 	if err != nil {
@@ -299,4 +305,76 @@ func smuxFrameV(version, cmd byte, sid uint32, data []byte) []byte {
 	binary.LittleEndian.PutUint16(frame[2:4], uint16(len(data))) //nolint:gosec // test frames are small
 	binary.LittleEndian.PutUint32(frame[4:8], sid)
 	return append(frame, data...)
+}
+
+// datachannelFeatures are the link features datachannel asks for: records of
+// 12 KiB, and small frames batched for 5 ms.
+var datachannelFeatures = transport.Features{MaxPayloadSize: 12 * 1024, WriteInterval: 5 * time.Millisecond}
+
+// A client opens streams at once - a tunnel per SOCKS connection, each on its
+// own goroutine, and every request parked on a session that has just come up -
+// and smux writes their SYNs in no set order. A SYN below one the server has
+// seen is still that session's: the peer has not started its session over, and
+// the session it is on stays.
+func TestStreamsOpenedAtOnceStayOnThePeersSession(t *testing.T) {
+	link := &relayLinkStub{features: datachannelFeatures}
+	s := newRelayServer(t, link)
+	var restarted atomic.Int64
+	s.onClose = func(_, reason string) {
+		if reason == "restarted" {
+			restarted.Add(1)
+		}
+	}
+	client := newRelayClient(t, s, "peer")
+	link.mu.Lock()
+	link.toPeer = func(_ string, data []byte) { client.conn.Push(data) }
+	link.mu.Unlock()
+	client.handshake(t)
+	peer := lookupPeer(s, "peer")
+	if peer == nil {
+		t.Fatal("the server built no session for the peer")
+	}
+	waitPeerControl(t, peer)
+
+	// Uploads keep the client's send path busy while the streams open.
+	chunk := bytes.Repeat([]byte{0x5a}, 32*1024)
+	for range 3 {
+		go func() {
+			stream, err := client.session.OpenStream()
+			if err != nil {
+				return
+			}
+			for {
+				if _, err := stream.Write(chunk); err != nil {
+					return
+				}
+			}
+		}()
+	}
+	const bursts, opens = 4, 32
+	for range bursts {
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for range opens {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				_, _ = client.session.OpenStream()
+			}()
+		}
+		close(start)
+		wg.Wait()
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for lookupPeer(s, "peer") == peer && peer.dataSession().NumStreams() < bursts*opens {
+		if time.Now().After(deadline) {
+			t.Fatalf("the server holds %d of the %d streams opened", peer.dataSession().NumStreams(), bursts*opens)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if lookupPeer(s, "peer") != peer || restarted.Load() != 0 {
+		t.Fatal("streams opened at once were taken for the peer starting its session over")
+	}
 }

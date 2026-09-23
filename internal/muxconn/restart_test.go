@@ -12,10 +12,10 @@ import (
 // A client that gives a handshake up and tries again runs the retry over a
 // new smux session, under the relay identity the server keys its peer
 // sessions on, so the new session's frames reach the conn of the old one.
-// smux numbers a session's streams upwards from the first: a record that
-// opens a stream at or below one the conn has seen opened is the new
-// session's, and it is handed back rather than read into the old one, where
-// the retry's hello landed on the old session's control stream.
+// The new session opens its first stream again, for the retried hello: that
+// record is the new session's, and it is handed back rather than read into
+// the old one, where the retry's hello landed on the old session's control
+// stream.
 func TestARecordOfTheSessionAfterIsHandedBack(t *testing.T) {
 	clientKeys, serverKeys := newTestKeyPair(t)
 	seal := func(record []byte) []byte {
@@ -68,5 +68,39 @@ func TestARecordOfTheSessionAfterIsHandedBack(t *testing.T) {
 	}
 	if again := next.PushSession(seal(smuxFrame(smuxCmdSYN, 3, nil))); again == nil {
 		t.Fatal("the stream the handed-back record opened did not count as opened on the new conn")
+	}
+}
+
+// smux hands a stream its id under a lock it lets go before the SYN is
+// written, and its shaper then writes round robin across streams, so the SYNs
+// of streams a client opens at once reach the wire in any order: every SOCKS
+// connection opens its tunnel on its own goroutine, and the requests parked
+// on a session that comes up all open together. A SYN below one the conn has
+// seen is still the session's own. Only the session's first stream, which a
+// client opens alone for its hello before any other can exist, opened again
+// is the session after it.
+func TestStreamsOpenedOutOfOrderStayInTheirSession(t *testing.T) {
+	clientKeys, serverKeys := newTestKeyPair(t)
+	seal := func(record []byte) []byte {
+		t.Helper()
+		sealed, err := clientKeys.Seal(record, []byte(dataRecordAAD))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sealed
+	}
+	carried := NewPeer(&stubLink{canSend: true}, serverKeys, "peer")
+	for _, record := range [][]byte{
+		append(smuxFrame(smuxCmdSYN, 3, nil), smuxFrame(smuxCmdPSH, 3, []byte("hello"))...),
+		smuxFrame(smuxCmdSYN, 7, nil),
+		smuxFrame(smuxCmdSYN, 5, nil),
+		append(smuxFrame(smuxCmdSYN, 11, nil), smuxFrame(smuxCmdSYN, 9, nil)...),
+	} {
+		if back := carried.PushSession(seal(record)); back != nil {
+			t.Fatalf("a stream the session opened out of order was handed back: % x", back)
+		}
+	}
+	if back := carried.PushSession(seal(smuxFrame(smuxCmdSYN, 3, nil))); back == nil {
+		t.Fatal("the session's first stream opened again was not handed back")
 	}
 }
