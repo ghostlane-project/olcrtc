@@ -129,7 +129,28 @@ type handshakeResult struct {
 	deviceID  string
 }
 
+// acceptHandshake answers the hello on the server's own session, and
+// reinstalls that session when the handshake fails.
 func (s *Server) acceptHandshake(
+	ctx context.Context,
+	session *smux.Session,
+) (*smux.Stream, handshakeResult, bool) {
+	stream, result, ok := s.answerHello(ctx, session)
+	if !ok && ctx.Err() == nil {
+		tunnelcore.ResetPeer(s.ln)
+		s.reinstallSession(ctx, session)
+	}
+	return stream, result, ok
+}
+
+// answerHello answers the hello on the first stream of session that carries
+// one, skipping up to maxStaleRetries streams a torn-down session left
+// behind. A failure is left to the caller: the server's own session is
+// reinstalled (acceptHandshake), a peer's is that peer's to end alone.
+//
+// ai-generated: split out of acceptHandshake, which reinstalled peer routing -
+// every peer's session - for one peer's failed handshake (olcrtc#49).
+func (s *Server) answerHello(
 	ctx context.Context,
 	session *smux.Session,
 ) (*smux.Stream, handshakeResult, bool) {
@@ -137,12 +158,9 @@ func (s *Server) acceptHandshake(
 	for retry := 0; retry <= maxStaleRetries; retry++ {
 		stream, err := session.AcceptStream()
 		if err != nil {
-			if ctx.Err() != nil {
-				return nil, handshakeResult{}, false
+			if ctx.Err() == nil {
+				logger.Infof("server: AcceptStream(control) error: %v", err)
 			}
-			logger.Infof("server: AcceptStream(control) error - reinstalling session: %v", err)
-			tunnelcore.ResetPeer(s.ln)
-			s.reinstallSession(ctx, session)
 			return nil, handshakeResult{}, false
 		}
 		_ = stream.SetDeadline(time.Now().Add(handshake.DefaultTimeout))
@@ -155,8 +173,6 @@ func (s *Server) acceptHandshake(
 				continue
 			}
 			logger.Warnf("handshake failed: %v", err)
-			tunnelcore.ResetPeer(s.ln)
-			s.reinstallSession(ctx, session)
 			return nil, handshakeResult{}, false
 		}
 		s.health.RecordSession(sessionID)
