@@ -97,14 +97,21 @@ func runServer(
 		OnSessionClose: func(sessionID, reason string) {
 			logger.Infof("session closed: id=%s reason=%s", sessionID, reason)
 		},
-		OnTraffic: func(sessionID, addr string, bytesIn, bytesOut uint64) {
-			logger.Infof("traffic: session=%s addr=%s in=%d out=%d", sessionID, addr, bytesIn, bytesOut)
-		},
+		OnTraffic: logTraffic,
 	})
 	if err != nil {
 		return fmt.Errorf("server: %w", err)
 	}
 	return nil
+}
+
+// logTraffic writes a stream's byte counts, and not its destination: an
+// exit's log is no record of where its users go. The server's own debug
+// lines name the target when `debug: true` asks for them.
+//
+// ai-generated: the whole function (egress hardening; the line named addr).
+func logTraffic(sessionID, _ string, bytesIn, bytesOut uint64) {
+	logger.Infof("traffic: session=%s in=%d out=%d", sessionID, bytesIn, bytesOut)
 }
 
 func runClient(

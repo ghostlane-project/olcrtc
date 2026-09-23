@@ -1,22 +1,33 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
+	"log"
 	"net"
 	"net/netip"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/openlibrecommunity/olcrtc/internal/logger"
+	"github.com/openlibrecommunity/olcrtc/internal/tunnelcore"
 )
 
 // ai-generated: the whole file (egress hardening: the private-target block on
-// TCP CONNECT).
+// TCP CONNECT, and no destination in any log line above debug).
 
 const (
 	testPublicIP     = "93.184.216.34"
 	testPublicIPAlt  = "1.1.1.1"
+	testTargetPort   = 4321
+	testSecretHost   = "secret-destination.test"
+	testNowhereHost  = "nowhere.test"
 	testRebindHost   = "rebind.test"
 	testPublicHost   = "public.test"
 	testTwoAddrsHost = "two-addrs.test"
@@ -93,6 +104,42 @@ func (d *dialRecorder) addresses() []string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return append([]string(nil), d.dialed...)
+}
+
+// lockedLog is a log destination the race detector accepts: the logger
+// writes under its lock, the test reads under this one.
+type lockedLog struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedLog) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedLog) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// captureLog sends the standard logger, which internal/logger writes
+// through, into a buffer for the rest of the test, with debug off.
+func captureLog(t *testing.T) *lockedLog {
+	t.Helper()
+	var buf lockedLog
+	oldWriter, oldFlags, oldVerbose := log.Writer(), log.Flags(), logger.IsVerbose()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	logger.SetVerbose(false)
+	t.Cleanup(func() {
+		log.SetOutput(oldWriter)
+		log.SetFlags(oldFlags)
+		logger.SetVerbose(oldVerbose)
+	})
+	return &buf
 }
 
 func TestBlockedAddr(t *testing.T) {
@@ -296,5 +343,131 @@ func TestDialViaProxyRefusesBlockedLiteral(t *testing.T) {
 	case <-accepted:
 	case <-time.After(2 * time.Second):
 		t.Fatal("the name never reached the proxy")
+	}
+}
+
+// The failure words carry no destination for the errors a dial really
+// returns, each of which quotes one.
+func TestDialFailureNamesNoDestination(t *testing.T) {
+	tests := []struct {
+		err  error
+		want string
+	}{
+		{err: errBlockedTarget, want: "blocked target"},
+		{err: errNoTargetAddress, want: "no address"},
+		{
+			err:  errors.Join(errResolveTarget, &net.DNSError{Err: "nxdomain", Name: testSecretHost, IsNotFound: true}),
+			want: "no such host",
+		},
+		{
+			err:  errors.Join(errResolveTarget, &net.DNSError{Err: "i/o timeout", Name: testSecretHost, IsTimeout: true}),
+			want: "lookup failed",
+		},
+		{
+			err: &net.OpError{Op: "dial", Net: "tcp4", Addr: &net.TCPAddr{IP: net.ParseIP(testPublicIP), Port: testTargetPort},
+				Err: syscall.ECONNREFUSED},
+			want: "connection refused",
+		},
+		{
+			err: &net.OpError{Op: "dial", Net: "tcp4", Addr: &net.TCPAddr{IP: net.ParseIP(testPublicIP), Port: testTargetPort},
+				Err: syscall.EHOSTUNREACH},
+			want: "no route",
+		},
+		{err: context.DeadlineExceeded, want: "timeout"},
+		{err: ErrSocks5ConnectFailed, want: "refused by the upstream proxy"},
+		{err: io.ErrUnexpectedEOF, want: "failed"},
+	}
+	for _, tt := range tests {
+		got := dialFailure(tt.err)
+		if got != tt.want {
+			t.Errorf("dialFailure(%v) = %q, want %q", tt.err, got, tt.want)
+		}
+		for _, leak := range []string{testSecretHost, testPublicIP, "4321"} {
+			if strings.Contains(got, leak) {
+				t.Errorf("dialFailure(%v) = %q quotes %q", tt.err, got, leak)
+			}
+		}
+	}
+}
+
+// connectThrough sends one CONNECT for host:port to s over a smux pair and
+// returns the ack, reading what follows an OK until the stream ends.
+func connectThrough(t *testing.T, s *Server, host string, port int) byte {
+	t.Helper()
+	serverSess, clientSess, cleanup := smuxPair(t)
+	defer cleanup()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		stream, err := serverSess.AcceptStream()
+		if err == nil {
+			s.handleStream(context.Background(), stream, "log-sid")
+		}
+	}()
+	stream, err := clientSess.OpenStream()
+	if err != nil {
+		t.Fatalf("OpenStream() error = %v", err)
+	}
+	req, err := json.Marshal(ConnectRequest{Cmd: testConnectCmd, Addr: host, Port: port})
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if _, err := stream.Write(req); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	_ = stream.SetReadDeadline(time.Now().Add(5 * time.Second))
+	ack := make([]byte, 1)
+	if _, err := io.ReadFull(stream, ack); err != nil {
+		t.Fatalf("read ack: %v", err)
+	}
+	if ack[0] == tunnelcore.ConnectAckOK {
+		_, _ = io.Copy(io.Discard, stream)
+	}
+	_ = stream.Close()
+	<-done
+	return ack[0]
+}
+
+// Without debug the server's log names no destination: not the host, not the
+// port, not the address a name resolved to, for a blocked target, a name
+// that does not resolve and a connection that went through. With debug the
+// destination is there, as `debug: true` promises.
+func TestDispatchLogsNoDestination(t *testing.T) {
+	logs := captureLog(t)
+	lookup := &stubLookup{answers: map[string][]net.IP{
+		testSecretHost:             {net.IPv4(127, 0, 0, 1)},
+		"public-" + testSecretHost: {net.ParseIP(testPublicIP)},
+	}}
+	rec := &dialRecorder{}
+	s := &Server{resolver: lookup, dialTarget: rec.dial}
+
+	if ack := connectThrough(t, s, testSecretHost, testTargetPort); ack != tunnelcore.ConnectAckHostUnreachable {
+		t.Fatalf("blocked target ack = 0x%02x, want 0x%02x", ack, tunnelcore.ConnectAckHostUnreachable)
+	}
+	if ack := connectThrough(t, s, testNowhereHost, testTargetPort); ack != tunnelcore.ConnectAckHostUnreachable {
+		t.Fatalf("unresolvable target ack = 0x%02x, want 0x%02x", ack, tunnelcore.ConnectAckHostUnreachable)
+	}
+	if ack := connectThrough(t, s, "public-"+testSecretHost, testTargetPort); ack != tunnelcore.ConnectAckOK {
+		t.Fatalf("public target ack = 0x%02x, want ok", ack)
+	}
+	out := logs.String()
+	// ":4321", not "4321": an elapsed time such as 1.432158ms may hold the digits.
+	for _, leak := range []string{testSecretHost, testNowhereHost, testPublicIP, ":4321"} {
+		if strings.Contains(out, leak) {
+			t.Fatalf("the log names a destination (%q):\n%s", leak, out)
+		}
+	}
+	for _, kept := range []string{"dial failed", dialFailure(errBlockedTarget), dialFailure(&net.DNSError{IsNotFound: true})} {
+		if !strings.Contains(out, kept) {
+			t.Fatalf("the log lost %q:\n%s", kept, out)
+		}
+	}
+
+	logger.SetVerbose(true)
+	if ack := connectThrough(t, s, "public-"+testSecretHost, testTargetPort); ack != tunnelcore.ConnectAckOK {
+		t.Fatalf("public target ack with debug = 0x%02x, want ok", ack)
+	}
+	if !strings.Contains(logs.String(), "connected public-"+testSecretHost+":4321") {
+		t.Fatalf("debug does not name the destination:\n%s", logs.String())
 	}
 }

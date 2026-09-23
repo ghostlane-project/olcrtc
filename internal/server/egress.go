@@ -7,7 +7,9 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"os"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/xtaci/smux"
@@ -138,6 +140,39 @@ func isLiteral(host string) bool {
 	return err == nil
 }
 
+// dialFailure says why a dial failed in words that carry no destination: a
+// dial error quotes the address and a lookup error the name, and no line
+// above debug may quote either.
+//
+// ai-generated: the whole function (egress hardening).
+func dialFailure(err error) string {
+	var dnsErr *net.DNSError
+	switch {
+	case errors.Is(err, errBlockedTarget):
+		return errBlockedTarget.Error()
+	case errors.Is(err, ErrInvalidTarget):
+		return "invalid target"
+	case errors.As(err, &dnsErr) && dnsErr.IsNotFound:
+		return "no such host"
+	case errors.Is(err, errNoTargetAddress), errors.Is(err, protect.ErrNoAddresses):
+		return "no address"
+	case errors.Is(err, errResolveTarget):
+		return "lookup failed"
+	case errors.Is(err, ErrSocks5ConnectFailed), errors.Is(err, ErrSocks5AuthFailed):
+		return "refused by the upstream proxy"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, os.ErrDeadlineExceeded):
+		return "timeout"
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return "connection refused"
+	case errors.Is(err, syscall.ENETUNREACH), errors.Is(err, syscall.EHOSTUNREACH):
+		return "no route"
+	default:
+		return "failed"
+	}
+}
+
 // ConnectRequest asks the server to establish a target connection.
 type ConnectRequest struct {
 	Cmd  string `json:"cmd"`
@@ -160,18 +195,22 @@ func (r ConnectRequest) validate() error {
 }
 
 func (s *Server) dispatch(ctx context.Context, stream *smux.Stream, request ConnectRequest, sessionID string) {
+	// Where a peer connects is logged at debug only: an exit's log is no
+	// record of its users' destinations. A failure says why, not where.
+	// ai-generated: the log levels and the failure line (egress hardening).
 	addr := net.JoinHostPort(request.Addr, strconv.Itoa(request.Port))
-	logger.Infof("sid=%d connect %s", stream.ID(), addr)
+	logger.Debugf("sid=%d connect %s", stream.ID(), addr)
 	started := time.Now()
 	conn, err := s.dial(ctx, request)
 	elapsed := time.Since(started)
 	if err != nil {
-		logger.Infof("sid=%d dial %s failed (%v): %v", stream.ID(), addr, elapsed, err)
+		logger.Infof("sid=%d dial failed (%v): %s", stream.ID(), elapsed, dialFailure(err))
+		logger.Debugf("sid=%d dial %s failed: %v", stream.ID(), addr, err)
 		_, _ = stream.Write([]byte{tunnelcore.ConnectAckHostUnreachable})
 		return
 	}
 	defer func() { _ = conn.Close() }()
-	logger.Infof("sid=%d connected %s in %v", stream.ID(), addr, elapsed)
+	logger.Debugf("sid=%d connected %s in %v", stream.ID(), addr, elapsed)
 	if _, err := stream.Write([]byte{tunnelcore.ConnectAckOK}); err != nil {
 		return
 	}

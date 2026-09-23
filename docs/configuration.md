@@ -118,6 +118,8 @@ route:
 
 A server never opens a TCP connection or a UDP flow for a client into its own host or its networks: loopback, private, link-local (cloud metadata included), shared CGNAT space (`100.64.0.0/10`), multicast, reserved and the other ranges Xray's freedom outbound refuses by default. A name is resolved once and judged by every address it resolves to - one refused address refuses the target - and the checked address itself is dialed, so the name is never resolved a second time. An IPv4-mapped IPv6 address is judged as the IPv4 address it reaches. With `socks.proxy_addr` a name goes to the proxy unresolved, for the proxy to resolve under its own policy; only a literal address is judged.
 
+Without `debug` the server's log names no destination: a failed connect says why (`blocked target`, `no such host`, `connection refused`, ...) but not where, and the `traffic:` line carries the session and the byte counts. `debug: true` adds the target to every connect.
+
 ## Config schema migration
 
 For one migration cycle the strict loader accepts the deprecated fields `link`, `ffmpeg`, `video.bitrate` and `video.hw`. All four fields are ignored by the current runtime and will be removed in the next config schema. Delete them from persisted configs. Other unknown or misspelled fields still cause a load error.
