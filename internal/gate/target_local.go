@@ -1,10 +1,13 @@
 package gate
 
 import (
+	"bufio"
+	"bytes"
 	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -296,6 +299,7 @@ func (t *LocalTarget) Open(ctx context.Context, p Pair, dir string, opt OpenOpti
 		}
 		return Endpoint{}, nil, fmt.Errorf("%w; last server line: %s", err, tail)
 	}
+	ep.ServerJoined = serverJoined(srv.log) // ai-generated: this line (the streaming reader)
 	return ep, stop, nil
 }
 
@@ -530,50 +534,127 @@ const (
 	relayDropMarker = "disconnected from the room, reason="
 	// logTimeLayout is what the server stamps every line with.
 	logTimeLayout = "2006/01/02 15:04:05"
+	// logLineMax bounds how much of one log line is read: a line is judged by
+	// its first logLineMax bytes and the rest of it is skipped. The lines
+	// read for, the join and a relay's drop, are short; a debug line can
+	// quote a whole XMPP stanza or SDP, 20 KB and more.
+	logLineMax = 64 << 10
 )
 
-// RelayDropFailures reads a server log and reports, for every session the
-// relay ended inside [from, to], a line naming the reason and when it
-// happened. A failed cell gets these next to its own failures so a red cell
-// says at once whether the relay took the server out from under it.
+// LogMark is where a server log stood when a cell began: its size, so a
+// failed cell reads only what the log gained during it, and the stamp of the
+// server's join, which comes before every cell's part. ai-generated: this
+// type (the streaming reader).
+type LogMark struct {
+	Offset int64
+	Joined time.Time
+}
+
+// markLog is where the endpoint's server log stands now: its size and the
+// join its target noted. A log that is not there marks its start.
+// ai-generated: this function (the streaming reader).
+func markLog(ep Endpoint) LogMark {
+	at := LogMark{Joined: ep.ServerJoined}
+	if info, err := os.Stat(ep.ServerLog); err == nil {
+		at.Offset = info.Size()
+	}
+	return at
+}
+
+// RelayDropFailures reads a server log from a cell's mark and reports, for
+// every session the relay ended inside [from, to], a line naming the reason
+// and when it happened. A failed cell gets these next to its own failures so
+// a red cell says at once whether the relay took the server out from under
+// it.
 //
 // It judges nothing: a removal is usually our own doing (the relay policing
 // what we publish, olcrtc#26), so it never turns a failure into a pass and
 // never fires for a cell that passed. A log it cannot read yields nothing.
-func RelayDropFailures(logPath string, from, to time.Time) []string {
-	data, err := os.ReadFile(logPath)
-	if err != nil {
-		return nil
-	}
-	var (
-		out    []string
-		joined time.Time
-	)
-	for line := range strings.SplitSeq(string(data), "\n") {
+//
+// ai-generated: the read from the mark, a bounded line at a time. The whole
+// log copied into a string, 20 MB and more late in a pair, grew the process
+// S7 weighs after every failed cell. Every line before the mark was written
+// before the cell began and stamped no later, so no drop inside [from, to]
+// lies there; the join does, and comes with the mark.
+func RelayDropFailures(logPath string, at LogMark, from, to time.Time) []string {
+	var out []string
+	joined := at.Joined
+	linked, dropped := []byte(linkedLine), []byte(relayDropMarker)
+	_ = eachLogLine(logPath, at.Offset, func(line []byte) bool {
+		isJoin := bytes.Contains(line, linked)
+		if !isJoin && !bytes.Contains(line, dropped) {
+			return true // the stamp is parsed only for a line that counts
+		}
 		stamp, ok := logTime(line)
-		if !ok {
-			continue
+		switch {
+		case !ok: // a line without a stamp places nothing
+		case isJoin:
+			joined = stamp
+		case !stamp.Before(from) && !stamp.After(to):
+			out = append(out, relayDropLine(string(line), stamp, joined, from))
+		}
+		return true
+	})
+	return out
+}
+
+// serverJoined is the stamp of the first join line of a server log, zero
+// when there is none or it carries no stamp. Read once the server has
+// joined, while its log is short. ai-generated: this function (the
+// streaming reader).
+func serverJoined(logPath string) time.Time {
+	var joined time.Time
+	linked := []byte(linkedLine)
+	_ = eachLogLine(logPath, 0, func(line []byte) bool {
+		if !bytes.Contains(line, linked) {
+			return true
+		}
+		joined, _ = logTime(line)
+		return false
+	})
+	return joined
+}
+
+// eachLogLine calls fn with each line of the log at path from offset on,
+// without its newline and cut to logLineMax bytes, until fn returns false or
+// the log ends; a last line with no newline yet is a line. The slice is only
+// valid during the call. It holds one buffer of logLineMax, whatever the
+// log's size or its longest line. ai-generated: this function (the
+// streaming reader).
+func eachLogLine(path string, offset int64, fn func(line []byte) bool) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open log: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return fmt.Errorf("seek log: %w", err)
+	}
+	r := bufio.NewReaderSize(f, logLineMax)
+	for {
+		line, err := r.ReadSlice('\n')
+		if len(line) > 0 && !fn(bytes.TrimSuffix(line, []byte{'\n'})) {
+			return nil
+		}
+		for errors.Is(err, bufio.ErrBufferFull) { // the rest of a long line
+			_, err = r.ReadSlice('\n')
 		}
 		switch {
-		case strings.Contains(line, linkedLine):
-			joined = stamp
-		case strings.Contains(line, relayDropMarker):
-			if stamp.Before(from) || stamp.After(to) {
-				continue
-			}
-			out = append(out, relayDropLine(line, stamp, joined, from))
+		case errors.Is(err, io.EOF):
+			return nil
+		case err != nil:
+			return fmt.Errorf("read log: %w", err)
 		}
 	}
-	return out
 }
 
 // withRelayDrops adds what the relay did to a cell that failed. A cell that
 // passed is left alone, whatever the log says.
-func withRelayDrops(failures []string, logPath string, from, to time.Time) []string {
+func withRelayDrops(failures []string, logPath string, at LogMark, from, to time.Time) []string {
 	if len(failures) == 0 {
 		return failures
 	}
-	return append(failures, RelayDropFailures(logPath, from, to)...)
+	return append(failures, RelayDropFailures(logPath, at, from, to)...)
 }
 
 // relayDropLine is one such failure, in the words of the reason the relay
@@ -593,11 +674,11 @@ func relayDropLine(line string, stamp, joined, from time.Time) string {
 }
 
 // logTime reads the stamp a server log line opens with.
-func logTime(line string) (time.Time, bool) {
+func logTime(line []byte) (time.Time, bool) {
 	if len(line) < len(logTimeLayout) {
 		return time.Time{}, false
 	}
-	stamp, err := time.ParseInLocation(logTimeLayout, line[:len(logTimeLayout)], time.Local)
+	stamp, err := time.ParseInLocation(logTimeLayout, string(line[:len(logTimeLayout)]), time.Local)
 	if err != nil {
 		return time.Time{}, false
 	}

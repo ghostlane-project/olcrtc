@@ -42,6 +42,10 @@ type Endpoint struct {
 	// fleet node. A failed cell is read for what the relay did to it (see
 	// RelayDropFailures). ai-generated: this field (olcrtc#26).
 	ServerLog string
+	// ServerJoined is the stamp of that server's join line, which a failed
+	// cell names its relay drops against (LogMark); zero when unknown.
+	// ai-generated: this field (the streaming reader).
+	ServerJoined time.Time
 }
 
 // String describes the endpoint without its secrets: a room or a key that is

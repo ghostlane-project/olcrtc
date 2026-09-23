@@ -304,11 +304,14 @@ func startClient(ctx context.Context, o Options, env *Env) (*Tunnel, error) {
 func runCell(ctx context.Context, o Options, env *Env, s Scenario) error {
 	id := CellID(o.Target.Platform(), env.Pair, env.Client.Name(), s.ID)
 	env.Log = o.Capture.Begin()
+	// ai-generated: where the server log stands as the cell begins; a failed
+	// cell reads the log from here (the streaming reader).
+	at := markLog(env.Endpoint)
 	m, failures, took := RunCell(ctx, env, s)
 	// ai-generated: the relay's own doing, named next to the cell's failures
 	// (olcrtc#26). It judges nothing; it says who ended the session.
 	end := time.Now()
-	failures = withRelayDrops(failures, env.Endpoint.ServerLog, end.Add(-took), end)
+	failures = withRelayDrops(failures, env.Endpoint.ServerLog, at, end.Add(-took), end)
 	logPath := o.writeLog(env.Log, env.Dir, env.Client.Name()+"-"+s.ID+".log")
 	if s.ID == "S7" {
 		if err := env.Sampler.WriteCSV(filepath.Join(env.Dir, env.Client.Name()+"-samples.csv")); err != nil {

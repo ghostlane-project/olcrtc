@@ -1,6 +1,7 @@
 package gate
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -530,7 +531,7 @@ func stamp(t *testing.T, value string) time.Time {
 func TestRelayDropFailuresNamesTheReasonAndWhen(t *testing.T) {
 	path := relayLogFile(t, relayDropLog)
 
-	got := RelayDropFailures(path, stamp(t, "2026/09/20 10:28:35"), stamp(t, "2026/09/20 10:29:10"))
+	got := RelayDropFailures(path, LogMark{}, stamp(t, "2026/09/20 10:28:35"), stamp(t, "2026/09/20 10:29:10"))
 	if len(got) != 1 {
 		t.Fatalf("RelayDropFailures() = %q, want one line", got)
 	}
@@ -544,15 +545,15 @@ func TestRelayDropFailuresNamesTheReasonAndWhen(t *testing.T) {
 func TestRelayDropFailuresKeepsToTheCellWindow(t *testing.T) {
 	path := relayLogFile(t, relayDropLog)
 
-	before := RelayDropFailures(path, stamp(t, "2026/09/20 10:29:02"), stamp(t, "2026/09/20 10:29:30"))
+	before := RelayDropFailures(path, LogMark{}, stamp(t, "2026/09/20 10:29:02"), stamp(t, "2026/09/20 10:29:30"))
 	if len(before) != 0 {
 		t.Fatalf("a drop before the cell was reported: %q", before)
 	}
-	after := RelayDropFailures(path, stamp(t, "2026/09/20 10:28:00"), stamp(t, "2026/09/20 10:28:59"))
+	after := RelayDropFailures(path, LogMark{}, stamp(t, "2026/09/20 10:28:00"), stamp(t, "2026/09/20 10:28:59"))
 	if len(after) != 0 {
 		t.Fatalf("a drop after the cell was reported: %q", after)
 	}
-	if got := RelayDropFailures(filepath.Join(t.TempDir(), "absent.log"),
+	if got := RelayDropFailures(filepath.Join(t.TempDir(), "absent.log"), LogMark{},
 		stamp(t, "2026/09/20 10:28:00"), stamp(t, "2026/09/20 10:30:00")); got != nil {
 		t.Fatalf("a log that cannot be read reported %q", got)
 	}
@@ -561,7 +562,7 @@ func TestRelayDropFailuresKeepsToTheCellWindow(t *testing.T) {
 func TestRelayDropFailuresWithoutAJoinOrAReason(t *testing.T) {
 	path := relayLogFile(t, "2026/09/20 10:29:01 livekit: disconnected from the room, reason=\n")
 
-	got := RelayDropFailures(path, stamp(t, "2026/09/20 10:28:00"), stamp(t, "2026/09/20 10:30:00"))
+	got := RelayDropFailures(path, LogMark{}, stamp(t, "2026/09/20 10:28:00"), stamp(t, "2026/09/20 10:30:00"))
 	if len(got) != 1 {
 		t.Fatalf("RelayDropFailures() = %q, want one line", got)
 	}
@@ -577,14 +578,227 @@ func TestWithRelayDropsLeavesAPassingCellAlone(t *testing.T) {
 	path := relayLogFile(t, relayDropLog)
 	from, to := stamp(t, "2026/09/20 10:28:35"), stamp(t, "2026/09/20 10:29:10")
 
-	if got := withRelayDrops(nil, path, from, to); got != nil {
+	if got := withRelayDrops(nil, path, LogMark{}, from, to); got != nil {
 		t.Fatalf("a cell that passed was given %q", got)
 	}
-	got := withRelayDrops([]string{"pull_ok 0 != 6"}, path, from, to)
+	got := withRelayDrops([]string{"pull_ok 0 != 6"}, path, LogMark{}, from, to)
 	if len(got) != 2 || got[0] != "pull_ok 0 != 6" {
 		t.Fatalf("withRelayDrops() = %q, want the cell's own failure and the relay's line", got)
 	}
 	if !strings.Contains(got[1], "PARTICIPANT_REMOVED") {
 		t.Fatalf("withRelayDrops() = %q, want the relay's reason", got)
+	}
+}
+
+// ai-generated: the rest of the file (the streaming reader: a failed cell
+// reads its own part of the server log, from where the log stood when the
+// cell began, one bounded line at a time).
+
+// wholeFileRelayDrops is RelayDropFailures as it was before it streamed: the
+// whole log read and copied into a string, split on newlines. The streaming
+// reader must say what it said.
+func wholeFileRelayDrops(logPath string, from, to time.Time) []string {
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		return nil
+	}
+	var (
+		out    []string
+		joined time.Time
+	)
+	for line := range strings.SplitSeq(string(data), "\n") {
+		stamp, ok := logTime([]byte(line))
+		if !ok {
+			continue
+		}
+		switch {
+		case strings.Contains(line, linkedLine):
+			joined = stamp
+		case strings.Contains(line, relayDropMarker):
+			if stamp.Before(from) || stamp.After(to) {
+				continue
+			}
+			out = append(out, relayDropLine(line, stamp, joined, from))
+		}
+	}
+	return out
+}
+
+// bigRelayLog writes a server log of 32 MiB and returns it with the mark a
+// cell began at, 16 MiB in, and the cell's window. Before the mark: the
+// join, and a drop of an earlier cell. After it: a line past 64 KiB (a
+// bufio.Scanner's default limit, which would end the read there) with a drop
+// behind it, a drop whose own line runs past 64 KiB, a drop stamped after
+// the cell, and a last drop the log ends on without a newline, the way a log
+// still being written does.
+func bigRelayLog(t *testing.T) (string, LogMark, time.Time, time.Time) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "srv.log")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := bufio.NewWriterSize(f, 1<<20)
+	n := 0
+	put := func(line string) {
+		k, err := w.WriteString(line)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n += k
+	}
+	// fill writes frame lines up to size bytes, stamped from first to last.
+	fill := func(size int, first, last time.Time) {
+		start, span := n, last.Sub(first)
+		for n < size {
+			at := first.Add(time.Duration(float64(span) * float64(n-start) / float64(size-start)))
+			put(fmt.Sprintf("%s datachannel: frame sid=3 len=16384 queued=%d\n", at.Format(logTimeLayout), n))
+		}
+	}
+	const last = "2026/09/20 10:19:59 livekit: disconnected from the room, reason=JOIN_FAILURE"
+	put("2026/09/20 10:00:00 Connecting transport=datachannel provider=salutejazz ...\n")
+	put("2026/09/20 10:00:01 Link connected\n")
+	fill(8<<20, stamp(t, "2026/09/20 10:00:02"), stamp(t, "2026/09/20 10:04:59"))
+	put("2026/09/20 10:05:00 livekit: disconnected from the room, reason=DUPLICATE_IDENTITY\n")
+	fill(16<<20, stamp(t, "2026/09/20 10:05:01"), stamp(t, "2026/09/20 10:09:59"))
+	mark := LogMark{Offset: int64(n), Joined: stamp(t, "2026/09/20 10:00:01")}
+	fill(20<<20, stamp(t, "2026/09/20 10:10:00"), stamp(t, "2026/09/20 10:11:59"))
+	put("2026/09/20 10:12:00 jitsi: stanza <iq>" + strings.Repeat("x", 100<<10) + "</iq>\n")
+	put("2026/09/20 10:13:07 livekit: disconnected from the room, reason=PARTICIPANT_REMOVED\n")
+	fill(26<<20, stamp(t, "2026/09/20 10:13:08"), stamp(t, "2026/09/20 10:14:59"))
+	put("2026/09/20 10:15:00 livekit: disconnected from the room, reason=ROOM_DELETED " +
+		strings.Repeat("y", 70<<10) + "\n")
+	put("2026/09/20 10:21:00 livekit: disconnected from the room, reason=SERVER_SHUTDOWN\n")
+	fill(32<<20-len(last), stamp(t, "2026/09/20 10:15:01"), stamp(t, "2026/09/20 10:19:58"))
+	put(last)
+	if err := w.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path, mark, stamp(t, "2026/09/20 10:10:00"), stamp(t, "2026/09/20 10:20:00")
+}
+
+// TestRelayDropFailuresStreamsABigLogFromTheCellsMark holds the reader to
+// the words the whole-file read had and to a bound on what it allocates: a
+// failed cell late in a pair used to copy the whole log, 20 MB and more, into
+// the process S7 weighs.
+func TestRelayDropFailuresStreamsABigLogFromTheCellsMark(t *testing.T) {
+	path, mark, from, to := bigRelayLog(t)
+	want := []string{
+		"the relay ended the server's session (PARTICIPANT_REMOVED) 3m7s into the cell, 13m6s after it joined",
+		"the relay ended the server's session (ROOM_DELETED) 5m0s into the cell, 14m59s after it joined",
+		"the relay ended the server's session (JOIN_FAILURE) 9m59s into the cell, 19m58s after it joined",
+	}
+	if old := wholeFileRelayDrops(path, from, to); !slices.Equal(old, want) {
+		t.Fatalf("the whole-file read says %q, want %q: the fixture is off", old, want)
+	}
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	got := RelayDropFailures(path, mark, from, to)
+	runtime.ReadMemStats(&after)
+	if !slices.Equal(got, want) {
+		t.Fatalf("RelayDropFailures() = %q, want %q", got, want)
+	}
+	alloc := after.TotalAlloc - before.TotalAlloc
+	if alloc >= 2<<20 {
+		t.Fatalf("reading a 32 MiB log allocated %d KiB, want under 2 MiB", alloc>>10)
+	}
+	t.Logf("a 32 MiB log read from its 16 MiB mark allocated %d KiB", alloc>>10)
+}
+
+// TestRelayDropFailuresReadsFromTheCellsMark starts the read where the log
+// stood when the cell began: what was written before is not the cell's, and
+// the join it names comes from the mark until the log shows a later one.
+func TestRelayDropFailuresReadsFromTheCellsMark(t *testing.T) {
+	head := "2026/09/20 10:28:22 Link connected\n" +
+		"2026/09/20 10:29:01 livekit: disconnected from the room, reason=PARTICIPANT_REMOVED\n"
+	path := relayLogFile(t, head+
+		"2026/09/20 10:29:05 livekit: disconnected from the room, reason=ROOM_DELETED\n"+
+		"2026/09/20 10:29:06 Link connected\n"+
+		"2026/09/20 10:29:08 livekit: disconnected from the room, reason=SERVER_SHUTDOWN\n")
+	mark := LogMark{Offset: int64(len(head)), Joined: stamp(t, "2026/09/20 10:28:22")}
+
+	got := RelayDropFailures(path, mark, stamp(t, "2026/09/20 10:28:35"), stamp(t, "2026/09/20 10:29:10"))
+	want := []string{
+		"the relay ended the server's session (ROOM_DELETED) 30s into the cell, 43s after it joined",
+		"the relay ended the server's session (SERVER_SHUTDOWN) 33s into the cell, 2s after it joined",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("RelayDropFailures() = %q, want %q", got, want)
+	}
+	past := LogMark{Offset: 1 << 20, Joined: mark.Joined}
+	if got := RelayDropFailures(path, past, stamp(t, "2026/09/20 10:28:00"), stamp(t, "2026/09/20 10:30:00")); got != nil {
+		t.Fatalf("a mark past the log's end reported %q", got)
+	}
+}
+
+// TestMarkLogIsWhereTheLogStandsAndTheJoin is the mark a cell takes as it
+// begins: the log's size and the join its target noted; a log that is not
+// there marks its start.
+func TestMarkLogIsWhereTheLogStandsAndTheJoin(t *testing.T) {
+	path := relayLogFile(t, relayDropLog)
+	joined := stamp(t, "2026/09/20 10:28:22")
+	if got := markLog(Endpoint{ServerLog: path, ServerJoined: joined}); got.Offset != int64(len(relayDropLog)) ||
+		!got.Joined.Equal(joined) {
+		t.Fatalf("markLog() = %+v, want offset %d and the join", got, len(relayDropLog))
+	}
+	if got := markLog(Endpoint{}); got != (LogMark{}) {
+		t.Fatalf("markLog() without a server log = %+v, want the zero mark", got)
+	}
+}
+
+// TestLocalTargetNotesWhenItsServerJoined is where a mark's join comes from:
+// the stamp of the server's join line, zero when the line has none.
+func TestLocalTargetNotesWhenItsServerJoined(t *testing.T) {
+	for _, tc := range []struct {
+		name, line string
+		want       time.Time
+	}{
+		{"stamped", "2026/09/20 10:28:22 Link connected", stamp(t, "2026/09/20 10:28:22")},
+		{"bare", "Link connected", time.Time{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lt := fakeLocal(t, t.TempDir(), LocalOptions{
+				Providers: []string{"telemost"}, Transports: []string{"vp8channel"}, TelemostRooms: []string{"fake-telemost-1"},
+			}, `trap 'exit 0' TERM
+echo "2026/09/20 10:28:21 Connecting"; echo "`+tc.line+`"
+i=0; while [ "$i" -lt 600 ]; do sleep 0.05; i=$((i+1)); done`)
+			ep, stop, err := lt.Open(context.Background(), Pair{"telemost", "vp8channel"}, t.TempDir(), OpenOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(stop)
+			if !ep.ServerJoined.Equal(tc.want) {
+				t.Fatalf("ServerJoined = %v, want %v", ep.ServerJoined, tc.want)
+			}
+		})
+	}
+}
+
+// TestEachLogLineCutsALongLineToItsHead holds the reader's bound: a line past
+// logLineMax is read as its head, and what follows the cut is skipped, not
+// read as lines of its own, whatever it looks like.
+func TestEachLogLineCutsALongLineToItsHead(t *testing.T) {
+	head := "2026/09/20 10:29:00 jitsi: stanza " + strings.Repeat("x", logLineMax)
+	head = head[:logLineMax]
+	path := relayLogFile(t, head+"2026/09/20 10:29:01 livekit: disconnected from the room, reason=CUT\n"+
+		"2026/09/20 10:29:02 next\n"+"2026/09/20 10:29:03 last, no newline")
+	var got []string
+	if err := eachLogLine(path, 0, func(line []byte) bool {
+		got = append(got, string(line))
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{head, "2026/09/20 10:29:02 next", "2026/09/20 10:29:03 last, no newline"}; !slices.Equal(got, want) {
+		t.Fatalf("eachLogLine() read %d lines, want the long line's head, the next and the last", len(got))
+	}
+	if drops := RelayDropFailures(path, LogMark{}, stamp(t, "2026/09/20 10:28:00"), stamp(t, "2026/09/20 10:30:00")); drops != nil {
+		t.Fatalf("a drop past the cut was read as a line of its own: %q", drops)
+	}
+	if err := eachLogLine(filepath.Join(t.TempDir(), "absent.log"), 0, func([]byte) bool { return true }); err == nil {
+		t.Fatal("eachLogLine() of a log that is not there returned nil")
 	}
 }
