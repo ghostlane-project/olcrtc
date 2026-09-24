@@ -57,10 +57,12 @@ Each destination's window gets its own size, recomputed from its echoes:
 - **MinWindow**, 16 KiB, keeps a very slow leg moving; **Window**, 192 KiB,
   stays the cap, so a fast leg is sized exactly as today.
 
-A window starts at the cap, as today, and shrinks from its first measured
-interval, about a second of echoes on a slow leg. Marks follow the size: a mark
-every eighth of the current window, never less than 2 KiB, so a small window
-still has several echoes in flight to time.
+A sized window starts at 64 KiB, not at the cap: what a new window hands the
+relay before it has measured anything is queued however slow the leg, and a
+whole 192 KiB is 7.6 s at 26 kB/s (on the six-pull tunnel test that start alone
+closed the session). A fast leg grows it to the cap within one measured
+interval, by `(minRTT + TargetQueue) / RTT`. Marks follow the size: at the cap
+every `MarkEvery` as today, a smaller window proportionally, never under 2 KiB.
 
 ### Where it lives
 
@@ -72,8 +74,9 @@ there, off unless a carrier asks for it:
 - `state` keeps the window's current size, the send time of each mark in
   flight (it already decides when a mark is due, in `Sent` and `Room`), the
   shortest echo round trip, and the start of the current rate interval.
-- `ApplyEcho` takes `now`, times the echo against its mark and recomputes the
-  size at the end of each rate interval.
+- `ApplyEchoAt(key, counter, now)`, a timed `ApplyEcho`, times the echo
+  against its mark and recomputes the size at the end of each rate interval;
+  `ApplyEcho` keeps its signature and measures nothing.
 - `Room`, `Sent` and `Over` read the destination's own size and mark interval
   instead of the Timing's.
 - `Size(key)` reports a destination's current window, for the debug log.
@@ -82,7 +85,23 @@ there, off unless a carrier asks for it:
 its debug report adds the window size to the rate and round trip it already
 logs.
 
-### Compatibility
+#### The other half of a pong's wait: smux
+
+The window bounds the relay's queue, not all of a pong's wait. On datachannel
+the control stream shares the data session, and smux writes one record per
+stream in turn (class first, then the order the writes came in), each stream
+with one record at a time. So a pong waits for a record from every busy
+stream - with six pulls on a 26 kB/s leg, 2.8 s - and may first wait for its
+own stream's ping to go the same way. The measurements on the tunnel test
+(26 kB/s, six pulls, the tunnel's own liveness) are a pong in 5-7 s, against
+10.4 s with the fixed window. A probe much faster than the tunnel's own cannot
+keep up on such a leg: the control stream gets about one record out every
+2.8 s there. This is also the limit of the change: with many more busy streams
+on a leg this slow, even the tunnel's own probes queue up. A control stream
+that goes ahead of data (a control plane of its own, as vp8channel has, or a
+priority in smux) is a separate change.
+
+## Compatibility
 
 Nothing on the wire changes: the size is the sender's own. A peer on any build
 sends and echoes marks as before; only how much this sender lets itself put in
@@ -103,9 +122,11 @@ flight differs. So each end can move on its own:
   it; marks follow the size; `Reset` forgets the round trip and the rate.
 - `salutejazz`, the whole tunnel over the fake SFU: the existing slow-leg test
   keeps passing, and a new one on 26 kB/s legs with six parallel pulls misses
-  no pong at the tunnel's real liveness (10 s probes, 15 s timeout), every pong
-  comes back within `2 × TargetQueue` plus the leg's round trip and a second,
-  and the pulls keep over a quarter of the leg.
+  no pong at the tunnel's real liveness (10 s probes, 15 s timeout); every
+  settled pong comes back within `2 × TargetQueue`, two smux turns and a
+  second; the leg to the client holds under three quarters of the cap (61 KiB
+  measured, the fixed window holds all of it); the pulls keep three quarters
+  of the leg (98 % measured).
 - The window budget test pins the new guarantee: a pong's worst wait is set by
   `TargetQueue`, not by the slowest leg ever measured.
 - The engine gate on live rooms: salutejazz S2 and S3. S2's `on_top_p95_ms`
