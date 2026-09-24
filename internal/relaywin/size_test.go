@@ -175,9 +175,10 @@ func TestASenderThatIsNeverHeldLeavesTheSizeAlone(t *testing.T) {
 	// A sender under what the leg carries says nothing about the leg.
 	l := newLeg(t, sized, slowLeg, slowRTT)
 	l.appLimit = slowLeg / 4
+	first := l.w.Size(l.key)
 	l.run(60*time.Second, 10*time.Millisecond)
-	if size := l.w.Size(l.key); size != DefaultWindow {
-		t.Fatalf("a sender that never filled the window moved its size to %d KiB", size>>10)
+	if size := l.w.Size(l.key); size != first {
+		t.Fatalf("a sender that never filled the window moved its size from %d to %d KiB", first>>10, size>>10)
 	}
 }
 
@@ -217,8 +218,8 @@ func TestResetForgetsTheSize(t *testing.T) {
 	l.settle()
 	l.w.Reset(l.key)
 	l.w.Epoch(l.key) // the next send opens it again
-	if size := l.w.Size(l.key); size != DefaultWindow {
-		t.Fatalf("a window reset starts at %d KiB, not the cap", size>>10)
+	if size := l.w.Size(l.key); size != firstSizedWindow {
+		t.Fatalf("a window reset starts at %d KiB, not its first %d KiB", size>>10, firstSizedWindow>>10)
 	}
 	st := snapshot(t, l.w, l.key)
 	if st.leg == nil {
@@ -233,9 +234,10 @@ func TestResetForgetsTheSize(t *testing.T) {
 func TestAnEchoWithoutAClockNeverResizes(t *testing.T) {
 	l := newLeg(t, sized, slowLeg, slowRTT)
 	l.timed = false
+	first := l.w.Size(l.key)
 	l.run(60*time.Second, 10*time.Millisecond)
-	if size := l.w.Size(l.key); size != DefaultWindow {
-		t.Fatalf("echoes with no clock resized the window to %d KiB", size>>10)
+	if size := l.w.Size(l.key); size != first {
+		t.Fatalf("echoes with no clock resized the window from %d to %d KiB", first>>10, size>>10)
 	}
 }
 
@@ -257,5 +259,19 @@ func TestSizeOfAWindowNotOpenIsTheCap(t *testing.T) {
 	}
 	if w.Len() != 0 {
 		t.Fatal("Size opened a window")
+	}
+}
+
+func TestASizedWindowStartsSmallAndAFastLegGrowsItToTheCap(t *testing.T) {
+	// What a new window hands the relay before it has measured anything is
+	// queued however slow the leg; a fast leg pays for starting small with
+	// about one rate interval.
+	l := newLeg(t, sized, 1_000_000, 50*time.Millisecond)
+	if size := l.w.Size(l.key); size != firstSizedWindow {
+		t.Fatalf("a sized window starts at %d KiB, not %d", size>>10, firstSizedWindow>>10)
+	}
+	l.run(3*time.Second, 5*time.Millisecond)
+	if size := l.w.Size(l.key); size != DefaultWindow {
+		t.Fatalf("3 s on a 1 MB/s leg left the window at %d KiB, under its %d KiB cap", size>>10, DefaultWindow>>10)
 	}
 }

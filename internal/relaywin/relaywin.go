@@ -63,7 +63,8 @@
 // instead of held at Window: a fixed window is seconds of queue on a slow leg,
 // and a pong waits behind all of it. The window times each echo against the
 // mark it answers and, once a second while a sender is held on it, measures
-// the rate its destination takes bytes off the relay. Its size is then
+// the rate its destination takes bytes off the relay. It starts at
+// firstSizedWindow, and its size is then
 //
 //	rate × (shortest echo round trip + TargetQueue)
 //
@@ -133,6 +134,13 @@ const (
 	// stampsKept is how many marks in flight a sized window keeps the send
 	// time of: a destination that never echoes does not grow the list.
 	stampsKept = 64
+	// firstSizedWindow is where a sized window starts, before it has
+	// measured its leg: what a new window hands the relay at once is queued
+	// there however slow the leg, 7.6 s of it at the cap on a 26 kB/s leg,
+	// and a pong behind it. A fast leg grows a window this size to the cap
+	// within one rateInterval, by (shortest round trip + TargetQueue) over
+	// the round trip it measures.
+	firstSizedWindow = 64 << 10
 )
 
 // Timing sizes a Windows. A field left zero takes its default: the Default
@@ -355,8 +363,9 @@ func (w *Windows) ApplyEchoAt(key string, counter uint64, now time.Time) (bool, 
 	return true, turnedOn
 }
 
-// Size is the window toward key now: Window until its leg has sized it, and
-// Window for a key with no window open. It only looks.
+// Size is the window toward key now: Window, or for a sized window its first
+// size until its leg has sized it; Window for a key with no window open. It
+// only looks.
 func (w *Windows) Size(key string) uint64 {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -493,6 +502,7 @@ func (w *Windows) open(key string) *state {
 		}
 		if w.timing.TargetQueue > 0 {
 			st.leg = &legMeasure{}
+			w.resize(st, min(max(firstSizedWindow, w.timing.MinWindow), w.timing.Window))
 		}
 		w.windows[key] = st
 	}
