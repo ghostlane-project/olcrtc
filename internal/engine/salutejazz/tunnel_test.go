@@ -2,6 +2,7 @@ package salutejazz_test
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -122,6 +123,106 @@ func TestATunnelOnASlowLegKeepsItsControlStreamUnderBulk(t *testing.T) {
 	}
 }
 
+// The leg the engine gate measured through Sber's relay on 7b78fd4a (run
+// 35862192631), where all six of S2's pulls ended on a liveness close.
+const (
+	// tunnelSlowestLeg is that leg, SFU to receiver, in bytes a second.
+	tunnelSlowestLeg = 26_000
+	// tunnelSlowProbeEvery and tunnelSlowPongTimeout are the tunnel's own
+	// liveness: on this leg the test is the gate's cell, liveness and all.
+	// A faster probe does not fit it: smux writes one record per stream in
+	// turn and the control stream is one of the seven, so on this leg it
+	// gets a record out about every 2.8 s, and both ends' pings and pongs
+	// at a probe a second queue up without end.
+	tunnelSlowProbeEvery  = control.DefaultInterval
+	tunnelSlowPongTimeout = control.DefaultTimeout
+	// tunnelSlowWatch is long enough for four probes at each end.
+	tunnelSlowWatch = 4*tunnelSlowProbeEvery + 5*time.Second
+	// tunnelSettle is how long the window gets to size itself, and the relay
+	// to deliver what went before, before the watch starts.
+	tunnelSettle = 15 * time.Second
+	// tunnelPulls is how many downloads run at once, as in the gate's S2.
+	tunnelPulls = 6
+)
+
+// TestSixPullsOnTheSlowestLegKeepPongsWithinTheTargetQueue is the second half
+// of olcrtc#49 end to end: the gate's S2, six pulls at once, on the 26 kB/s leg
+// the gate measured, with the tunnel's own liveness. A pong waits behind two
+// queues there. One is the relay's: a fixed window is 7.6 s of it on this leg.
+// The other is smux's: it writes one record per stream in turn, and the pong's
+// stream is one of seven, so it waits for a record from every pull, 2.8 s on
+// this leg, whatever the window does. The fixed window's pongs take over 10 s
+// here, and a leg a little slower or a few more pulls close the session on
+// liveness. The window sizes itself for the leg, so:
+//
+//   - no pong is missed and the session stays up at both ends;
+//   - once the window has settled every pong comes back within the target
+//     queue each way, two turns of smux and a second;
+//   - the leg toward the client holds well under a whole window, which is
+//     what tells this window from the fixed one;
+//   - the pulls move, nearly as fast as the leg, and what arrives is what was
+//     sent.
+func TestSixPullsOnTheSlowestLegKeepPongsWithinTheTargetQueue(t *testing.T) {
+	room := salutejazz.NewFakeRoom(t)
+	tunnel := startFakeTunnelLive(t, room, tunnelSlowProbeEvery, tunnelSlowPongTimeout)
+	room.SlowLeg(t, tunnel.serverID, tunnelSlowestLeg)
+	room.SlowLeg(t, tunnel.clientID, tunnelSlowestLeg)
+
+	source := startSource(t)
+	pulls := make([]*transfer, tunnelPulls)
+	for i := range pulls {
+		pulls[i] = startDownload(t, tunnel.socksAddr, source)
+	}
+	moved := func() int64 {
+		var total int64
+		for _, pull := range pulls {
+			total += pull.moved()
+		}
+		return total
+	}
+	eventually(t, 20*time.Second, "the pulls under way", func() bool { return moved() >= tunnelChunk })
+	time.Sleep(tunnelSettle)
+
+	watchFrom, movedFrom := time.Now(), moved()
+	peak := 0
+	for end := watchFrom.Add(tunnelSlowWatch); time.Now().Before(end); time.Sleep(100 * time.Millisecond) {
+		peak = max(peak, room.QueuedTo(tunnel.clientID))
+	}
+	watchTo, movedTo := time.Now(), moved()
+
+	tunnel.checkStillUp(t)
+	// smux writes one record per stream in turn, so a pong waits for a
+	// record from every pull, and may first wait for its own stream's ping
+	// to go the same way: two turns and its own record, on top of the
+	// window's queue.
+	record := time.Duration(salutejazz.SlowLegRecord) * time.Second / tunnelSlowestLeg
+	pongBound := 2*salutejazz.RelayTargetQueue + (2*tunnelPulls+1)*record + time.Second
+	tunnel.serverLive.check(t, "server", watchFrom, watchTo, pongBound)
+	tunnel.clientLive.check(t, "client", watchFrom, watchTo, pongBound)
+
+	rate := float64(movedTo-movedFrom) / watchTo.Sub(watchFrom).Seconds()
+	t.Logf("in %s: %d pulls moved %.1f kB/s on a %d kB/s leg; the leg to the client peaked at %d KiB",
+		tunnelSlowWatch, tunnelPulls, rate/1000, tunnelSlowestLeg/1000, peak>>10)
+	for i, pull := range pulls {
+		if bad := pull.fault(); bad != nil {
+			t.Fatalf("pull %d: %v", i, bad)
+		}
+	}
+	// A window sized down must not cost the leg: the pulls keep it nearly
+	// full.
+	if rate < tunnelSlowestLeg*3/4 {
+		t.Fatalf("the pulls moved %.1f kB/s, under three quarters of their %d kB/s leg",
+			rate/1000, tunnelSlowestLeg/1000)
+	}
+	if peak > salutejazz.RelayWindow*3/4 {
+		t.Fatalf("the leg to the client held %d KiB under settled pulls, near the whole %d KiB window: "+
+			"the window did not size itself for the leg", peak>>10, salutejazz.RelayWindow>>10)
+	}
+	if failure := room.LastError(); failure != "" {
+		t.Fatalf("fake SFU error: %s", failure)
+	}
+}
+
 // fakeTunnel is a server and a client in one fake room, paired: the client's
 // SOCKS address, both ends' identities in the room, and what their liveness
 // and sessions have reported.
@@ -143,9 +244,18 @@ type fakeTunnel struct {
 // ends.
 func startFakeTunnel(t *testing.T, room *salutejazz.FakeRoom) *fakeTunnel {
 	t.Helper()
+	return startFakeTunnelLive(t, room, tunnelProbeEvery, tunnelPongTimeout)
+}
+
+// startFakeTunnelLive is startFakeTunnel with both ends pinging every
+// probeEvery and waiting pongTimeout for a pong.
+func startFakeTunnelLive(t *testing.T, room *salutejazz.FakeRoom, probeEvery, pongTimeout time.Duration) *fakeTunnel {
+	t.Helper()
 	session.RegisterDefaults()
 	provider, engines := registerFakeRoom(t, room)
 	x := &fakeTunnel{engines: engines}
+	x.serverLive.interval, x.clientLive.interval = probeEvery, probeEvery
+	x.serverLive.timeout, x.clientLive.timeout = pongTimeout, pongTimeout
 	ctx, cancel := context.WithCancel(context.Background())
 	var running []chan error
 	t.Cleanup(func() {
@@ -270,6 +380,10 @@ func (m *madeEngines) at(i int) *salutejazz.Session {
 
 // liveness is what one end's control loops reported.
 type liveness struct {
+	// interval and timeout are how often the end pings and how long it waits
+	// for a pong: tunnelProbeEvery and tunnelPongTimeout when zero.
+	interval, timeout time.Duration
+
 	mu        sync.Mutex
 	pongs     []pong
 	missed    int
@@ -285,8 +399,8 @@ type pong struct {
 // config is the end's liveness, reporting into l.
 func (l *liveness) config() control.Config {
 	return control.Config{
-		Interval: tunnelProbeEvery,
-		Timeout:  tunnelPongTimeout,
+		Interval: l.probeEvery(),
+		Timeout:  cmp.Or(l.timeout, tunnelPongTimeout),
 		OnPong: func(h control.Health) {
 			l.mu.Lock()
 			defer l.mu.Unlock()
@@ -304,6 +418,9 @@ func (l *liveness) config() control.Config {
 		},
 	}
 }
+
+// probeEvery is how often the end pings.
+func (l *liveness) probeEvery() time.Duration { return cmp.Or(l.interval, tunnelProbeEvery) }
 
 // check fails the test unless the end missed no pong and every pong in the
 // watch (the span the arguments from and to mark) came back within bound, with
@@ -334,9 +451,9 @@ func (l *liveness) check(t *testing.T, who string, from, to time.Time, bound tim
 	if longest > bound {
 		t.Fatalf("the %s's slowest pong under bulk took %s, over the %s two windows allow", who, longest, bound)
 	}
-	if gap > bound+tunnelProbeEvery {
+	if gap > bound+l.probeEvery() {
 		t.Fatalf("the %s went %s without a pong under bulk, over the %s two windows and a probe allow",
-			who, gap.Round(time.Millisecond), bound+tunnelProbeEvery)
+			who, gap.Round(time.Millisecond), bound+l.probeEvery())
 	}
 }
 

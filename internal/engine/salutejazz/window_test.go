@@ -712,7 +712,9 @@ func TestAPeerThatLeftKeepsNoWindow(t *testing.T) {
 // dropped: a QUIC bulk flow can then no longer rebuild the queue the window
 // bounds, and the slack still lets UDP through beside a TCP pull that keeps
 // the window full. A destination whose window is off - an older build, which
-// never echoes - never has a datagram dropped by this rule.
+// never echoes - never has a datagram dropped by this rule. The window is the
+// destination's own, sized for its leg (relaywin's TargetQueue); here the leg
+// has not moved, so it is the size a window starts at.
 func TestDatagramsCountAndDropOnlyPastWPlusD(t *testing.T) {
 	const size = 1024
 	budget := relayWindow + datagramSlack
@@ -723,18 +725,19 @@ func TestDatagramsCountAndDropOnlyPastWPlusD(t *testing.T) {
 		to := client.localIdentity()
 		fake.slowLeg(to, 0)
 		gen := server.current()
+		onBudget := int(gen.win.Size(to)) + datagramSlack //nolint:gosec // a window is at most relayWindow, which fits
 
 		went := 0
-		for gen.lossyDrops.Load() == 0 && went < 2*budget/size {
+		for gen.lossyDrops.Load() == 0 && went < 2*onBudget/size {
 			if err := server.SendDatagramTo(to, taggedPayload("dgram", went, size)); err != nil {
 				t.Fatal(err)
 			}
 			went++
 		}
 		went-- // the one that was dropped
-		if least, most := budget/(size+128), budget/size+1; went < least || went > most {
+		if least, most := onBudget/(size+128), onBudget/size+1; went < least || went > most {
 			t.Fatalf("the first datagram was dropped after %d went, want between %d and %d for %d KiB",
-				went, least, most, budget>>10)
+				went, least, most, onBudget>>10)
 		}
 		for seq := range 8 {
 			if err := server.SendDatagramTo(to, taggedPayload("over", seq, size)); err != nil {
@@ -771,7 +774,7 @@ func TestDatagramsCountAndDropOnlyPastWPlusD(t *testing.T) {
 			return ok
 		})
 		if dropped := gen.lossyDrops.Load(); dropped != 9 {
-			t.Fatalf("%d datagrams dropped in all, want the 9 sent past the budget", dropped)
+			t.Fatalf("%d datagrams dropped in all, want the 9 sent past the onBudget", dropped)
 		}
 	})
 
