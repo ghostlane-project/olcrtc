@@ -30,6 +30,13 @@ const (
 	SlowLegRecord     = slowLegRecord
 )
 
+// RelayHorizon and RelayMinWindow size a window for its leg
+// (window_budget_test.go, tunnel_test.go).
+const (
+	RelayHorizon   = relayHorizon
+	RelayMinWindow = relayMinWindow
+)
+
 // FakeRoom is the fake SFU (fakeconnector_test.go) and the one room on it the
 // tunnel test joins.
 type FakeRoom struct {

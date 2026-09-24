@@ -57,6 +57,36 @@ func TestTwoWindowsAndARoundTripFitThePongTimeout(t *testing.T) {
 	}
 }
 
+// TestASizedWindowKeepsAPongInsideTheTimeoutOnTheSlowestLeg is the guarantee
+// the sizing gives on a leg slower than the one relayWindow was weighed
+// against: the engine gate on 7b78fd4a measured 26 kB/s from the SFU to the
+// receiver (run 35862192631), where two whole windows are 15 s. A sized
+// window lets relayHorizon of the leg's best recent rate be in flight, and a
+// record past it, never less than its floor; two of those and a round trip
+// have to fit the pong timeout with a second to spare.
+func TestASizedWindowKeepsAPongInsideTheTimeoutOnTheSlowestLeg(t *testing.T) {
+	const (
+		slowestLeg = 26_000 // bytes a second
+		roundTrip  = 500 * time.Millisecond
+		spare      = time.Second
+	)
+	queue := max(salutejazz.RelayHorizon+legTime(salutejazz.SlowLegRecord, slowestLeg),
+		legTime(salutejazz.RelayMinWindow, slowestLeg))
+	late := 2*queue + roundTrip
+	if limit := control.DefaultTimeout - spare; late > limit {
+		t.Fatalf("a pong behind two sized windows on a %d kB/s leg comes back after %s, "+
+			"over the %s a %s pong timeout leaves", slowestLeg/1000,
+			late.Round(time.Millisecond), limit, control.DefaultTimeout)
+	}
+	// And it is what the sizing is for: the fixed window on this leg does not
+	// fit.
+	if fixed := legTime(2*salutejazz.RelayWindow, slowestLeg) + roundTrip; fixed <= control.DefaultTimeout-spare {
+		t.Fatalf("two fixed %d KiB windows on a %d kB/s leg come back after %s, inside the timeout: "+
+			"the leg is not the one the sizing is weighed on", salutejazz.RelayWindow>>10, slowestLeg/1000,
+			fixed.Round(time.Millisecond))
+	}
+}
+
 // TestTheWindowFitsUnderTheLanesMark: the lane's high-water mark is what the
 // publisher channel may hold for every destination at once, and the window
 // what one destination may have in flight. A window over the mark would let

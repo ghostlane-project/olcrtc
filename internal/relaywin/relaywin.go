@@ -59,6 +59,30 @@
 // parked per client wakes the one an echo made room for, not all of them on
 // every echo from any of them.
 //
+// A carrier that sets Timing.Horizon has each window sized for its leg
+// instead of held at Window: a fixed window is seconds of queue on a slow leg,
+// and a pong waits behind all of it. Once a second while a sender is held on
+// it, the window measures the rate its destination took bytes off the relay,
+// and keeps the best of the last rateSamples of those. It starts at
+// firstSizedWindow, and its size is then
+//
+//	best recent rate × Horizon
+//
+// no less than MinWindow and no more than Window: Horizon of the leg in
+// flight, whatever the leg. A sender that is never held sends less than the
+// leg takes, and its rate says nothing about the leg, so the size stays.
+//
+// The best rate, not the last one, and no round trip: through Sber's relay a
+// receiver is handed its queue in bursts, seconds apart. A window sized by the
+// last second's rate and the shortest echo it ever saw shrinks below what the
+// leg needs in flight to stay busy, and the rate it measures then is its own,
+// which shrinks it again, to MinWindow (a 60 kB/s leg moved 16 kB/s that way).
+// Sized by the best rate a leg has shown, a window only shrinks when the leg
+// does, and a burst or a lull costs nothing; Horizon has to be longer than
+// the delay a relay adds of its own, or the window measures itself. Marks
+// follow the size. Nothing on the wire changes: the size is the sender's own,
+// so a peer on any build is sent to as before.
+//
 // Jitsi keeps its own copy of the mechanism, where it was proved
 // (internal/engine/jitsi/relaywindow.go); this is that mechanism without a
 // wire, for the carriers that came after it.
@@ -100,6 +124,27 @@ const (
 	// keeps a sender's view within an eighth of the truth for one small frame
 	// a mark.
 	markDivisor = 8
+
+	// DefaultMinWindow is the least a window sized for its leg shrinks to
+	// when the Timing names no MinWindow: at the 26 kB/s the gate has
+	// measured through Sber's relay it is well under a second of queue, and
+	// it still keeps a slower leg moving.
+	DefaultMinWindow = 16 << 10
+	// minMarkEvery: a window sized down still marks at least this far apart,
+	// so a small window does not spend its leg on marks.
+	minMarkEvery = 2 << 10
+	// rateInterval is how long a sized window measures the rate its
+	// destination takes bytes at before it sizes itself again, and
+	// rateSamples how many of those rates it keeps the best of: a lull of a
+	// few seconds does not shrink a window, a leg slower for ten does.
+	rateInterval = time.Second
+	rateSamples  = 10
+	// firstSizedWindow is where a sized window starts, before it has
+	// measured its leg: what a new window hands the relay at once is queued
+	// there however slow the leg, 7.6 s of it at the cap on a 26 kB/s leg,
+	// and a pong behind it. A leg that carries it in less than Horizon grows
+	// it within a rateInterval or two.
+	firstSizedWindow = 64 << 10
 )
 
 // Timing sizes a Windows. A field left zero takes its default: the Default
@@ -114,6 +159,14 @@ type Timing struct {
 	ProbeAfter time.Duration
 	DeadAfter  time.Duration
 	Retry      time.Duration
+	// Horizon, when set, sizes each destination's window for its leg (see
+	// the package comment): how much of the leg's time a window lets be in
+	// flight, at the best rate the leg has shown lately. Zero keeps every
+	// window at Window.
+	Horizon time.Duration
+	// MinWindow is the least a sized window shrinks to: DefaultMinWindow
+	// when Horizon is set and this is zero, and never more than Window.
+	MinWindow uint64
 }
 
 func (t Timing) withDefaults() Timing {
@@ -131,6 +184,12 @@ func (t Timing) withDefaults() Timing {
 	}
 	if t.Retry <= 0 {
 		t.Retry = DefaultRetry
+	}
+	if t.Horizon > 0 {
+		if t.MinWindow == 0 {
+			t.MinWindow = DefaultMinWindow
+		}
+		t.MinWindow = min(t.MinWindow, t.Window)
 	}
 	return t
 }
@@ -153,6 +212,29 @@ type state struct {
 	// by an echo that moves it and by Bump, left closed by Reset and
 	// ResetAll, which drop the window with it.
 	wake chan struct{}
+
+	// size is the window now: Window, or what its leg sized it to
+	// (Timing.Horizon). markEvery is how many bytes go between two marks at
+	// that size.
+	size      uint64
+	markEvery uint64
+	// leg is what a sized window measures of its leg, nil when the window
+	// is not sized.
+	leg *legMeasure
+}
+
+// legMeasure is what a sized window measures of its leg.
+type legMeasure struct {
+	// rateSince and rateFrom start the interval the destination's rate is
+	// measured over: when, and the count echoed then. held says a sender was
+	// held on the window during it.
+	rateSince time.Time
+	rateFrom  uint64
+	held      bool
+	// rates are the last rateSamples rates measured with a sender held, in
+	// bytes a second, next the slot the next one takes.
+	rates [rateSamples]float64
+	next  int
 }
 
 // Windows is the window toward every destination of one sender, keyed by
@@ -192,11 +274,14 @@ func (w *Windows) Room(key string, now time.Time) (bool, bool, uint64) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	st := w.windows[key]
-	if st == nil || !st.active || st.sent-st.echoed < w.timing.Window {
+	if st == nil || !st.active || st.sent-st.echoed < st.size {
 		if st != nil {
 			st.heldSince, st.waitingSince = time.Time{}, time.Time{}
 		}
 		return true, false, 0
+	}
+	if st.leg != nil {
+		st.leg.held = true
 	}
 	if st.heldSince.IsZero() {
 		st.heldSince = now
@@ -233,7 +318,7 @@ func (w *Windows) Sent(key string, n int, now time.Time) (bool, uint64) {
 	add := uint64(max(n, 0))
 	st.sent += add
 	w.count += add
-	due := st.sent-st.marked >= w.timing.MarkEvery ||
+	due := st.sent-st.marked >= st.markEvery ||
 		(!st.active && now.Sub(st.markedAt) >= w.timing.ProbeAfter)
 	if !due {
 		return false, 0
@@ -242,12 +327,21 @@ func (w *Windows) Sent(key string, n int, now time.Time) (bool, uint64) {
 	return true, st.sent
 }
 
-// ApplyEcho takes the destination's echo of counter. It moves key's window
-// only past the last echo and within what was sent, and reports whether it
-// moved and whether that turned the window on. A window that moved wakes
-// every sender parked on it. The caller has checked that the echo came from
-// the destination key names: anyone who can see a count can send it back.
+// ApplyEcho takes the destination's echo of counter without a clock: it moves
+// the window as ApplyEchoAt does and gives a sized window no measurement.
 func (w *Windows) ApplyEcho(key string, counter uint64) (bool, bool) {
+	return w.ApplyEchoAt(key, counter, time.Time{})
+}
+
+// ApplyEchoAt takes the destination's echo of counter, come back at now. It
+// moves key's window only past the last echo and within what was sent, and
+// reports whether it moved and whether that turned the window on. A window
+// that moved wakes every sender parked on it. A sized window also counts the
+// echo into its rate and, once a rateInterval has passed, sizes itself again;
+// a zero now gives it no measurement. The caller has checked that the
+// echo came from the destination key names: anyone who can see a count can
+// send it back.
+func (w *Windows) ApplyEchoAt(key string, counter uint64, now time.Time) (bool, bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	st := w.windows[key]
@@ -258,8 +352,23 @@ func (w *Windows) ApplyEcho(key string, counter uint64) (bool, bool) {
 	st.active = true
 	st.echoed = counter
 	st.heldSince = time.Time{}
+	if st.leg != nil && !now.IsZero() {
+		w.measure(st, counter, now)
+	}
 	st.wakeSenders()
 	return true, turnedOn
+}
+
+// Size is the window toward key now: Window, or for a sized window its first
+// size until its leg has sized it; Window for a key with no window open. It
+// only looks.
+func (w *Windows) Size(key string) uint64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if st := w.windows[key]; st != nil {
+		return st.size
+	}
+	return w.timing.Window
 }
 
 // Arm turns key's window on without an echo, opening it if there is none:
@@ -350,9 +459,9 @@ func (w *Windows) Over(key string, slack uint64, now time.Time) bool {
 	if !st.waitingSince.IsZero() && now.Sub(st.waitingSince) >= w.timing.ProbeAfter {
 		return true
 	}
-	// Compared past the Window, so no slack can wrap the sum.
+	// Compared past the window, so no slack can wrap the sum.
 	inFlight := st.sent - st.echoed
-	return inFlight > w.timing.Window && inFlight-w.timing.Window > slack
+	return inFlight > st.size && inFlight-st.size > slack
 }
 
 // Wake is the channel closed the next time a sender held on key's window may
@@ -385,10 +494,51 @@ func (w *Windows) open(key string) *state {
 			sent: w.count, marked: w.count, echoed: w.count,
 			epoch: w.nextEpoch(),
 			wake:  make(chan struct{}),
+			size:  w.timing.Window, markEvery: w.timing.MarkEvery,
+		}
+		if w.timing.Horizon > 0 {
+			st.leg = &legMeasure{}
+			w.resize(st, min(max(firstSizedWindow, w.timing.MinWindow), w.timing.Window))
 		}
 		w.windows[key] = st
 	}
 	return st
+}
+
+// measure takes an echo of counter, come back at now, into a sized window's
+// rate and, once a rateInterval has passed, sizes the window again from the
+// best rate its leg has shown in the last rateSamples intervals. An interval
+// in which no sender was held says nothing about the leg and is not kept.
+// Called with mu held.
+func (w *Windows) measure(st *state, counter uint64, now time.Time) {
+	leg := st.leg
+	if leg.rateSince.IsZero() {
+		leg.rateSince, leg.rateFrom, leg.held = now, counter, false
+		return
+	}
+	elapsed := now.Sub(leg.rateSince)
+	if elapsed < rateInterval {
+		return
+	}
+	if leg.held {
+		leg.rates[leg.next] = float64(counter-leg.rateFrom) / elapsed.Seconds()
+		leg.next = (leg.next + 1) % rateSamples
+		best := 0.0
+		for _, rate := range leg.rates {
+			best = max(best, rate)
+		}
+		want := uint64(best * w.timing.Horizon.Seconds())
+		w.resize(st, min(max(want, w.timing.MinWindow), w.timing.Window))
+	}
+	leg.rateSince, leg.rateFrom, leg.held = now, counter, false
+}
+
+// resize gives a window a new size and marks it in proportion: at Window it
+// marks every MarkEvery, as an unsized window does, and a smaller one no
+// closer than minMarkEvery. Called with mu held.
+func (w *Windows) resize(st *state, size uint64) {
+	st.size = size
+	st.markEvery = max(size*w.timing.MarkEvery/w.timing.Window, min(minMarkEvery, w.timing.MarkEvery))
 }
 
 // nextEpoch hands out an epoch no window has had. Called with mu held.

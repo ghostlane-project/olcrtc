@@ -20,9 +20,12 @@ import (
 // measures the first hop, which the SFU never lets fill.
 //
 // So every send on the reliable lane counts against a window toward its
-// destination (internal/relaywin): a sender may have handed the SFU at most
-// relayWindow bytes for one destination that the destination has not echoed,
-// and waits while it has. Which destination a send counts against:
+// destination (internal/relaywin): a sender may have handed the SFU at most a
+// window of bytes for one destination that the destination has not echoed,
+// and waits while it has. The window is sized for the destination's leg:
+// relayWindow on a leg fast enough, less on a slower one, so that what queues
+// ahead of a pong is about relayHorizon of the leg whatever the leg
+// (relaywin's Horizon). Which destination a send counts against:
 //
 //   - a payload addressed to one participant, that participant: the server's
 //     reply to a client, keyed by the identity the SFU stamps on the client's
@@ -80,7 +83,8 @@ const (
 	// length is read as one.
 	windowFrameLen = 1 + 1 + 8 + 4
 
-	// relayWindow is what may be in flight to one destination: 192 KiB. A
+	// relayWindow is the most that may be in flight to one destination,
+	// where the leg is fast enough to carry it (relayHorizon): 192 KiB. A
 	// control ping waits behind up to a window one way and its pong behind
 	// up to a window the other, and on the slowest SFU-to-receiver leg the
 	// gate has measured, 34 kB/s, two windows and a round trip have to fit
@@ -91,6 +95,17 @@ const (
 	// relayMarkEvery keeps a sender's view of a window within an eighth of
 	// it.
 	relayMarkEvery = relayWindow / 8
+	// relayHorizon sizes each window for its leg (relaywin's Horizon): 3 s
+	// of the best rate the leg has shown lately may be in flight, so on a
+	// leg slower than the 34 kB/s relayWindow was weighed against - the gate
+	// has since measured 26 - a pong waits about that, not a whole window. A
+	// leg fast enough to carry relayWindow in that time keeps relayWindow.
+	// It has to be longer than what Sber's relay holds a leg's bytes for of
+	// its own - echoes on the #49 branch's gate came back 0.3 to 6 s after
+	// their marks - or a window measures only itself. relayMinWindow is the
+	// least a window shrinks to.
+	relayHorizon   = 3 * time.Second
+	relayMinWindow = relaywin.DefaultMinWindow
 	// relayProbeAfter: a sender held this long since its last mark marks
 	// again, which repairs a lost mark or echo, and a destination that has
 	// not echoed yet is marked at least this often.
@@ -129,6 +144,8 @@ func defaultRelayTiming() relaywin.Timing {
 		ProbeAfter: relayProbeAfter,
 		DeadAfter:  relayDeadAfter,
 		Retry:      relayRetry,
+		Horizon:    relayHorizon,
+		MinWindow:  relayMinWindow,
 	}
 }
 
@@ -353,8 +370,9 @@ func (s *Session) handleWindowFrame(gen *generation, from string, byIdentity boo
 	case windowMark:
 		s.sendWindowFrame(gen, from, windowEcho, frame.counter)
 	case windowEcho:
-		if moved, turnedOn := gen.win.ApplyEcho(from, frame.counter); moved {
-			gen.noteEcho(from, frame.counter, turnedOn, time.Now())
+		now := time.Now()
+		if moved, turnedOn := gen.win.ApplyEchoAt(from, frame.counter, now); moved {
+			gen.noteEcho(from, frame.counter, turnedOn, now)
 		}
 	}
 }
@@ -456,8 +474,10 @@ func (g *generation) noteMark(key string, counter uint64, now time.Time) {
 // noteEcho takes an echo that moved key's window to counter into what the
 // debug log reports: the round trip of the mark it answers and, every
 // windowReportEvery, the rate the destination has taken bytes off the relay
-// at. That rate is the leg's, which is what a red gate cell is judged by.
+// at and the size the window has taken for it. That rate is the leg's, which
+// is what a red gate cell is judged by.
 func (g *generation) noteEcho(key string, counter uint64, turnedOn bool, now time.Time) {
+	size := g.win.Size(key)
 	g.relayMu.Lock()
 	defer g.relayMu.Unlock()
 	peer := g.relayPeerLocked(key)
@@ -479,8 +499,8 @@ func (g *generation) noteEcho(key string, counter uint64, turnedOn bool, now tim
 	peer.delivered += counter - peer.echoed
 	peer.echoed = counter
 	if elapsed := now.Sub(peer.since); elapsed >= windowReportEvery {
-		logger.Debugf("salutejazz: relay window to peer %d: %.1f kB/s delivered, echo rtt %s",
-			peer.ordinal, float64(peer.delivered)/elapsed.Seconds()/1000, peer.rtt.Round(time.Millisecond))
+		logger.Debugf("salutejazz: relay window to peer %d: %.1f kB/s delivered, echo rtt %s, window %d KiB",
+			peer.ordinal, float64(peer.delivered)/elapsed.Seconds()/1000, peer.rtt.Round(time.Millisecond), size>>10)
 		peer.since, peer.delivered = now, 0
 	}
 }
