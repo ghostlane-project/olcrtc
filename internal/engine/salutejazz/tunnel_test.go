@@ -145,7 +145,7 @@ const (
 	tunnelPulls = 6
 )
 
-// TestSixPullsOnTheSlowestLegKeepPongsWithinTheTargetQueue is the second half
+// TestSixPullsOnTheSlowestLegKeepTheirPongs is the second half
 // of olcrtc#49 end to end: the gate's S2, six pulls at once, on the 26 kB/s leg
 // the gate measured, with the tunnel's own liveness. A pong waits behind two
 // queues there. One is the relay's: a fixed window is 7.6 s of it on this leg.
@@ -156,13 +156,13 @@ const (
 // liveness. The window sizes itself for the leg, so:
 //
 //   - no pong is missed and the session stays up at both ends;
-//   - once the window has settled every pong comes back within the target
-//     queue each way, two turns of smux and a second;
+//   - once the window has settled every pong comes back within the window's
+//     queue on the way back, two turns of smux and a second;
 //   - the leg toward the client holds well under a whole window, which is
 //     what tells this window from the fixed one;
 //   - the pulls move, nearly as fast as the leg, and what arrives is what was
 //     sent.
-func TestSixPullsOnTheSlowestLegKeepPongsWithinTheTargetQueue(t *testing.T) {
+func TestSixPullsOnTheSlowestLegKeepTheirPongs(t *testing.T) {
 	room := salutejazz.NewFakeRoom(t)
 	tunnel := startFakeTunnelLive(t, room, tunnelSlowProbeEvery, tunnelSlowPongTimeout)
 	room.SlowLeg(t, tunnel.serverID, tunnelSlowestLeg)
@@ -191,12 +191,13 @@ func TestSixPullsOnTheSlowestLegKeepPongsWithinTheTargetQueue(t *testing.T) {
 	watchTo, movedTo := time.Now(), moved()
 
 	tunnel.checkStillUp(t)
-	// smux writes one record per stream in turn, so a pong waits for a
-	// record from every pull, and may first wait for its own stream's ping
-	// to go the same way: two turns and its own record, on top of the
-	// window's queue.
+	// The pulls load only the way back, so a pong waits behind one window's
+	// queue, relayHorizon of the leg. smux writes one record per stream in
+	// turn, so it also waits for a record from every pull, and may first wait
+	// for its own stream's ping to go the same way: two turns and its own
+	// record.
 	record := time.Duration(salutejazz.SlowLegRecord) * time.Second / tunnelSlowestLeg
-	pongBound := 2*salutejazz.RelayTargetQueue + (2*tunnelPulls+1)*record + time.Second
+	pongBound := salutejazz.RelayHorizon + (2*tunnelPulls+1)*record + time.Second
 	tunnel.serverLive.check(t, "server", watchFrom, watchTo, pongBound)
 	tunnel.clientLive.check(t, "client", watchFrom, watchTo, pongBound)
 

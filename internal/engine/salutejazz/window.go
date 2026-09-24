@@ -24,8 +24,8 @@ import (
 // window of bytes for one destination that the destination has not echoed,
 // and waits while it has. The window is sized for the destination's leg:
 // relayWindow on a leg fast enough, less on a slower one, so that what queues
-// ahead of a pong is about relayTargetQueue whatever the leg (relaywin's
-// TargetQueue). Which destination a send counts against:
+// ahead of a pong is about relayHorizon of the leg whatever the leg
+// (relaywin's Horizon). Which destination a send counts against:
 //
 //   - a payload addressed to one participant, that participant: the server's
 //     reply to a client, keyed by the identity the SFU stamps on the client's
@@ -84,7 +84,7 @@ const (
 	windowFrameLen = 1 + 1 + 8 + 4
 
 	// relayWindow is the most that may be in flight to one destination,
-	// where the leg is fast enough to carry it (relayTargetQueue): 192 KiB. A
+	// where the leg is fast enough to carry it (relayHorizon): 192 KiB. A
 	// control ping waits behind up to a window one way and its pong behind
 	// up to a window the other, and on the slowest SFU-to-receiver leg the
 	// gate has measured, 34 kB/s, two windows and a round trip have to fit
@@ -95,15 +95,17 @@ const (
 	// relayMarkEvery keeps a sender's view of a window within an eighth of
 	// it.
 	relayMarkEvery = relayWindow / 8
-	// relayTargetQueue sizes each window for its leg (relaywin's
-	// TargetQueue): what the leg carries in a round trip and this much queue
-	// on top, so on a leg slower than the 34 kB/s relayWindow was weighed
-	// against - the gate has since measured 26 - a pong still waits seconds,
-	// not a whole window. A leg fast enough to carry relayWindow in that
-	// time keeps relayWindow. relayMinWindow is the least a window shrinks
-	// to.
-	relayTargetQueue = 1500 * time.Millisecond
-	relayMinWindow   = relaywin.DefaultMinWindow
+	// relayHorizon sizes each window for its leg (relaywin's Horizon): 3 s
+	// of the best rate the leg has shown lately may be in flight, so on a
+	// leg slower than the 34 kB/s relayWindow was weighed against - the gate
+	// has since measured 26 - a pong waits about that, not a whole window. A
+	// leg fast enough to carry relayWindow in that time keeps relayWindow.
+	// It has to be longer than what Sber's relay holds a leg's bytes for of
+	// its own - echoes on the #49 branch's gate came back 0.3 to 6 s after
+	// their marks - or a window measures only itself. relayMinWindow is the
+	// least a window shrinks to.
+	relayHorizon   = 3 * time.Second
+	relayMinWindow = relaywin.DefaultMinWindow
 	// relayProbeAfter: a sender held this long since its last mark marks
 	// again, which repairs a lost mark or echo, and a destination that has
 	// not echoed yet is marked at least this often.
@@ -137,13 +139,13 @@ const (
 // through Session.relayTiming.
 func defaultRelayTiming() relaywin.Timing {
 	return relaywin.Timing{
-		Window:      relayWindow,
-		MarkEvery:   relayMarkEvery,
-		ProbeAfter:  relayProbeAfter,
-		DeadAfter:   relayDeadAfter,
-		Retry:       relayRetry,
-		TargetQueue: relayTargetQueue,
-		MinWindow:   relayMinWindow,
+		Window:     relayWindow,
+		MarkEvery:  relayMarkEvery,
+		ProbeAfter: relayProbeAfter,
+		DeadAfter:  relayDeadAfter,
+		Retry:      relayRetry,
+		Horizon:    relayHorizon,
+		MinWindow:  relayMinWindow,
 	}
 }
 

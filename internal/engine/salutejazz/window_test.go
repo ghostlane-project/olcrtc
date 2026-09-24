@@ -713,7 +713,7 @@ func TestAPeerThatLeftKeepsNoWindow(t *testing.T) {
 // bounds, and the slack still lets UDP through beside a TCP pull that keeps
 // the window full. A destination whose window is off - an older build, which
 // never echoes - never has a datagram dropped by this rule. The window is the
-// destination's own, sized for its leg (relaywin's TargetQueue); here the leg
+// destination's own, sized for its leg (relaywin's Horizon); here the leg
 // has not moved, so it is the size a window starts at.
 func TestDatagramsCountAndDropOnlyPastWPlusD(t *testing.T) {
 	const size = 1024

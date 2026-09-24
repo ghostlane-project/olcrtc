@@ -61,17 +61,16 @@ func TestTwoWindowsAndARoundTripFitThePongTimeout(t *testing.T) {
 // the sizing gives on a leg slower than the one relayWindow was weighed
 // against: the engine gate on 7b78fd4a measured 26 kB/s from the SFU to the
 // receiver (run 35862192631), where two whole windows are 15 s. A sized
-// window queues what the leg carries in a round trip and the target queue,
-// plus the first mark's own interval its shortest round trip still holds,
-// and never less than its floor; two of those and a round trip have to fit
-// the pong timeout with a second to spare.
+// window lets relayHorizon of the leg's best recent rate be in flight, and a
+// record past it, never less than its floor; two of those and a round trip
+// have to fit the pong timeout with a second to spare.
 func TestASizedWindowKeepsAPongInsideTheTimeoutOnTheSlowestLeg(t *testing.T) {
 	const (
 		slowestLeg = 26_000 // bytes a second
 		roundTrip  = 500 * time.Millisecond
 		spare      = time.Second
 	)
-	queue := max(salutejazz.RelayTargetQueue+roundTrip+legTime(salutejazz.RelayMarkEvery, slowestLeg),
+	queue := max(salutejazz.RelayHorizon+legTime(salutejazz.SlowLegRecord, slowestLeg),
 		legTime(salutejazz.RelayMinWindow, slowestLeg))
 	late := 2*queue + roundTrip
 	if limit := control.DefaultTimeout - spare; late > limit {

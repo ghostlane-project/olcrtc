@@ -59,24 +59,29 @@
 // parked per client wakes the one an echo made room for, not all of them on
 // every echo from any of them.
 //
-// A carrier that sets Timing.TargetQueue has each window sized for its leg
+// A carrier that sets Timing.Horizon has each window sized for its leg
 // instead of held at Window: a fixed window is seconds of queue on a slow leg,
-// and a pong waits behind all of it. The window times each echo against the
-// mark it answers and, once a second while a sender is held on it, measures
-// the rate its destination takes bytes off the relay. It starts at
+// and a pong waits behind all of it. Once a second while a sender is held on
+// it, the window measures the rate its destination took bytes off the relay,
+// and keeps the best of the last rateSamples of those. It starts at
 // firstSizedWindow, and its size is then
 //
-//	rate × (shortest echo round trip + TargetQueue)
+//	best recent rate × Horizon
 //
-// no less than MinWindow and no more than Window: what the leg carries in a
-// round trip, and TargetQueue of queue on top. A sender that is never held
-// sends less than the leg takes, and its rate says nothing about the leg, so
-// the size stays. The shortest round trip only goes down, until a Reset; on a
-// leg whose queue never empties it still holds the first mark's own interval,
-// so the queue settles somewhat above TargetQueue, never above what that one
-// interval adds. Marks follow the size, so a small window still has several
-// echoes in flight to time. Nothing on the wire changes: the size is the
-// sender's own, so a peer on any build is sent to as before.
+// no less than MinWindow and no more than Window: Horizon of the leg in
+// flight, whatever the leg. A sender that is never held sends less than the
+// leg takes, and its rate says nothing about the leg, so the size stays.
+//
+// The best rate, not the last one, and no round trip: through Sber's relay a
+// receiver is handed its queue in bursts, seconds apart. A window sized by the
+// last second's rate and the shortest echo it ever saw shrinks below what the
+// leg needs in flight to stay busy, and the rate it measures then is its own,
+// which shrinks it again, to MinWindow (a 60 kB/s leg moved 16 kB/s that way).
+// Sized by the best rate a leg has shown, a window only shrinks when the leg
+// does, and a burst or a lull costs nothing; Horizon has to be longer than
+// the delay a relay adds of its own, or the window measures itself. Marks
+// follow the size. Nothing on the wire changes: the size is the sender's own,
+// so a peer on any build is sent to as before.
 //
 // Jitsi keeps its own copy of the mechanism, where it was proved
 // (internal/engine/jitsi/relaywindow.go); this is that mechanism without a
@@ -129,17 +134,16 @@ const (
 	// so a small window does not spend its leg on marks.
 	minMarkEvery = 2 << 10
 	// rateInterval is how long a sized window measures the rate its
-	// destination takes bytes at before it sizes itself again.
+	// destination takes bytes at before it sizes itself again, and
+	// rateSamples how many of those rates it keeps the best of: a lull of a
+	// few seconds does not shrink a window, a leg slower for ten does.
 	rateInterval = time.Second
-	// stampsKept is how many marks in flight a sized window keeps the send
-	// time of: a destination that never echoes does not grow the list.
-	stampsKept = 64
+	rateSamples  = 10
 	// firstSizedWindow is where a sized window starts, before it has
 	// measured its leg: what a new window hands the relay at once is queued
 	// there however slow the leg, 7.6 s of it at the cap on a 26 kB/s leg,
-	// and a pong behind it. A fast leg grows a window this size to the cap
-	// within one rateInterval, by (shortest round trip + TargetQueue) over
-	// the round trip it measures.
+	// and a pong behind it. A leg that carries it in less than Horizon grows
+	// it within a rateInterval or two.
 	firstSizedWindow = 64 << 10
 )
 
@@ -155,12 +159,13 @@ type Timing struct {
 	ProbeAfter time.Duration
 	DeadAfter  time.Duration
 	Retry      time.Duration
-	// TargetQueue, when set, sizes each destination's window for its leg
-	// (see the package comment): the queue a window keeps on purpose on a
-	// leg it fills. Zero keeps every window at Window.
-	TargetQueue time.Duration
+	// Horizon, when set, sizes each destination's window for its leg (see
+	// the package comment): how much of the leg's time a window lets be in
+	// flight, at the best rate the leg has shown lately. Zero keeps every
+	// window at Window.
+	Horizon time.Duration
 	// MinWindow is the least a sized window shrinks to: DefaultMinWindow
-	// when TargetQueue is set and this is zero, and never more than Window.
+	// when Horizon is set and this is zero, and never more than Window.
 	MinWindow uint64
 }
 
@@ -180,7 +185,7 @@ func (t Timing) withDefaults() Timing {
 	if t.Retry <= 0 {
 		t.Retry = DefaultRetry
 	}
-	if t.TargetQueue > 0 {
+	if t.Horizon > 0 {
 		if t.MinWindow == 0 {
 			t.MinWindow = DefaultMinWindow
 		}
@@ -209,8 +214,8 @@ type state struct {
 	wake chan struct{}
 
 	// size is the window now: Window, or what its leg sized it to
-	// (Timing.TargetQueue). markEvery is how many bytes go between two
-	// marks at that size.
+	// (Timing.Horizon). markEvery is how many bytes go between two marks at
+	// that size.
 	size      uint64
 	markEvery uint64
 	// leg is what a sized window measures of its leg, nil when the window
@@ -220,23 +225,16 @@ type state struct {
 
 // legMeasure is what a sized window measures of its leg.
 type legMeasure struct {
-	// stamps is the send time of each mark in flight, oldest first, which
-	// an echo is timed against; minRTT is the shortest echo round trip the
-	// window has seen.
-	stamps []stamp
-	minRTT time.Duration
 	// rateSince and rateFrom start the interval the destination's rate is
 	// measured over: when, and the count echoed then. held says a sender was
 	// held on the window during it.
 	rateSince time.Time
 	rateFrom  uint64
 	held      bool
-}
-
-// stamp is when the mark of a count went out.
-type stamp struct {
-	counter uint64
-	at      time.Time
+	// rates are the last rateSamples rates measured with a sender held, in
+	// bytes a second, next the slot the next one takes.
+	rates [rateSamples]float64
+	next  int
 }
 
 // Windows is the window toward every destination of one sender, keyed by
@@ -302,7 +300,6 @@ func (w *Windows) Room(key string, now time.Time) (bool, bool, uint64) {
 	}
 	if now.Sub(st.markedAt) >= w.timing.ProbeAfter {
 		st.marked, st.markedAt = st.sent, now
-		w.stamp(st, st.sent, now)
 		return false, true, st.sent
 	}
 	return false, false, 0
@@ -327,7 +324,6 @@ func (w *Windows) Sent(key string, n int, now time.Time) (bool, uint64) {
 		return false, 0
 	}
 	st.marked, st.markedAt = st.sent, now
-	w.stamp(st, st.sent, now)
 	return true, st.sent
 }
 
@@ -340,9 +336,9 @@ func (w *Windows) ApplyEcho(key string, counter uint64) (bool, bool) {
 // ApplyEchoAt takes the destination's echo of counter, come back at now. It
 // moves key's window only past the last echo and within what was sent, and
 // reports whether it moved and whether that turned the window on. A window
-// that moved wakes every sender parked on it. A sized window also times the
-// echo against its mark and, once a rateInterval has passed, sizes itself
-// again; a zero now gives it no measurement. The caller has checked that the
+// that moved wakes every sender parked on it. A sized window also counts the
+// echo into its rate and, once a rateInterval has passed, sizes itself again;
+// a zero now gives it no measurement. The caller has checked that the
 // echo came from the destination key names: anyone who can see a count can
 // send it back.
 func (w *Windows) ApplyEchoAt(key string, counter uint64, now time.Time) (bool, bool) {
@@ -500,7 +496,7 @@ func (w *Windows) open(key string) *state {
 			wake:  make(chan struct{}),
 			size:  w.timing.Window, markEvery: w.timing.MarkEvery,
 		}
-		if w.timing.TargetQueue > 0 {
+		if w.timing.Horizon > 0 {
 			st.leg = &legMeasure{}
 			w.resize(st, min(max(firstSizedWindow, w.timing.MinWindow), w.timing.Window))
 		}
@@ -509,36 +505,13 @@ func (w *Windows) open(key string) *state {
 	return st
 }
 
-// stamp keeps the send time of the mark of counter, for the echo that
-// answers it, when the window is sized. Called with mu held.
-func (w *Windows) stamp(st *state, counter uint64, now time.Time) {
-	leg := st.leg
-	if leg == nil {
-		return
-	}
-	if len(leg.stamps) >= stampsKept {
-		leg.stamps = leg.stamps[1:]
-	}
-	leg.stamps = append(leg.stamps, stamp{counter: counter, at: now})
-}
-
-// measure takes an echo of counter, come back at now, into a sized window:
-// the round trip of the mark it answers and, once a rateInterval has passed,
-// the rate the destination took bytes off the relay at. The window sizes
-// itself again only if a sender was held on it in that interval: a sender
-// that was not sent less than the leg takes. Called with mu held.
+// measure takes an echo of counter, come back at now, into a sized window's
+// rate and, once a rateInterval has passed, sizes the window again from the
+// best rate its leg has shown in the last rateSamples intervals. An interval
+// in which no sender was held says nothing about the leg and is not kept.
+// Called with mu held.
 func (w *Windows) measure(st *state, counter uint64, now time.Time) {
 	leg := st.leg
-	answered := 0
-	for answered < len(leg.stamps) && leg.stamps[answered].counter <= counter {
-		if s := leg.stamps[answered]; s.counter == counter {
-			if rtt := now.Sub(s.at); rtt > 0 && (leg.minRTT == 0 || rtt < leg.minRTT) {
-				leg.minRTT = rtt
-			}
-		}
-		answered++
-	}
-	leg.stamps = leg.stamps[answered:]
 	if leg.rateSince.IsZero() {
 		leg.rateSince, leg.rateFrom, leg.held = now, counter, false
 		return
@@ -547,9 +520,14 @@ func (w *Windows) measure(st *state, counter uint64, now time.Time) {
 	if elapsed < rateInterval {
 		return
 	}
-	if leg.held && leg.minRTT > 0 {
-		rate := float64(counter-leg.rateFrom) / elapsed.Seconds()
-		want := uint64(rate * (leg.minRTT + w.timing.TargetQueue).Seconds())
+	if leg.held {
+		leg.rates[leg.next] = float64(counter-leg.rateFrom) / elapsed.Seconds()
+		leg.next = (leg.next + 1) % rateSamples
+		best := 0.0
+		for _, rate := range leg.rates {
+			best = max(best, rate)
+		}
+		want := uint64(best * w.timing.Horizon.Seconds())
 		w.resize(st, min(max(want, w.timing.MinWindow), w.timing.Window))
 	}
 	leg.rateSince, leg.rateFrom, leg.held = now, counter, false

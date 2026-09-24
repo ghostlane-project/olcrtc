@@ -8,7 +8,7 @@ import (
 // ai-generated: the whole file (a window sized for its leg, olcrtc#49).
 
 // sized is the Timing SaluteJazz sizes its windows with.
-var sized = Timing{TargetQueue: 1500 * time.Millisecond}
+var sized = Timing{Horizon: 3 * time.Second}
 
 // leg is a relay and the destination behind it, on the fake clock: what a
 // sender hands the relay queues, the leg drains it at rate bytes a second, and
@@ -25,7 +25,13 @@ type leg struct {
 	// timed says whether echoes carry the clock (ApplyEchoAt) or not.
 	timed bool
 
+	// jitter, when set, delays each echo by up to this much more, in order:
+	// a relay that hands a receiver its queue in bursts. seed drives it.
+	jitter time.Duration
+	seed   uint64
+
 	now       time.Time
+	lastEcho  time.Time
 	drained   float64
 	pending   []uint64 // marks sent, not yet delivered
 	echoes    []echoAt // marks delivered, echo on its way
@@ -91,9 +97,24 @@ func (l *leg) drain(tick time.Duration) {
 	}
 	l.drained = min(sent, l.drained+l.rate*tick.Seconds())
 	for len(l.pending) > 0 && float64(l.pending[0]) <= l.drained {
-		l.echoes = append(l.echoes, echoAt{counter: l.pending[0], at: l.now.Add(l.rtt)})
+		at := l.now.Add(l.rtt + l.nextJitter())
+		if at.Before(l.lastEcho) {
+			at = l.lastEcho // echoes come back in the order their marks went
+		}
+		l.lastEcho = at
+		l.echoes = append(l.echoes, echoAt{counter: l.pending[0], at: at})
 		l.pending = l.pending[1:]
 	}
+}
+
+// nextJitter is the next echo's extra delay, from a fixed sequence so a run
+// is the same every time.
+func (l *leg) nextJitter() time.Duration {
+	if l.jitter <= 0 {
+		return 0
+	}
+	l.seed = l.seed*6364136223846793005 + 1442695040888963407
+	return time.Duration((l.seed >> 33) % uint64(l.jitter)) //nolint:gosec // under jitter, which fits
 }
 
 func (l *leg) echo() {
@@ -133,10 +154,11 @@ func TestASizedWindowShrinksToWhatASlowLegCarries(t *testing.T) {
 	if size < DefaultMinWindow {
 		t.Fatalf("the window shrank to %d bytes, under its %d KiB floor", size, DefaultMinWindow>>10)
 	}
-	// What a pong waits behind is the queue the window lets build: about
-	// TargetQueue, plus the round trip the window cannot tell from queue
-	// (the first mark's own interval rides in the shortest echo it sees).
-	if limit := 3 * time.Second; l.worstQueue > limit {
+	// What a pong waits behind is the queue the window lets build: Horizon
+	// of the leg, and the frame that went just before the window filled.
+	rate := slowLeg
+	limit := sized.Horizon + time.Duration(frame/rate*float64(time.Second)) + 500*time.Millisecond
+	if l.worstQueue > limit {
 		t.Fatalf("a byte waited %s in the relay on a settled %.0f kB/s leg, over %s",
 			l.worstQueue.Round(time.Millisecond), slowLeg/1000, limit)
 	}
@@ -225,9 +247,8 @@ func TestResetForgetsTheSize(t *testing.T) {
 	if st.leg == nil {
 		t.Fatal("a sized window opened again has nothing to measure its leg with")
 	}
-	if st.leg.minRTT != 0 || !st.leg.rateSince.IsZero() || len(st.leg.stamps) != 0 {
-		t.Fatalf("a reset window kept its measurements: min rtt %s, rate from %s, %d marks timed",
-			st.leg.minRTT, st.leg.rateSince, len(st.leg.stamps))
+	if !st.leg.rateSince.IsZero() || st.leg.rates != [rateSamples]float64{} {
+		t.Fatalf("a reset window kept its measurements: rate from %s, rates %v", st.leg.rateSince, st.leg.rates)
 	}
 }
 
@@ -241,14 +262,14 @@ func TestAnEchoWithoutAClockNeverResizes(t *testing.T) {
 	}
 }
 
-func TestWithoutATargetQueueTheWindowIsFixed(t *testing.T) {
+func TestWithoutAHorizonTheWindowIsFixed(t *testing.T) {
 	l := newLeg(t, Timing{}, slowLeg, slowRTT)
 	l.run(60*time.Second, 10*time.Millisecond)
 	if size := l.w.Size(l.key); size != DefaultWindow {
-		t.Fatalf("a window with no TargetQueue changed size to %d KiB", size>>10)
+		t.Fatalf("a window with no Horizon changed size to %d KiB", size>>10)
 	}
 	if got := l.w.Timing().MinWindow; got != 0 {
-		t.Fatalf("a Timing with no TargetQueue took a MinWindow of %d", got)
+		t.Fatalf("a Timing with no Horizon took a MinWindow of %d", got)
 	}
 }
 
@@ -273,5 +294,36 @@ func TestASizedWindowStartsSmallAndAFastLegGrowsItToTheCap(t *testing.T) {
 	l.run(3*time.Second, 5*time.Millisecond)
 	if size := l.w.Size(l.key); size != DefaultWindow {
 		t.Fatalf("3 s on a 1 MB/s leg left the window at %d KiB, under its %d KiB cap", size>>10, DefaultWindow>>10)
+	}
+}
+
+// The leg the gate measured on the #49 branch: some 60 kB/s from Sber's SFU to
+// the receiver, 0.3 s under the queue at best, and echoes that come back
+// anywhere up to 3 s later than that, in bursts. A window sized by the last
+// second's rate and the shortest echo it ever saw shrank until the window
+// itself was what slowed the leg, and the rate it then measured shrank it
+// again: 16 KiB and 16 kB/s moved, on this leg. The window has to hold what
+// the leg can carry.
+func TestABurstyLegDoesNotCollapseASizedWindow(t *testing.T) {
+	const burstyLeg = 60_000.0
+	l := newLeg(t, sized, burstyLeg, 300*time.Millisecond)
+	l.jitter, l.seed = 3*time.Second, 49
+	l.settle()
+
+	from, least := l.drained, l.w.Size(l.key)
+	for range 600 {
+		l.run(100*time.Millisecond, 10*time.Millisecond)
+		least = min(least, l.w.Size(l.key))
+	}
+	rate := (l.drained - from) / 60
+	t.Logf("%.0f kB/s leg with up to 3 s of echo jitter: the window's least %d KiB, %.1f kB/s moved",
+		burstyLeg/1000, least>>10, rate/1000)
+	if rate < burstyLeg*0.8 {
+		t.Fatalf("a %.0f kB/s leg with bursty echoes moved %.1f kB/s under a sized window, under 80 %% of it",
+			burstyLeg/1000, rate/1000)
+	}
+	if least < DefaultWindow/3 {
+		t.Fatalf("the window fell to %d KiB on a %.0f kB/s leg: it measured its own size, not the leg",
+			least>>10, burstyLeg/1000)
 	}
 }
