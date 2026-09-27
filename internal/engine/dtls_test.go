@@ -2,8 +2,10 @@ package engine
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
 	"reflect"
+	"regexp"
 	"testing"
 	"time"
 
@@ -189,4 +191,189 @@ func TestApplyDTLSProfileWireShape(t *testing.T) {
 func sha256Sum(b []byte) []byte {
 	s := sha256.Sum256(b)
 	return s[:]
+}
+
+// Spec invariant 5.3.1: with the profile active, a certificate that does not
+// match the SDP fingerprint must still fail the transport.
+func TestApplyDTLSProfileRejectsWrongFingerprint(t *testing.T) {
+	settings := &webrtc.SettingEngine{}
+	settings.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
+	settings.SetIncludeLoopbackCandidate(true)
+	settings.SetInterfaceFilter(func(name string) bool { return name == "lo" })
+	if err := ApplyDTLSProfile(settings, DTLSProfileChrome138CompatV1); err != nil {
+		t.Fatal(err)
+	}
+	client, err := webrtc.NewAPI(webrtc.WithSettingEngine(*settings)).NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	server, err := webrtc.NewAPI().NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = server.Close() }()
+	dc, err := server.CreateDataChannel("fingerprint-negative", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened := make(chan struct{}, 1)
+	dc.OnOpen(func() { close(opened) })
+	failed := make(chan webrtc.DTLSTransportState, 4)
+	server.SCTP().Transport().OnStateChange(func(state webrtc.DTLSTransportState) {
+		if state == webrtc.DTLSTransportStateFailed {
+			failed <- state
+		}
+	})
+	offer, err := server.CreateOffer(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gathered := webrtc.GatheringCompletePromise(server)
+	if err := server.SetLocalDescription(offer); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-gathered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("gathering timeout")
+	}
+	if err := client.SetRemoteDescription(*server.LocalDescription()); err != nil {
+		t.Fatal(err)
+	}
+	answer, err := client.CreateAnswer(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gathered = webrtc.GatheringCompletePromise(client)
+	if err := client.SetLocalDescription(answer); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-gathered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("gathering timeout")
+	}
+	wrong := regexp.MustCompile(`(?m)a=fingerprint:sha-256 [0-9A-Fa-f:]+`).
+		ReplaceAllString(client.LocalDescription().SDP,
+			"a=fingerprint:sha-256 00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00")
+	if wrong == client.LocalDescription().SDP {
+		t.Fatal("fingerprint was not modified")
+	}
+	if err := server.SetRemoteDescription(webrtc.SessionDescription{Type: client.LocalDescription().Type, SDP: wrong}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-failed:
+		t.Log("wrong SDP fingerprint rejected with the profile active")
+	case <-opened:
+		t.Fatal("accepted a certificate inconsistent with SDP")
+	case <-time.After(10 * time.Second):
+		t.Fatal("expected certificate rejection was not observed")
+	}
+}
+
+// D3 wire exercise: ten cold connections through the engine applier, the
+// first carrying 10 MiB each way with SHA-256 verification.
+func TestApplyDTLSProfileTenColdConnections(t *testing.T) {
+	for run := 0; run < 10; run++ {
+		settings := &webrtc.SettingEngine{}
+		settings.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
+		settings.SetIncludeLoopbackCandidate(true)
+		settings.SetInterfaceFilter(func(name string) bool { return name == "lo" })
+		if err := ApplyDTLSProfile(settings, DTLSProfileChrome138CompatV1); err != nil {
+			t.Fatal(err)
+		}
+		client, err := webrtc.NewAPI(webrtc.WithSettingEngine(*settings)).NewPeerConnection(webrtc.Configuration{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		server, err := webrtc.NewAPI().NewPeerConnection(webrtc.Configuration{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		size := 64 * 1024
+		if run == 0 {
+			size = 10 * 1024 * 1024
+		}
+		payload := make([]byte, size)
+		if _, err := rand.Read(payload); err != nil {
+			t.Fatal(err)
+		}
+		want := sha256.Sum256(payload)
+		received := make(chan []byte, 1)
+		client.OnDataChannel(func(dc *webrtc.DataChannel) {
+			dc.OnMessage(func(m webrtc.DataChannelMessage) { _ = dc.Send(m.Data) })
+		})
+		dc, err := server.CreateDataChannel("cold", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dc.OnMessage(func(m webrtc.DataChannelMessage) {
+			select {
+			case received <- m.Data:
+			default:
+			}
+		})
+		opened := make(chan struct{}, 1)
+		dc.OnOpen(func() { close(opened) })
+		offer, err := server.CreateOffer(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gathered := webrtc.GatheringCompletePromise(server)
+		if err := server.SetLocalDescription(offer); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-gathered:
+		case <-time.After(10 * time.Second):
+			t.Fatal("gathering timeout")
+		}
+		if err := client.SetRemoteDescription(*server.LocalDescription()); err != nil {
+			t.Fatal(err)
+		}
+		answer, err := client.CreateAnswer(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gathered = webrtc.GatheringCompletePromise(client)
+		if err := client.SetLocalDescription(answer); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-gathered:
+		case <-time.After(10 * time.Second):
+			t.Fatal("gathering timeout")
+		}
+		if err := server.SetRemoteDescription(*client.LocalDescription()); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-opened:
+		case <-time.After(10 * time.Second):
+			t.Fatal("channel did not open")
+		}
+		hash := sha256.New()
+		for offset := 0; offset < size; offset += 16384 {
+			end := min(offset+16384, size)
+			if err := dc.Send(payload[offset:end]); err != nil {
+				t.Fatalf("run %d: send: %v", run, err)
+			}
+			select {
+			case got := <-received:
+				if !bytes.Equal(got, payload[offset:end]) {
+					t.Fatalf("run %d: echo mismatch at %d", run, offset)
+				}
+				_, _ = hash.Write(got)
+			case <-time.After(30 * time.Second):
+				t.Fatalf("run %d: echo timeout at %d", run, offset)
+			}
+		}
+		if !bytes.Equal(hash.Sum(nil), want[:]) {
+			t.Fatalf("run %d: SHA-256 mismatch", run)
+		}
+		_ = client.Close()
+		_ = server.Close()
+	}
 }
