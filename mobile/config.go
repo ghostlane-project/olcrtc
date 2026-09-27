@@ -245,7 +245,7 @@ func (r *Runtime) SetResolver(resolver protect.Lookup) {
 func (r *Runtime) SetDTLSProfile(profile string) error {
 	p := engine.DTLSProfile(profile)
 	if err := engine.ValidateDTLSProfile(p); err != nil {
-		return err
+		return fmt.Errorf("dtls profile %q: %w", profile, err)
 	}
 	r.mu.Lock()
 	r.defaults.dtlsProfile = p
