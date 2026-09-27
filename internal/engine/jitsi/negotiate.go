@@ -126,7 +126,9 @@ func newSettingEngine(resolver protect.Lookup, dtlsProfile engine.DTLSProfile) (
 	if err != nil {
 		return settings, err //nolint:wrapcheck // shared builder adds protected-net context
 	}
-	apply(&settings)
+	if apply != nil {
+		apply(&settings)
+	}
 	return settings, nil
 }
 

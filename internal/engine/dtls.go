@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/pion/dtls/v3"
@@ -29,6 +30,8 @@ const DTLSProfileChrome138CompatV1 DTLSProfile = "chrome-linux-138-compat-v1"
 // chrome138CompatUnsupportedSuites are advertised by the original fingerprint
 // but absent from the pinned Pion DTLS; releasing a profile that advertises
 // them is blocked by spec rule 5.3.3.
+//
+//nolint:gochecknoglobals // the gap list is fixed by the pinned fingerprint and Pion version
 var chrome138CompatUnsupportedSuites = map[uint16]bool{
 	0xc009: true, // TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA
 	0xc013: true, // TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA
@@ -37,13 +40,21 @@ var chrome138CompatUnsupportedSuites = map[uint16]bool{
 	0x0035: true, // TLS_RSA_WITH_AES_256_CBC_SHA256
 }
 
+// Static validation and build errors; wrapped with context at the call site.
+var (
+	ErrUnknownProfile  = errors.New("dtls: unknown profile")
+	ErrNoMimicPayload  = errors.New("dtls: profile has no mimic payload")
+	ErrSuiteOutsideGap = errors.New("dtls: profile advertises a suite outside the known gap list")
+	ErrNoUsableSuite   = errors.New("dtls: profile keeps no usable suite")
+)
+
 // ValidateDTLSProfile rejects unknown profile ids before dialing.
 func ValidateDTLSProfile(profile DTLSProfile) error {
 	switch profile {
 	case "", DTLSProfileOff, DTLSProfileChrome138CompatV1:
 		return nil
 	default:
-		return fmt.Errorf("dtls: unknown profile %q", string(profile))
+		return fmt.Errorf("%w: %q", ErrUnknownProfile, string(profile))
 	}
 }
 
@@ -55,7 +66,7 @@ func buildMimic(profile DTLSProfile) (*mimicry.MimickedClientHello, error) {
 		return nil, err
 	}
 	if profile != DTLSProfileChrome138CompatV1 {
-		return nil, fmt.Errorf("dtls: profile %q has no mimic payload", string(profile))
+		return nil, fmt.Errorf("%w: %q", ErrNoMimicPayload, string(profile))
 	}
 	m := &mimicry.MimickedClientHello{}
 	if err := m.LoadFingerprint(fingerprints.Chrome_linux_138_0_7204_94); err != nil {
@@ -71,12 +82,12 @@ func buildMimic(profile DTLSProfile) (*mimicry.MimickedClientHello, error) {
 			continue
 		}
 		if !supported[id] {
-			return nil, fmt.Errorf("dtls: profile advertises unsupported suite %04x not in the known gap list", id)
+			return nil, fmt.Errorf("%w: %04x", ErrSuiteOutsideGap, id)
 		}
 		kept = append(kept, id)
 	}
 	if len(kept) == 0 {
-		return nil, fmt.Errorf("dtls: profile keeps no usable suite")
+		return nil, ErrNoUsableSuite
 	}
 	m.CipherSuiteIDs = kept
 	return m, nil
@@ -110,9 +121,7 @@ func ApplyDTLSProfile(settings *webrtc.SettingEngine, profile DTLSProfile) error
 		return err
 	}
 	profiles := make([]dtls.SRTPProtectionProfile, len(probe.SRTPProtectionProfiles))
-	for i, p := range probe.SRTPProtectionProfiles {
-		profiles[i] = dtls.SRTPProtectionProfile(p)
-	}
+	copy(profiles, probe.SRTPProtectionProfiles)
 	settings.SetSRTPProtectionProfiles(profiles...)
 	return nil
 }

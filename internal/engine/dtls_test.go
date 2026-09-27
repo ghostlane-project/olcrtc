@@ -36,7 +36,7 @@ func TestBuildMimicStripsOnlyKnownGap(t *testing.T) {
 	for _, suite := range dtls.CipherSuites() {
 		supported[suite.ID] = true
 	}
-	var removed []uint16
+	removed := make([]uint16, 0, len(chrome138CompatUnsupportedSuites))
 	for id := range chrome138CompatUnsupportedSuites {
 		removed = append(removed, id)
 	}
@@ -136,9 +136,9 @@ func TestApplyDTLSProfileWireShape(t *testing.T) {
 	dc.OnMessage(func(m webrtc.DataChannelMessage) { received <- m.Data })
 	opened := make(chan struct{}, 1)
 	dc.OnOpen(func() { close(opened) })
-	offer, err := server.CreateOffer(nil)
-	if err != nil {
-		t.Fatal(err)
+	offer, offerErr := server.CreateOffer(nil)
+	if offerErr != nil {
+		t.Fatal(offerErr)
 	}
 	gathered := webrtc.GatheringCompletePromise(server)
 	if err := server.SetLocalDescription(offer); err != nil {
@@ -152,9 +152,9 @@ func TestApplyDTLSProfileWireShape(t *testing.T) {
 	if err := client.SetRemoteDescription(*server.LocalDescription()); err != nil {
 		t.Fatal(err)
 	}
-	answer, err := client.CreateAnswer(nil)
-	if err != nil {
-		t.Fatal(err)
+	answer, answerErr := client.CreateAnswer(nil)
+	if answerErr != nil {
+		t.Fatal(answerErr)
 	}
 	gathered = webrtc.GatheringCompletePromise(client)
 	if err := client.SetLocalDescription(answer); err != nil {
@@ -186,11 +186,6 @@ func TestApplyDTLSProfileWireShape(t *testing.T) {
 		t.Fatal("echo timeout")
 	}
 	_ = echoed
-}
-
-func sha256Sum(b []byte) []byte {
-	s := sha256.Sum256(b)
-	return s[:]
 }
 
 // Spec invariant 5.3.1: with the profile active, a certificate that does not
@@ -225,9 +220,9 @@ func TestApplyDTLSProfileRejectsWrongFingerprint(t *testing.T) {
 			failed <- state
 		}
 	})
-	offer, err := server.CreateOffer(nil)
-	if err != nil {
-		t.Fatal(err)
+	offer, offerErr := server.CreateOffer(nil)
+	if offerErr != nil {
+		t.Fatal(offerErr)
 	}
 	gathered := webrtc.GatheringCompletePromise(server)
 	if err := server.SetLocalDescription(offer); err != nil {
@@ -241,9 +236,9 @@ func TestApplyDTLSProfileRejectsWrongFingerprint(t *testing.T) {
 	if err := client.SetRemoteDescription(*server.LocalDescription()); err != nil {
 		t.Fatal(err)
 	}
-	answer, err := client.CreateAnswer(nil)
-	if err != nil {
-		t.Fatal(err)
+	answer, answerErr := client.CreateAnswer(nil)
+	if answerErr != nil {
+		t.Fatal(answerErr)
 	}
 	gathered = webrtc.GatheringCompletePromise(client)
 	if err := client.SetLocalDescription(answer); err != nil {
@@ -276,7 +271,7 @@ func TestApplyDTLSProfileRejectsWrongFingerprint(t *testing.T) {
 // D3 wire exercise: ten cold connections through the engine applier, the
 // first carrying 10 MiB each way with SHA-256 verification.
 func TestApplyDTLSProfileTenColdConnections(t *testing.T) {
-	for run := 0; run < 10; run++ {
+	for run := range 10 {
 		settings := &webrtc.SettingEngine{}
 		settings.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
 		settings.SetIncludeLoopbackCandidate(true)
@@ -297,8 +292,8 @@ func TestApplyDTLSProfileTenColdConnections(t *testing.T) {
 			size = 10 * 1024 * 1024
 		}
 		payload := make([]byte, size)
-		if _, err := rand.Read(payload); err != nil {
-			t.Fatal(err)
+		if _, randErr := rand.Read(payload); randErr != nil {
+			t.Fatal(randErr)
 		}
 		want := sha256.Sum256(payload)
 		received := make(chan []byte, 1)
@@ -322,16 +317,16 @@ func TestApplyDTLSProfileTenColdConnections(t *testing.T) {
 			t.Fatal(err)
 		}
 		gathered := webrtc.GatheringCompletePromise(server)
-		if err := server.SetLocalDescription(offer); err != nil {
-			t.Fatal(err)
+		if setErr := server.SetLocalDescription(offer); setErr != nil {
+			t.Fatal(setErr)
 		}
 		select {
 		case <-gathered:
 		case <-time.After(10 * time.Second):
 			t.Fatal("gathering timeout")
 		}
-		if err := client.SetRemoteDescription(*server.LocalDescription()); err != nil {
-			t.Fatal(err)
+		if setErr := client.SetRemoteDescription(*server.LocalDescription()); setErr != nil {
+			t.Fatal(setErr)
 		}
 		answer, err := client.CreateAnswer(nil)
 		if err != nil {

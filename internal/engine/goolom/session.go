@@ -278,7 +278,7 @@ func (s *Session) subscriberConnCh() <-chan struct{} {
 // Referer header for telemetry posts.
 func New(_ context.Context, cfg engine.Config) (engine.Session, error) {
 	if err := engine.ValidateDTLSProfile(cfg.DTLSProfile); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("goolom: %w", err)
 	}
 	if cfg.URL == "" {
 		return nil, ErrURLRequired

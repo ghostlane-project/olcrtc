@@ -47,14 +47,16 @@ func NewPionSettings(opts PionSettingsOptions) (PionSettings, error) {
 		if opts.DTLSProfile == "" || opts.DTLSProfile == DTLSProfileOff {
 			return nil, nil //nolint:nilnil // nil hook preserves SDK-owned pion settings
 		}
-		return func(settings *webrtc.SettingEngine) {
-			if err := ApplyDTLSProfile(settings, opts.DTLSProfile); err != nil {
-				// Validated above; a failure here is a programmer error, not a dial.
-				panic(err)
-			}
-		}, nil
+		return dtlsOnlySettings(opts.DTLSProfile), nil
 	}
 
+	return networkSettings(opts, protectedNet), nil
+}
+
+// networkSettings is the settings hook for a request that reached the
+// partial path: base options, the DTLS profile, and the protected net when
+// one was built.
+func networkSettings(opts PionSettingsOptions, protectedNet *protect.ProtectedNet) func(*webrtc.SettingEngine) {
 	return func(settings *webrtc.SettingEngine) {
 		if opts.LoggerFactory != nil {
 			settings.LoggerFactory = opts.LoggerFactory
@@ -63,10 +65,7 @@ func NewPionSettings(opts PionSettingsOptions) (PionSettings, error) {
 			settings.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
 			settings.SetIPFilter(func(ip net.IP) bool { return ip.To4() != nil })
 		}
-		if err := ApplyDTLSProfile(settings, opts.DTLSProfile); err != nil {
-			// Validated above; a failure here is a programmer error, not a dial.
-			panic(err)
-		}
+		applyDTLS(settings, opts.DTLSProfile)
 		if protectedNet == nil {
 			return
 		}
@@ -77,5 +76,19 @@ func NewPionSettings(opts PionSettingsOptions) (PionSettings, error) {
 		if opts.DisableMulticast {
 			settings.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
 		}
-	}, nil
+	}
+}
+
+// dtlsOnlySettings is the settings hook for a profile that must reach
+// SDK-owned pion settings with nothing else requested.
+func dtlsOnlySettings(profile DTLSProfile) func(*webrtc.SettingEngine) {
+	return func(settings *webrtc.SettingEngine) { applyDTLS(settings, profile) }
+}
+
+// applyDTLS installs a profile whose validation already succeeded; a failure
+// here is a programmer error, not a dial.
+func applyDTLS(settings *webrtc.SettingEngine, profile DTLSProfile) {
+	if err := ApplyDTLSProfile(settings, profile); err != nil {
+		panic(err)
+	}
 }

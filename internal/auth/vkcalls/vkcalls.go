@@ -25,6 +25,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,18 +34,45 @@ import (
 )
 
 const (
-	apiVersion    = "5.276"
-	sdkAppKey     = "CGMMEJLGDIHBABABA"
-	sdkClientVer  = "1.0.1"
-	requestLimit  = 8 << 20
-	requestWait   = 20 * time.Second
-	schemaVersion = "1"
+	apiVersion     = "5.276"
+	sdkAppKey      = "CGMMEJLGDIHBABABA"
+	sdkClientVer   = "1.0.1"
+	fbProdBase     = "https://calls.okcdn.ru"
+	fieldDeviceID  = "device_id"
+	fieldLang      = "lang"
+	fieldURLs      = "urls"
+	fieldLink      = "link"
+	stageJoin      = "vchat.joinConversationByLink"
+	stageLogin     = "auth.anonymLogin"
+	stageCallToken = "messages.getAnonymCallToken"
+	stagePreview   = "messages.getCallPreview"
+	stageAnonToken = "auth.getAnonymToken"
+	requestLimit   = 8 << 20
+	requestWait    = 20 * time.Second
+	schemaVersion  = "1"
 )
 
 // ErrCreationUnknown reports that calls.start produced no definitive answer:
 // the room may or may not exist. The caller must not retry blindly (spec
 // section 3) and must not treat the link as usable.
 var ErrCreationUnknown = errors.New("vkcalls: room creation result unknown")
+
+// Static validation and transport errors; wrapped with context at call sites.
+var (
+	ErrRoomURLRequired    = errors.New("vkcalls: room url required")
+	ErrTokenUnsupported   = errors.New("vkcalls: account token is not supported for guest issue")
+	ErrOrganizerRequired  = errors.New("vkcalls: calls.start requires an organizer user token")
+	ErrInvalidEndpoint    = errors.New("vkcalls: invalid signaling endpoint")
+	ErrEndpointUserInfo   = errors.New("vkcalls: signaling endpoint must not carry userinfo or port")
+	ErrEndpointToken      = errors.New("vkcalls: endpoint token mismatch")
+	ErrMissingClientType  = errors.New("vkcalls: missing client_type")
+	ErrInvalidDeviceIdx   = errors.New("vkcalls: invalid device_idx")
+	ErrInvalidRoomURL     = errors.New("vkcalls: invalid room url")
+	ErrRoomURLShape       = errors.New("vkcalls: room url must be https://vk.ru/call/join/<id>")
+	ErrRoomURLExtra       = errors.New("vkcalls: room url must not carry userinfo, port, query or fragment")
+	ErrCreatedLinkInvalid = errors.New("vkcalls: created link invalid")
+	ErrICEServers         = errors.New("vkcalls: ice servers")
+)
 
 // GuestAPIError reports a VK-side API answer; Code carries error_code when
 // present (14 captcha, 10 internal, 5 auth and the anonym_token.* family).
@@ -93,10 +121,10 @@ const (
 // Issue runs the guest chain for cfg.RoomURL.
 func (p Provider) Issue(ctx context.Context, cfg auth.Config) (auth.Credentials, error) {
 	if cfg.RoomURL == "" {
-		return auth.Credentials{}, errors.New("vkcalls: room url required")
+		return auth.Credentials{}, ErrRoomURLRequired
 	}
 	if cfg.Token != "" {
-		return auth.Credentials{}, errors.New("vkcalls: account token is not supported for guest issue")
+		return auth.Credentials{}, ErrTokenUnsupported
 	}
 	link, err := canonicalLink(cfg.RoomURL)
 	if err != nil {
@@ -119,14 +147,14 @@ func (p Provider) Issue(ctx context.Context, cfg auth.Config) (auth.Credentials,
 			IsVerified bool   `json:"is_verified"`
 		} `json:"response"`
 	}{}
-	if err := p.vkCall(ctx, client, "auth.getAnonymToken", map[string]string{
-		"client_id": "8093730", "link": link, "device_id": deviceID,
+	if callErr := p.vkCall(ctx, client, stageAnonToken, map[string]string{
+		"client_id": "8093730", fieldLink: link, fieldDeviceID: deviceID,
 		"anonymName": name, "lang": "ru",
-	}, &bootstrap); err != nil {
-		return auth.Credentials{}, err
+	}, &bootstrap); callErr != nil {
+		return auth.Credentials{}, callErr
 	}
 	if bootstrap.Response.Token == "" {
-		return auth.Credentials{}, &GuestAPIError{Stage: "auth.getAnonymToken", Kind: "missing_token"}
+		return auth.Credentials{}, &GuestAPIError{Stage: stageAnonToken, Kind: "missing_token"}
 	}
 
 	preview := struct {
@@ -135,18 +163,18 @@ func (p Provider) Issue(ctx context.Context, cfg auth.Config) (auth.Credentials,
 			Secret string      `json:"secret"`
 		} `json:"response"`
 	}{}
-	if err := p.vkCall(ctx, client, "messages.getCallPreview", map[string]string{
-		"anonymous_token": bootstrap.Response.Token, "device_id": deviceID,
-		"link": link, "lang": "ru", "extended": "1", "fields": "first_name,last_name,photo_200",
-	}, &preview); err != nil {
-		return auth.Credentials{}, err
+	if callErr := p.vkCall(ctx, client, stagePreview, map[string]string{
+		"anonymous_token": bootstrap.Response.Token, fieldDeviceID: deviceID,
+		fieldLink: link, fieldLang: "ru", "extended": "1", "fields": "first_name,last_name,photo_200",
+	}, &preview); callErr != nil {
+		return auth.Credentials{}, callErr
 	}
 	if preview.Response.Secret == "" {
-		return auth.Credentials{}, &GuestAPIError{Stage: "messages.getCallPreview", Kind: "missing_secret"}
+		return auth.Credentials{}, &GuestAPIError{Stage: stagePreview, Kind: "missing_secret"}
 	}
 	userID := preview.Response.UserID.String()
 	if userID == "" || strings.Trim(userID, "-0123456789") != "" {
-		return auth.Credentials{}, &GuestAPIError{Stage: "messages.getCallPreview", Kind: "invalid_user_id"}
+		return auth.Credentials{}, &GuestAPIError{Stage: stagePreview, Kind: "invalid_user_id"}
 	}
 
 	issued := struct {
@@ -154,34 +182,20 @@ func (p Provider) Issue(ctx context.Context, cfg auth.Config) (auth.Credentials,
 			Token string `json:"token"`
 		} `json:"response"`
 	}{}
-	if err := p.vkCall(ctx, client, "messages.getAnonymCallToken", map[string]string{
-		"anonymous_token": bootstrap.Response.Token, "device_id": deviceID,
-		"link": link, "lang": "ru", "name": name,
+	if callErr := p.vkCall(ctx, client, stageCallToken, map[string]string{
+		"anonymous_token": bootstrap.Response.Token, fieldDeviceID: deviceID,
+		fieldLink: link, fieldLang: "ru", "name": name,
 		"user_id": userID, "secret": preview.Response.Secret,
-	}, &issued); err != nil {
-		return auth.Credentials{}, err
+	}, &issued); callErr != nil {
+		return auth.Credentials{}, callErr
 	}
 	if issued.Response.Token == "" {
-		return auth.Credentials{}, &GuestAPIError{Stage: "messages.getAnonymCallToken", Kind: "missing_token"}
+		return auth.Credentials{}, &GuestAPIError{Stage: stageCallToken, Kind: "missing_token"}
 	}
 
-	sdkDevice := "olcrtc-sdk-" + randomToken(16)
-	sessionData, err := json.Marshal(map[string]any{
-		"version": 2, "device_id": sdkDevice, "client_version": sdkClientVer,
-	})
-	if err != nil {
-		return auth.Credentials{}, err
-	}
-	session := struct {
-		SessionKey string `json:"session_key"`
-	}{}
-	if err := p.fbCall(ctx, client, "auth.anonymLogin", map[string]string{
-		"session_data": string(sessionData),
-	}, &session); err != nil {
-		return auth.Credentials{}, err
-	}
-	if session.SessionKey == "" {
-		return auth.Credentials{}, &GuestAPIError{Stage: "auth.anonymLogin", Kind: "missing_session_key"}
+	session, loginErr := p.sdkLogin(ctx, client)
+	if loginErr != nil {
+		return auth.Credentials{}, loginErr
 	}
 
 	join := struct {
@@ -195,15 +209,41 @@ func (p Provider) Issue(ctx context.Context, cfg auth.Config) (auth.Credentials,
 		StunServer any    `json:"stun_server"`
 		TurnServer any    `json:"turn_server"`
 	}{}
-	if err := p.fbCall(ctx, client, "vchat.joinConversationByLink", map[string]string{
+	if joinErr := p.fbCall(ctx, client, stageJoin, map[string]string{
 		"joinLink": linkID(link), "isVideo": "false", "protocolVersion": "5",
 		"anonymToken": issued.Response.Token, "session_key": session.SessionKey,
-	}, &join); err != nil {
-		return auth.Credentials{}, err
+	}, &join); joinErr != nil {
+		return auth.Credentials{}, joinErr
 	}
 
-	return credentialsFromJoin(link, userID, join.Endpoint, join.Token, join.DeviceIdx,
-		join.ClientType, join.P2PForbid, join.StunServer, join.TurnServer)
+	return credentialsFromJoin(link, userID, join.Endpoint, join.Token,
+		join.DeviceIdx, join.ClientType, join.P2PForbid,
+		join.StunServer, join.TurnServer)
+}
+
+// sdkSession is the answer of the SDK anonymous login step.
+type sdkSession struct {
+	SessionKey string `json:"session_key"`
+}
+
+// sdkLogin runs the SDK anonymous login (step 4) and returns its session.
+func (p Provider) sdkLogin(ctx context.Context, client *http.Client) (sdkSession, error) {
+	var session sdkSession
+	sessionData, marshalErr := json.Marshal(map[string]any{
+		"version": 2, fieldDeviceID: "olcrtc-sdk-" + randomToken(16), "client_version": sdkClientVer,
+	})
+	if marshalErr != nil {
+		return session, fmt.Errorf("vkcalls: session data: %w", marshalErr)
+	}
+	if fbErr := p.fbCall(ctx, client, stageLogin, map[string]string{
+		"session_data": string(sessionData),
+	}, &session); fbErr != nil {
+		return session, fbErr
+	}
+	if session.SessionKey == "" {
+		return session, &GuestAPIError{Stage: stageLogin, Kind: "missing_session_key"}
+	}
+	return session, nil
 }
 
 // CreateRoom starts a call on behalf of the organizer whose user token is
@@ -212,7 +252,7 @@ func (p Provider) Issue(ctx context.Context, cfg auth.Config) (auth.Credentials,
 // creation blindly (spec section 3).
 func (p Provider) CreateRoom(ctx context.Context, cfg auth.Config) (string, error) {
 	if cfg.Token == "" {
-		return "", errors.New("vkcalls: calls.start requires an organizer user token")
+		return "", ErrOrganizerRequired
 	}
 	client := protect.NewHTTPClient(cfg.Resolver)
 	ctx, cancel := context.WithTimeout(ctx, requestWait)
@@ -223,7 +263,7 @@ func (p Provider) CreateRoom(ctx context.Context, cfg auth.Config) (string, erro
 	if err != nil {
 		// A transport failure after the request may have reached VK leaves
 		// the room state unknown; that is not a plain network error.
-		return "", fmt.Errorf("%w: %v", ErrCreationUnknown, err)
+		return "", fmt.Errorf("%w: %w", ErrCreationUnknown, err)
 	}
 	var created struct {
 		Response struct {
@@ -234,8 +274,8 @@ func (p Provider) CreateRoom(ctx context.Context, cfg auth.Config) (string, erro
 			Msg  string `json:"error_msg"`
 		} `json:"error"`
 	}
-	if err := json.Unmarshal(body, &created); err != nil {
-		return "", fmt.Errorf("%w: %v", ErrCreationUnknown, err)
+	if unmarshalErr := json.Unmarshal(body, &created); unmarshalErr != nil {
+		return "", fmt.Errorf("%w: %w", ErrCreationUnknown, unmarshalErr)
 	}
 	if created.Error != nil {
 		return "", &GuestAPIError{Stage: "calls.start", Code: created.Error.Code, Kind: created.Error.Msg}
@@ -245,7 +285,7 @@ func (p Provider) CreateRoom(ctx context.Context, cfg auth.Config) (string, erro
 	}
 	link, err := canonicalLink(created.Response.JoinLink)
 	if err != nil {
-		return "", fmt.Errorf("vkcalls: created link invalid: %w", err)
+		return "", fmt.Errorf("%w: %w", ErrCreatedLinkInvalid, err)
 	}
 	return link, nil
 }
@@ -261,10 +301,13 @@ func (p Provider) fbBase() string {
 	if p.FBBase != "" {
 		return p.FBBase
 	}
-	return "https://calls.okcdn.ru"
+	return fbProdBase
 }
 
-func (p Provider) vkCall(ctx context.Context, client *http.Client, method string, params map[string]string, out any) error {
+func (p Provider) vkCall(
+	ctx context.Context, client *http.Client, method string,
+	params map[string]string, out any,
+) error {
 	params["v"] = apiVersion
 	body, err := p.raw(ctx, client, p.apiBase()+"/method/"+method, params)
 	if err != nil {
@@ -273,7 +316,10 @@ func (p Provider) vkCall(ctx context.Context, client *http.Client, method string
 	return decodeAPI(body, method, out)
 }
 
-func (p Provider) fbCall(ctx context.Context, client *http.Client, method string, params map[string]string, out any) error {
+func (p Provider) fbCall(
+	ctx context.Context, client *http.Client, method string,
+	params map[string]string, out any,
+) error {
 	params["method"] = method
 	params["format"] = "JSON"
 	params["application_key"] = sdkAppKey
@@ -284,26 +330,29 @@ func (p Provider) fbCall(ctx context.Context, client *http.Client, method string
 	return decodeAPI(body, method, out)
 }
 
-func (p Provider) raw(ctx context.Context, client *http.Client, endpoint string, params map[string]string) ([]byte, error) {
+func (p Provider) raw(
+	ctx context.Context, client *http.Client, endpoint string, params map[string]string,
+) ([]byte, error) {
 	form := make(url.Values, len(params))
 	for k, v := range params {
 		form.Set(k, v)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
-	if err != nil {
-		return nil, err
+	req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	if reqErr != nil {
+		return nil, fmt.Errorf("vkcalls: build request: %w", reqErr)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
+	resp, doErr := client.Do(req)
+	if doErr != nil {
+		return nil, fmt.Errorf("vkcalls: do: %w", doErr)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, requestLimit))
-	if err != nil {
-		return nil, err
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, requestLimit))
+	if readErr != nil {
+		return nil, fmt.Errorf("vkcalls: read body: %w", readErr)
 	}
 	if resp.StatusCode != http.StatusOK {
+		//nolint:err113 // the redacted body only rides inside the error text
 		return nil, fmt.Errorf("vkcalls: http %d: %.200s", resp.StatusCode, redact(body))
 	}
 	return body, nil
@@ -334,28 +383,28 @@ func decodeAPI(body []byte, stage string, out any) error {
 func credentialsFromJoin(link, userID, endpoint, token string, deviceIdx any,
 	clientType string, p2p *bool, stun, turn any) (auth.Credentials, error) {
 	if endpoint == "" || token == "" {
-		return auth.Credentials{}, &GuestAPIError{Stage: "vchat.joinConversationByLink", Kind: "missing_endpoint_or_token"}
+		return auth.Credentials{}, &GuestAPIError{Stage: stageJoin, Kind: "missing_endpoint_or_token"}
 	}
 	u, err := url.Parse(endpoint)
 	if err != nil || u.Scheme != "wss" || !strings.HasSuffix(u.Host, ".okcdn.ru") {
-		return auth.Credentials{}, errors.New("vkcalls: invalid signaling endpoint")
+		return auth.Credentials{}, ErrInvalidEndpoint
 	}
 	if u.User != nil || u.Port() != "" {
-		return auth.Credentials{}, errors.New("vkcalls: signaling endpoint must not carry userinfo or port")
+		return auth.Credentials{}, ErrEndpointUserInfo
 	}
 	if q := u.Query().Get("token"); q != "" && q != token {
-		return auth.Credentials{}, errors.New("vkcalls: endpoint token mismatch")
+		return auth.Credentials{}, ErrEndpointToken
 	}
 	if clientType == "" {
-		return auth.Credentials{}, errors.New("vkcalls: missing client_type")
+		return auth.Credentials{}, ErrMissingClientType
 	}
 	p2pValue := "true" // absent or invalid forbids DIRECT (spec 7.2)
 	if p2p != nil {
-		p2pValue = fmt.Sprintf("%t", *p2p)
+		p2pValue = strconv.FormatBool(*p2p)
 	}
 	deviceIdxStr, ok := decimalOf(deviceIdx)
 	if !ok {
-		return auth.Credentials{}, errors.New("vkcalls: invalid device_idx")
+		return auth.Credentials{}, ErrInvalidDeviceIdx
 	}
 	ice, err := iceServersJSON(stun, turn)
 	if err != nil {
@@ -379,14 +428,14 @@ func credentialsFromJoin(link, userID, endpoint, token string, deviceIdx any,
 func iceServersJSON(stun, turn any) (string, error) {
 	servers := []map[string]any{}
 	if stun != nil {
-		if urls := urlsOf(stun); len(urls) > 0 {
-			servers = append(servers, map[string]any{"urls": urls})
+		if stunURLs := urlsOf(stun); len(stunURLs) > 0 {
+			servers = append(servers, map[string]any{fieldURLs: stunURLs})
 		}
 	}
 	if turn != nil {
 		m := map[string]any{}
-		if urls := urlsOf(turn); len(urls) > 0 {
-			m["urls"] = urls
+		if turnURLs := urlsOf(turn); len(turnURLs) > 0 {
+			m[fieldURLs] = turnURLs
 		}
 		if username, credential := credsOf(turn); username != "" {
 			m["username"] = username
@@ -398,7 +447,7 @@ func iceServersJSON(stun, turn any) (string, error) {
 	}
 	b, err := json.Marshal(servers)
 	if err != nil {
-		return "", fmt.Errorf("vkcalls: ice servers: %w", err)
+		return "", fmt.Errorf("%w: %w", ErrICEServers, err)
 	}
 	return string(b), nil
 }
@@ -408,7 +457,7 @@ func urlsOf(server any) []string {
 	if !ok {
 		return nil
 	}
-	switch urls := m["urls"].(type) {
+	switch urls := m[fieldURLs].(type) {
 	case string:
 		return []string{urls}
 	case []any:
@@ -451,7 +500,7 @@ func decimalOf(v any) (string, bool) {
 		if t != float64(int64(t)) || t < 0 {
 			return "", false
 		}
-		return fmt.Sprintf("%d", int64(t)), true
+		return strconv.FormatInt(int64(t), 10), true
 	}
 	return "", false
 }
@@ -461,17 +510,17 @@ func decimalOf(v any) (string, bool) {
 func canonicalLink(raw string) (string, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
-		return "", fmt.Errorf("vkcalls: invalid room url: %w", err)
+		return "", fmt.Errorf("%w: %w", ErrInvalidRoomURL, err)
 	}
 	if u.Scheme != "https" || (u.Host != "vk.ru" && u.Host != "vk.com") {
-		return "", errors.New("vkcalls: room url must be https://vk.ru/call/join/<id>")
+		return "", ErrRoomURLShape
 	}
 	if u.User != nil || u.Port() != "" || u.RawQuery != "" || u.Fragment != "" {
-		return "", errors.New("vkcalls: room url must not carry userinfo, port, query or fragment")
+		return "", ErrRoomURLExtra
 	}
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
 	if len(parts) != 3 || parts[0] != "call" || parts[1] != "join" || parts[2] == "" {
-		return "", errors.New("vkcalls: room url must be https://vk.ru/call/join/<id>")
+		return "", ErrRoomURLShape
 	}
 	return "https://" + u.Host + "/call/join/" + parts[2], nil
 }
@@ -487,7 +536,7 @@ func randomToken(n int) string {
 	if _, err := rand.Read(b); err != nil {
 		now := time.Now().UnixNano()
 		for i := range b {
-			b[i] = byte(now >> ((i % 8) * 8))
+			b[i%len(b)] = byte(now >> (uint(i%8) * 8)) //nolint:gosec // fallback entropy only
 		}
 	}
 	return hex.EncodeToString(b)

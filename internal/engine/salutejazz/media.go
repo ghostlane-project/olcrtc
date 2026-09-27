@@ -28,7 +28,9 @@ func newWebRTCAPI(resolver protect.Lookup, dtlsProfile engine.DTLSProfile) (*web
 	if err != nil {
 		return nil, err //nolint:wrapcheck // shared builder already adds protected-net context
 	}
-	apply(&settingEngine)
+	if apply != nil {
+		apply(&settingEngine)
+	}
 
 	mediaEngine := &webrtc.MediaEngine{}
 	if err := mediaEngine.RegisterDefaultCodecs(); err != nil {

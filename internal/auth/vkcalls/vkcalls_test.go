@@ -64,7 +64,12 @@ func formMap(r *http.Request) map[string]string {
 
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(v)
+	b, err := json.Marshal(v)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	_, _ = w.Write(b)
 }
 
 func defaultAPIAnswer(method string) any {
@@ -207,7 +212,7 @@ func TestIssueAPIErrors(t *testing.T) {
 	if !errors.As(err, &apiErr) || apiErr.Code != 14 {
 		t.Fatalf("captcha error: %v", err)
 	}
-	f.apiFn = func(method string, _ map[string]string) any { return "<html>" }
+	f.apiFn = func(_ string, _ map[string]string) any { return "<html>" }
 	if _, err := f.provider().Issue(context.Background(), auth.Config{RoomURL: testRoom}); err == nil {
 		t.Fatal("invalid json accepted")
 	}
@@ -218,7 +223,7 @@ func TestCreateRoom(t *testing.T) {
 	if _, err := f.provider().CreateRoom(context.Background(), auth.Config{}); err == nil {
 		t.Fatal("missing organizer token accepted")
 	}
-	f.apiFn = func(method string, _ map[string]string) any {
+	f.apiFn = func(_ string, _ map[string]string) any {
 		return map[string]any{"response": map[string]any{"join_link": "https://vk.ru/call/join/NEWROOM1", "ok_join_link": ""}}
 	}
 	link, err := f.provider().CreateRoom(context.Background(), auth.Config{Token: "org-token"})
