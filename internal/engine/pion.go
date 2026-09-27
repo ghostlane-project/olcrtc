@@ -19,6 +19,9 @@ type PionSettingsOptions struct {
 	IPv4Only         bool
 	ProxyDialer      bool
 	DisableMulticast bool
+	// DTLSProfile selects a fixed ClientHello profile for this session; empty or
+	// "off" keeps the stock Pion handshake. Validated before any dialing.
+	DTLSProfile DTLSProfile
 }
 
 // PionSettings applies shared network settings to a pion SettingEngine.
@@ -26,6 +29,9 @@ type PionSettings func(*webrtc.SettingEngine)
 
 // NewPionSettings prepares protected networking and per-engine pion settings.
 func NewPionSettings(opts PionSettingsOptions) (PionSettings, error) {
+	if err := ValidateDTLSProfile(opts.DTLSProfile); err != nil {
+		return nil, err
+	}
 	useProtectedNet := protect.HasProtector() || opts.Resolver != nil || runtime.GOOS == "android"
 	var protectedNet *protect.ProtectedNet
 	if useProtectedNet {
@@ -36,7 +42,17 @@ func NewPionSettings(opts PionSettingsOptions) (PionSettings, error) {
 		}
 	}
 	if opts.LoggerFactory == nil && !opts.IPv4Only && protectedNet == nil {
-		return nil, nil //nolint:nilnil // nil hook preserves SDK-owned pion settings
+		// A chosen DTLS profile still has to reach SDK-owned settings, so only
+		// the stock profile keeps the nil hook.
+		if opts.DTLSProfile == "" || opts.DTLSProfile == DTLSProfileOff {
+			return nil, nil //nolint:nilnil // nil hook preserves SDK-owned pion settings
+		}
+		return func(settings *webrtc.SettingEngine) {
+			if err := ApplyDTLSProfile(settings, opts.DTLSProfile); err != nil {
+				// Validated above; a failure here is a programmer error, not a dial.
+				panic(err)
+			}
+		}, nil
 	}
 
 	return func(settings *webrtc.SettingEngine) {
@@ -46,6 +62,10 @@ func NewPionSettings(opts PionSettingsOptions) (PionSettings, error) {
 		if opts.IPv4Only {
 			settings.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
 			settings.SetIPFilter(func(ip net.IP) bool { return ip.To4() != nil })
+		}
+		if err := ApplyDTLSProfile(settings, opts.DTLSProfile); err != nil {
+			// Validated above; a failure here is a programmer error, not a dial.
+			panic(err)
 		}
 		if protectedNet == nil {
 			return

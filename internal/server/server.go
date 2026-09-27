@@ -15,6 +15,7 @@ import (
 
 	"github.com/openlibrecommunity/olcrtc/internal/control"
 	"github.com/openlibrecommunity/olcrtc/internal/crypto"
+	"github.com/openlibrecommunity/olcrtc/internal/engine"
 	"github.com/openlibrecommunity/olcrtc/internal/handshake"
 	"github.com/openlibrecommunity/olcrtc/internal/logger"
 	"github.com/openlibrecommunity/olcrtc/internal/muxconn"
@@ -148,6 +149,7 @@ type Config struct {
 	UDPMaxFlows               int
 	UnsafeAllowPrivateTargets bool
 	DNSServer                 string
+	DTLSProfile               engine.DTLSProfile
 	Resolver                  protect.Lookup
 	SOCKSProxyAddr            string
 	SOCKSProxyPort            int

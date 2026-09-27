@@ -15,10 +15,11 @@ import (
 
 // newWebRTCAPI builds a pion API with IPv4-only ICE and default
 // interceptors, over the host's protected networking.
-func newWebRTCAPI(resolver protect.Lookup) (*webrtc.API, error) {
+func newWebRTCAPI(resolver protect.Lookup, dtlsProfile engine.DTLSProfile) (*webrtc.API, error) {
 	settingEngine := webrtc.SettingEngine{}
 	apply, err := engine.NewPionSettings(engine.PionSettingsOptions{
 		Resolver:         resolver,
+		DTLSProfile:      dtlsProfile,
 		LoggerFactory:    logger.NewPionLoggerFactory(),
 		IPv4Only:         true,
 		ProxyDialer:      true,

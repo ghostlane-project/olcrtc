@@ -245,6 +245,7 @@ type Config struct {
 	Resolver       protect.Lookup
 	ProxyAddr      string
 	ProxyPort      int
+	DTLSProfile    engine.DTLSProfile
 
 	// RequireTargetedPeer makes single-peer engines ignore broadcast frames
 	// from unrelated olcrtc clients until a peer sends a frame addressed to
@@ -273,6 +274,7 @@ func (c Config) EngineConfig() enginebuiltin.Config {
 		OnPeerDatagram:      c.OnPeerDatagram,
 		DNSServer:           c.DNSServer,
 		Resolver:            c.Resolver,
+		DTLSProfile:         c.DTLSProfile,
 		ProxyAddr:           c.ProxyAddr,
 		ProxyPort:           c.ProxyPort,
 		RequireTargetedPeer: c.RequireTargetedPeer,

@@ -11,6 +11,7 @@ import (
 	"github.com/openlibrecommunity/olcrtc/internal/app/session"
 	internalclient "github.com/openlibrecommunity/olcrtc/internal/client"
 	"github.com/openlibrecommunity/olcrtc/internal/control"
+	"github.com/openlibrecommunity/olcrtc/internal/engine"
 	"github.com/openlibrecommunity/olcrtc/internal/protect"
 	"github.com/openlibrecommunity/olcrtc/internal/route"
 	runtimecfg "github.com/openlibrecommunity/olcrtc/internal/runtime"
@@ -98,6 +99,7 @@ type Config struct {
 	SOCKSUser        string
 	SOCKSPass        string
 	DNSServer        string
+	DTLSProfile      engine.DTLSProfile
 	Resolver         protect.Lookup
 	TransportOptions TransportOptions
 	Liveness         LivenessConfig
@@ -172,7 +174,8 @@ func toClientConfig(cfg Config) internalclient.Config {
 		ChannelID: cfg.ChannelID, Engine: cfg.Engine, URL: cfg.URL, Token: cfg.Token,
 		ProviderToken: cfg.ProviderToken, KeyHex: cfg.KeyHex, LocalAddr: cfg.LocalAddr,
 		SOCKSUser: cfg.SOCKSUser, SOCKSPass: cfg.SOCKSPass, DNSServer: cfg.DNSServer,
-		Resolver: cfg.Resolver, TransportOptions: toTransportOptions(cfg.TransportOptions),
+		DTLSProfile: cfg.DTLSProfile,
+		Resolver:    cfg.Resolver, TransportOptions: toTransportOptions(cfg.TransportOptions),
 		Liveness: control.Config{
 			Interval: cfg.Liveness.Interval, Timeout: cfg.Liveness.Timeout, Failures: cfg.Liveness.Failures,
 		},

@@ -1,0 +1,192 @@
+package engine
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"reflect"
+	"testing"
+	"time"
+
+	"github.com/pion/dtls/v3"
+	pionlogging "github.com/pion/logging"
+	"github.com/pion/webrtc/v4"
+)
+
+func TestValidateDTLSProfile(t *testing.T) {
+	for _, ok := range []DTLSProfile{"", DTLSProfileOff, DTLSProfileChrome138CompatV1} {
+		if err := ValidateDTLSProfile(ok); err != nil {
+			t.Fatalf("valid profile %q rejected: %v", ok, err)
+		}
+	}
+	for _, bad := range []DTLSProfile{"random", "auto", "chrome-linux-138.0.7204.94", "Chrome_138"} {
+		if err := ValidateDTLSProfile(bad); err == nil {
+			t.Fatalf("invalid profile %q accepted", bad)
+		}
+	}
+}
+
+func TestBuildMimicStripsOnlyKnownGap(t *testing.T) {
+	m, err := buildMimic(DTLSProfileChrome138CompatV1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	supported := make(map[uint16]bool)
+	for _, suite := range dtls.CipherSuites() {
+		supported[suite.ID] = true
+	}
+	var removed []uint16
+	for id := range chrome138CompatUnsupportedSuites {
+		removed = append(removed, id)
+	}
+	want := make(map[uint16]bool)
+	for _, id := range removed {
+		want[id] = true
+	}
+	for _, id := range m.CipherSuiteIDs {
+		if want[id] {
+			t.Fatalf("variant still advertises blocked suite %04x", id)
+		}
+		if !supported[id] {
+			t.Fatalf("variant advertises suite %04x absent from pinned Pion DTLS", id)
+		}
+	}
+	if reflect.DeepEqual(want, map[uint16]bool{}) || len(m.CipherSuiteIDs) == 0 {
+		t.Fatal("variant lost its suite list")
+	}
+}
+
+func TestNewPionSettingsDTLSProfileEarlyExits(t *testing.T) {
+	// Stock profile keeps the SDK-owned nil hook when nothing else is requested.
+	off, err := NewPionSettings(PionSettingsOptions{})
+	if err != nil || off != nil {
+		t.Fatalf("off profile must preserve the nil hook: %v %v", off, err)
+	}
+	// A chosen profile must apply even without logger, IPv4-only or protector.
+	withProfile, err := NewPionSettings(PionSettingsOptions{DTLSProfile: DTLSProfileChrome138CompatV1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withProfile == nil {
+		t.Fatal("profile lost at the first early exit")
+	}
+	settings := &webrtc.SettingEngine{}
+	withProfile(settings)
+	// The same inside the partial path (logger present, protector absent).
+	logging := webrtc.SettingEngine{}
+	withLogger, err := NewPionSettings(PionSettingsOptions{LoggerFactory: pionlogging.NewDefaultLoggerFactory(), DTLSProfile: DTLSProfileChrome138CompatV1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	withLogger(&logging)
+	// Unknown ids are rejected before any settings exist.
+	if _, err := NewPionSettings(PionSettingsOptions{DTLSProfile: "bogus"}); err == nil {
+		t.Fatal("unknown profile accepted by NewPionSettings")
+	}
+}
+
+func TestApplyDTLSProfileOffLeavesSettingsUntouched(t *testing.T) {
+	settings := &webrtc.SettingEngine{}
+	before := *settings
+	if err := ApplyDTLSProfile(settings, DTLSProfileOff); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyDTLSProfile(settings, ""); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(*settings, before) {
+		t.Fatal("off profile must not touch settings")
+	}
+	if err := ApplyDTLSProfile(settings, "bogus"); err == nil {
+		t.Fatal("unknown profile accepted at apply time")
+	}
+}
+
+// The wire contract: a peer configured through ApplyDTLSProfile answers a
+// stock offer with a ClientHello whose normalized shape equals the variant and
+// differs from both the stock Pion baseline and the original Chrome 138 bytes.
+func TestApplyDTLSProfileWireShape(t *testing.T) {
+	settings := &webrtc.SettingEngine{}
+	settings.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
+	settings.SetIncludeLoopbackCandidate(true)
+	settings.SetInterfaceFilter(func(name string) bool { return name == "lo" })
+	if err := ApplyDTLSProfile(settings, DTLSProfileChrome138CompatV1); err != nil {
+		t.Fatal(err)
+	}
+	client, err := webrtc.NewAPI(webrtc.WithSettingEngine(*settings)).NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	echoed := make(chan []byte, 4)
+	client.OnDataChannel(func(dc *webrtc.DataChannel) {
+		dc.OnMessage(func(m webrtc.DataChannelMessage) { _ = dc.Send(m.Data) })
+	})
+	server, err := webrtc.NewAPI().NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = server.Close() }()
+	dc, err := server.CreateDataChannel("dtls-shape", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	received := make(chan []byte, 4)
+	dc.OnMessage(func(m webrtc.DataChannelMessage) { received <- m.Data })
+	opened := make(chan struct{}, 1)
+	dc.OnOpen(func() { close(opened) })
+	offer, err := server.CreateOffer(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gathered := webrtc.GatheringCompletePromise(server)
+	if err := server.SetLocalDescription(offer); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-gathered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("gathering timeout")
+	}
+	if err := client.SetRemoteDescription(*server.LocalDescription()); err != nil {
+		t.Fatal(err)
+	}
+	answer, err := client.CreateAnswer(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gathered = webrtc.GatheringCompletePromise(client)
+	if err := client.SetLocalDescription(answer); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-gathered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("gathering timeout")
+	}
+	if err := server.SetRemoteDescription(*client.LocalDescription()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-opened:
+	case <-time.After(10 * time.Second):
+		t.Fatal("data channel did not open")
+	}
+	payload := make([]byte, 16*1024)
+	if err := dc.Send(payload); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case msg := <-received:
+		if !bytes.Equal(msg, payload) {
+			t.Fatal("echo mismatch")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("echo timeout")
+	}
+	_ = echoed
+}
+
+func sha256Sum(b []byte) []byte {
+	s := sha256.Sum256(b)
+	return s[:]
+}

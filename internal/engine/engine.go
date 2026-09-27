@@ -56,8 +56,11 @@ type Config struct {
 	OnPeerDatagram func(peerID string, data []byte)
 	DNSServer      string
 	Resolver       protect.Lookup
-	ProxyAddr      string
-	ProxyPort      int
+	// DTLSProfile selects a fixed ClientHello profile for this session;
+	// empty keeps the stock Pion handshake. Validated before dialing.
+	DTLSProfile DTLSProfile
+	ProxyAddr   string
+	ProxyPort   int
 	// RequireTargetedPeer asks engines that multiplex room-wide messages to
 	// ignore single-peer broadcast frames until the remote has addressed this
 	// session's local epoch.

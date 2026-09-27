@@ -53,6 +53,15 @@ type Settings struct {
 	Traffic   Traffic   `yaml:"traffic"`
 	UDP       UDP       `yaml:"udp"`
 	Route     Route     `yaml:"route"`
+	DTLS      DTLS      `yaml:"dtls"`
+}
+
+// DTLS selects the ClientHello profile of the engine handshake. An empty or
+// "off" profile keeps the stock Pion handshake; any other value must be a
+// known profile id and is rejected before dialing. Profiles inherit the base
+// settings; an explicit "off" overrides an inherited profile.
+type DTLS struct {
+	Profile string `yaml:"profile"`
 }
 
 // File is the on-disk YAML schema.
@@ -425,6 +434,7 @@ func ApplyProfile(base session.Config, profile Profile) session.Config {
 func ApplySettings(dst session.Config, s Settings) session.Config {
 	dst.Transport = overlay(dst.Transport, s.Net.Transport)
 	dst.DNSServer = overlay(dst.DNSServer, s.Net.DNS)
+	dst.DTLSProfile = overlay(dst.DTLSProfile, s.DTLS.Profile)
 
 	dst.Provider = overlay(dst.Provider, s.Auth.Provider)
 	dst.ProviderToken = overlay(dst.ProviderToken, s.Auth.Token)

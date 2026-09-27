@@ -8,6 +8,7 @@ import (
 
 	"github.com/openlibrecommunity/olcrtc/internal/client"
 	"github.com/openlibrecommunity/olcrtc/internal/control"
+	"github.com/openlibrecommunity/olcrtc/internal/engine"
 	"github.com/openlibrecommunity/olcrtc/internal/logger"
 	"github.com/openlibrecommunity/olcrtc/internal/route"
 	"github.com/openlibrecommunity/olcrtc/internal/server"
@@ -19,6 +20,9 @@ const defaultSessionRestartDelay = 2 * time.Second
 
 // Run applies defaults, validates the config, and starts the selected mode.
 func Run(ctx context.Context, cfg Config) error {
+	if err := engine.ValidateDTLSProfile(engine.DTLSProfile(cfg.DTLSProfile)); err != nil {
+		return fmt.Errorf("dtls: %w", err)
+	}
 	RegisterDefaults()
 	prepared, err := prepareRunConfig(cfg)
 	if err != nil {
@@ -85,7 +89,7 @@ func runServer(
 		Transport: cfg.Transport, Provider: cfg.Provider, RoomURL: roomURL, ChannelID: cfg.ChannelID,
 		KeyHex: cfg.KeyHex, Keys: cfg.KeysHex, StatsListen: cfg.StatsListen,
 		UDPDisabled: cfg.UDPDisabled, UDPMaxFlows: cfg.UDPMaxFlows,
-		DNSServer: cfg.DNSServer, Resolver: cfg.Resolver,
+		DNSServer: cfg.DNSServer, DTLSProfile: engine.DTLSProfile(cfg.DTLSProfile), Resolver: cfg.Resolver,
 		SOCKSProxyAddr: cfg.SOCKSProxyAddr, SOCKSProxyPort: cfg.SOCKSProxyPort,
 		SOCKSProxyUser: cfg.SOCKSProxyUser, SOCKSProxyPass: cfg.SOCKSProxyPass,
 		TransportOptions: opts, Engine: cfg.Engine, URL: cfg.URL, Token: cfg.Token,
@@ -129,7 +133,7 @@ func runClient(
 	err = client.Run(ctx, client.Config{
 		Transport: cfg.Transport, Provider: cfg.Provider, RoomURL: roomURL, ChannelID: cfg.ChannelID,
 		KeyHex: cfg.KeyHex, LocalAddr: fmt.Sprintf("%s:%d", cfg.SOCKSHost, cfg.SOCKSPort),
-		DNSServer: cfg.DNSServer, Resolver: cfg.Resolver, SOCKSUser: cfg.SOCKSUser,
+		DNSServer: cfg.DNSServer, DTLSProfile: engine.DTLSProfile(cfg.DTLSProfile), Resolver: cfg.Resolver, SOCKSUser: cfg.SOCKSUser,
 		SOCKSPass: cfg.SOCKSPass, TransportOptions: opts, Engine: cfg.Engine,
 		URL: cfg.URL, Token: cfg.Token, ProviderToken: cfg.ProviderToken,
 		Liveness: liveness, Traffic: traffic,

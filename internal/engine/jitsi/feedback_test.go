@@ -25,7 +25,7 @@ import (
 // goes dark in one direction while the other side keeps sending (issue #12).
 func TestConferenceReceiverSendsTransportCCFeedback(t *testing.T) {
 	bridge := newTaggingBridge(t)
-	endpointAPI, err := newConferenceAPI(nil)
+	endpointAPI, err := newConferenceAPI(nil, "")
 	if err != nil {
 		t.Fatalf("newConferenceAPI: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestConferenceReceiverSendsTransportCCFeedback(t *testing.T) {
 func TestConferenceReportsTheTracksNobodyReadsAsReceived(t *testing.T) {
 	session := newSilentSession(t)
 	bridge := newTaggingBridge(t)
-	endpointAPI, err := newConferenceAPI(nil)
+	endpointAPI, err := newConferenceAPI(nil, "")
 	if err != nil {
 		t.Fatalf("newConferenceAPI: %v", err)
 	}

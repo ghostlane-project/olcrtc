@@ -250,3 +250,21 @@ func TestSetDirectRulesParsesNow(t *testing.T) {
 	}
 	_ = runtime.Stop(1000)
 }
+
+func TestSetDTLSProfileValidatesBeforeStoring(t *testing.T) {
+	rt := New()
+	if err := rt.SetDTLSProfile("chrome-linux-138-compat-v1"); err != nil {
+		t.Fatalf("known profile rejected: %v", err)
+	}
+	if err := rt.SetDTLSProfile("off"); err != nil {
+		t.Fatalf("off rejected: %v", err)
+	}
+	if err := rt.SetDTLSProfile(""); err != nil {
+		t.Fatalf("empty rejected: %v", err)
+	}
+	for _, bad := range []string{"random", "auto", "chrome-linux-138.0.7204.94"} {
+		if err := rt.SetDTLSProfile(bad); err == nil {
+			t.Fatalf("invalid profile %q accepted", bad)
+		}
+	}
+}

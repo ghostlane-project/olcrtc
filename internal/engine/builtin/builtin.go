@@ -46,6 +46,7 @@ type Config struct {
 	OnPeerDatagram      func(peerID string, data []byte)
 	DNSServer           string
 	Resolver            protect.Lookup
+	DTLSProfile         engine.DTLSProfile
 	ProxyAddr           string
 	ProxyPort           int
 	RequireTargetedPeer bool
@@ -142,6 +143,7 @@ func register(name string, provider auth.Provider) {
 			OnPeerDatagram:      cfg.OnPeerDatagram,
 			DNSServer:           cfg.DNSServer,
 			Resolver:            cfg.Resolver,
+			DTLSProfile:         cfg.DTLSProfile,
 			ProxyAddr:           cfg.ProxyAddr,
 			ProxyPort:           cfg.ProxyPort,
 			RequireTargetedPeer: cfg.RequireTargetedPeer,

@@ -569,3 +569,20 @@ func TestApplyProfileOverridesRouteOnlyWhenNamed(t *testing.T) {
 		t.Fatalf("profile route = %q", replaced.DirectRules)
 	}
 }
+
+func TestApplySettingsDTLSProfileInheritsAndOverrides(t *testing.T) {
+	base := ApplySettings(session.Config{UDPDisabled: true}, Settings{DTLS: DTLS{Profile: "chrome-linux-138-compat-v1"}})
+	if base.DTLSProfile != "chrome-linux-138-compat-v1" {
+		t.Fatalf("base profile not applied: %q", base.DTLSProfile)
+	}
+	// A profile without dtls inherits the base value.
+	inherited := ApplyProfile(base, Profile{Settings: Settings{Room: Room{ID: "r2"}}})
+	if inherited.DTLSProfile != "chrome-linux-138-compat-v1" {
+		t.Fatalf("profile lost inherited dtls profile: %q", inherited.DTLSProfile)
+	}
+	// An explicit off overrides the inherited profile.
+	off := ApplyProfile(base, Profile{Settings: Settings{DTLS: DTLS{Profile: "off"}}})
+	if off.DTLSProfile != "off" {
+		t.Fatalf("explicit off did not override: %q", off.DTLSProfile)
+	}
+}

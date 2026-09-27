@@ -9,6 +9,7 @@ require (
 	github.com/livekit/protocol v1.50.1
 	github.com/magefile/mage v1.17.2
 	github.com/owenewans/owenlivekit/v2 v2.18.2
+	github.com/pion/dtls/v3 v3.1.4
 	github.com/pion/ice/v4 v4.2.7
 	github.com/pion/interceptor v0.1.45
 	github.com/pion/logging v0.2.4
@@ -16,6 +17,7 @@ require (
 	github.com/pion/rtp v1.10.2
 	github.com/pion/transport/v4 v4.0.2
 	github.com/pion/webrtc/v4 v4.2.15
+	github.com/theodorsm/covert-dtls v1.5.2-0.20260923053106-38d973a9488c
 	github.com/wlynxg/anet v0.0.5
 	github.com/xtaci/kcp-go/v5 v5.6.72
 	github.com/xtaci/smux v1.5.57
@@ -63,7 +65,6 @@ require (
 	github.com/nats-io/nkeys v0.4.16 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect
 	github.com/pion/datachannel v1.6.0 // indirect
-	github.com/pion/dtls/v3 v3.1.4 // indirect
 	github.com/pion/mdns/v2 v2.1.0 // indirect
 	github.com/pion/randutil v0.1.0 // indirect
 	github.com/pion/sctp v1.10.0 // indirect
