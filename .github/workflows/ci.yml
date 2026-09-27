@@ -284,6 +284,7 @@ jobs:
           GATE_WBSTREAM_ROOMS: ${{ secrets.GATE_WBSTREAM_ROOMS }}
           GATE_WBSTREAM_TOKEN: ${{ secrets.GATE_WBSTREAM_TOKEN }}
           GATE_JITSI_HOSTS: ${{ secrets.GATE_JITSI_HOSTS }}
+          GATE_VKCALLS_ROOMS: ${{ secrets.GATE_VKCALLS_ROOMS }}
         run: |
           # Every value is masked before any step could print it. Split on
           # line breaks too: a line of a value the mask missed would print.
@@ -332,6 +333,7 @@ jobs:
           OLCRTC_GATE_WBSTREAM_ROOMS: ${{ secrets.GATE_WBSTREAM_ROOMS }}
           OLCRTC_GATE_WBSTREAM_TOKEN: ${{ secrets.GATE_WBSTREAM_TOKEN }}
           OLCRTC_GATE_JITSI_HOSTS: ${{ secrets.GATE_JITSI_HOSTS }}
+          OLCRTC_GATE_VKCALLS_ROOMS: ${{ secrets.GATE_VKCALLS_ROOMS }}
         run: |
           go test -count=1 -timeout 25m ./internal/gate -run '^TestGate$' -v \
             -olcrtc.gate -olcrtc.gate-target=local -olcrtc.gate-dir=gate-artifacts/cli
@@ -344,6 +346,7 @@ jobs:
           OLCRTC_GATE_WBSTREAM_ROOMS: ${{ secrets.GATE_WBSTREAM_ROOMS }}
           OLCRTC_GATE_WBSTREAM_TOKEN: ${{ secrets.GATE_WBSTREAM_TOKEN }}
           OLCRTC_GATE_JITSI_HOSTS: ${{ secrets.GATE_JITSI_HOSTS }}
+          OLCRTC_GATE_VKCALLS_ROOMS: ${{ secrets.GATE_VKCALLS_ROOMS }}
         run: |
           go test -count=1 -tags olcrtc_lean -timeout 45m ./internal/gate -run '^TestGate$' -v \
             -olcrtc.gate -olcrtc.gate-target=local -olcrtc.gate-dir=gate-artifacts/mobile

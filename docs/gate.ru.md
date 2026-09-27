@@ -104,6 +104,7 @@ go test -count=1 -tags olcrtc_lean -timeout 45m ./internal/gate -run '^TestGate$
 | `GATE_WBSTREAM_ROOMS` | да | `OLCRTC_GATE_WBSTREAM_ROOMS` | пул WB Stream: id или URL комнат |
 | `GATE_WBSTREAM_TOKEN` | да | `OLCRTC_GATE_WBSTREAM_TOKEN` | access token аккаунта WB Stream |
 | `GATE_JITSI_HOSTS` | нет | `OLCRTC_GATE_JITSI_HOSTS` | хосты Jitsi; пусто - список инстансов |
+| `GATE_VKCALLS_ROOMS` | нет | `OLCRTC_GATE_VKCALLS_ROOMS` | Пул VK Calls: ссылки на комнаты (https://vk.ru/call/join/<id>). Зарезервировано: гейт начнёт читать его, когда появится движок vkcalls; до тех пор значение только маскируется |
 
 Первый шаг джобы маскирует каждую запись, id комнаты, которым заканчивается URL записи, каждый хост Jitsi как есть и голым, и токен; затем называет каждый обязательный секрет, который не задан. Ячейки, которым нужен отсутствующий секрет, проваливаются в отчёте с той же причиной, поэтому джоба падает, а остальные провайдеры всё равно прогоняются. Секреты доходят до `go test` только через `env` шага, никогда через argv или текст скрипта. Задавайте секрет со стандартного ввода (`gh secret set GATE_WBSTREAM_TOKEN`), а не в командной строке, и никогда не коммитьте комнату, ссылку, ключ или токен.
 

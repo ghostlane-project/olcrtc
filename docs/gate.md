@@ -104,6 +104,7 @@ Secrets of the engine repository (Settings > Secrets and variables > Actions) fo
 | `GATE_WBSTREAM_ROOMS` | yes | `OLCRTC_GATE_WBSTREAM_ROOMS` | WB Stream pool: ids or room URLs |
 | `GATE_WBSTREAM_TOKEN` | yes | `OLCRTC_GATE_WBSTREAM_TOKEN` | WB Stream account access token |
 | `GATE_JITSI_HOSTS` | no | `OLCRTC_GATE_JITSI_HOSTS` | Jitsi hosts; empty means the instance list |
+| `GATE_VKCALLS_ROOMS` | no | `OLCRTC_GATE_VKCALLS_ROOMS` | VK Calls pool: room URLs (https://vk.ru/call/join/<id>). Reserved: the gate consumes it once the vkcalls engine lands; until then it is only masked and named |
 
 The job's first step masks every entry, the room id an entry's URL ends in, each Jitsi host as given and bare, and the token; then it names each required secret that is not set. The cells that need a missing secret fail in the report with the same reason, so the job fails, while the other providers still run. The secrets reach `go test` through step `env` only, never argv or script text. Set a secret from standard input (`gh secret set GATE_WBSTREAM_TOKEN`), never on the command line, and never commit a room, a link, a key or a token.
 
