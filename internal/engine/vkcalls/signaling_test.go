@@ -2,7 +2,10 @@ package vkcalls
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -170,5 +173,96 @@ func TestSignalingURL(t *testing.T) {
 	}
 	if _, err := signalingURL("https://calls.example/", ""); err == nil {
 		t.Fatal("expected endpoint error")
+	}
+}
+
+// frameHeader is the first header of a client frame as it arrives on the wire.
+type frameHeader struct {
+	fin    bool
+	opcode byte
+	length uint64
+}
+
+// readFrameHeader parses one raw WebSocket frame header (RFC 6455 5.2):
+// gorilla's own reader would join continuation frames and hide a split.
+func readFrameHeader(r io.Reader) (frameHeader, error) {
+	var b [2]byte
+	if _, err := io.ReadFull(r, b[:]); err != nil {
+		return frameHeader{}, err
+	}
+	h := frameHeader{fin: b[0]&0x80 != 0, opcode: b[0] & 0x0f, length: uint64(b[1] & 0x7f)}
+	switch h.length {
+	case 126:
+		var ext [2]byte
+		if _, err := io.ReadFull(r, ext[:]); err != nil {
+			return frameHeader{}, err
+		}
+		h.length = uint64(binary.BigEndian.Uint16(ext[:]))
+	case 127:
+		var ext [8]byte
+		if _, err := io.ReadFull(r, ext[:]); err != nil {
+			return frameHeader{}, err
+		}
+		h.length = binary.BigEndian.Uint64(ext[:])
+	}
+	return h, nil
+}
+
+// TestSignalingLargeCommandIsOneFrame pins the wire shape of a large command.
+// The SFU parses each text frame on its own: an accept-producer description
+// (~50 KB) split into 4 KiB continuation frames came back as invalid-request
+// "Invalid message format" with no sequence (live engine smoke, 2026-09-28),
+// while the probe's single frame with the same bytes was accepted.
+func TestSignalingLargeCommandIsOneFrame(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	headers := make(chan frameHeader, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		raw := conn.NetConn()
+		_ = raw.SetReadDeadline(time.Now().Add(5 * time.Second))
+		header, err := readFrameHeader(raw)
+		if err != nil {
+			close(headers)
+			return
+		}
+		headers <- header
+		_ = conn.WriteMessage(websocket.TextMessage,
+			[]byte(`{"stamp":0,"sequence":1,"response":"accept-producer","type":"response"}`))
+		_, _ = io.Copy(io.Discard, raw)
+	}))
+	defer server.Close()
+
+	client, err := dialSignaling(context.Background(), "ws"+server.URL[4:]+"?token=t&userId=42", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.close()
+
+	payload := map[string]any{fieldDescription: strings.Repeat("a=rtcp-fb:96 nack pli\r\n", 3000)}
+	want, err := orderedCommandFrame("accept-producer", 1, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.command(context.Background(), "accept-producer", payload); err != nil {
+		t.Fatal(err)
+	}
+	header, ok := <-headers
+	if !ok {
+		t.Fatal("server read no frame header")
+	}
+	if !header.fin || header.opcode != websocket.TextMessage || header.length != uint64(len(want)) {
+		t.Fatalf("accept-producer of %d bytes went out as fin=%v opcode=%d length=%d; want one text frame",
+			len(want), header.fin, header.opcode, header.length)
+	}
+
+	// A command larger than the write buffer is refused before any byte goes
+	// out, never split.
+	huge := map[string]any{fieldDescription: strings.Repeat("x", signalingWriteBuffer)}
+	if _, err := client.command(context.Background(), "accept-producer", huge); !errors.Is(err, ErrSignalingFrameTooLarge) {
+		t.Fatalf("oversized command: got %v, want ErrSignalingFrameTooLarge", err)
 	}
 }

@@ -298,7 +298,7 @@ func acceptPayload(offer, shaped, sessionID string) map[string]any {
 	for _, ssrc := range ssrcs {
 		ids = append(ids, ssrc)
 	}
-	return map[string]any{"description": shaped, "sessionId": sessionID, "ssrcs": ids}
+	return map[string]any{fieldDescription: shaped, "sessionId": sessionID, "ssrcs": ids}
 }
 
 // waitOffer returns the first producer-updated notification, or an empty one

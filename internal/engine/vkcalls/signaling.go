@@ -28,6 +28,8 @@ var (
 	ErrSignalingRejected  = errors.New("vkcalls: signaling command rejected")
 	ErrSignalingTimeout   = errors.New("vkcalls: signaling response timeout")
 	ErrSignalingNotServer = errors.New("vkcalls: conversation is not in SERVER topology")
+	// ErrSignalingFrameTooLarge refuses a command that would not fit one frame.
+	ErrSignalingFrameTooLarge = errors.New("vkcalls: signaling command exceeds one frame")
 )
 
 const (
@@ -35,11 +37,20 @@ const (
 	commandTimeout     = 15 * time.Second
 	connectionTimeout  = 30 * time.Second
 
+	// signalingWriteBuffer bounds one command frame. The SFU parses every
+	// text frame on its own and answers a continuation-split message with
+	// invalid-request, so each command must leave as a single frame, and
+	// gorilla splits a client message at its write buffer (4 KiB by
+	// default). An accept-producer answer is ~50 KB for the 41-section
+	// offer; the buffer leaves room for about five times that.
+	signalingWriteBuffer = 256 << 10
+
 	// Wire field names and values used more than once.
-	fieldSequence  = "sequence"
-	frameTypeError = "error"
-	reasonHungup   = "HUNGUP"
-	topologyServer = "SERVER"
+	fieldSequence    = "sequence"
+	fieldDescription = "description"
+	frameTypeError   = "error"
+	reasonHungup     = "HUNGUP"
+	topologyServer   = "SERVER"
 
 	// capabilitiesBitmask is the feature set this engine actually implements:
 	// unified plan, single session and the producer-command data channel. The
@@ -95,6 +106,7 @@ func dialSignaling(ctx context.Context, endpoint, peerID string, resolver protec
 		return nil, err
 	}
 	dialer := protect.NewWebSocketDialer(wsHandshakeTimeout, resolver)
+	dialer.WriteBufferSize = signalingWriteBuffer
 	conn, response, err := dialer.DialContext(ctx, target, http.Header{
 		"Origin":  {"https://vk.com"},
 		"Referer": {"https://vk.com/"},
@@ -236,7 +248,15 @@ func (c *signalingClient) command(ctx context.Context, name string, payload any)
 	c.writeMu.Lock()
 	sequence := c.sequence + 1
 	c.sequence = sequence
+	// The response can arrive before the write returns: the waiter is in
+	// place before the first byte goes out.
+	ch := make(chan notification, 1)
+	c.pending.Store(sequence, ch)
+	defer c.pending.Delete(sequence)
 	raw, err := orderedCommandFrame(name, sequence, payload)
+	if err == nil && len(raw) > signalingWriteBuffer {
+		err = fmt.Errorf("%w: %d bytes", ErrSignalingFrameTooLarge, len(raw))
+	}
 	if err == nil {
 		recordFrame("out", raw)
 		err = c.conn.WriteMessage(websocket.TextMessage, raw)
@@ -245,10 +265,6 @@ func (c *signalingClient) command(ctx context.Context, name string, payload any)
 	if err != nil {
 		return notification{}, fmt.Errorf("vkcalls: signaling write %s: %w", name, err)
 	}
-
-	ch := make(chan notification, 1)
-	c.pending.Store(sequence, ch)
-	defer c.pending.Delete(sequence)
 
 	timer := time.NewTimer(commandTimeout)
 	defer timer.Stop()
@@ -268,16 +284,17 @@ func (c *signalingClient) command(ctx context.Context, name string, payload any)
 }
 
 // orderedCommandFrame renders a command frame with command and sequence
-// first, then the payload's own fields: the order the SDK writes and the
-// SFU's accept-producer parser accepts — a Go map marshal would sort the
-// keys and the server answers invalid-request.
+// first, then the payload's own fields: the order the SDK writes. The
+// invalid-request first blamed on a sorted-key map marshal was the
+// continuation split (see signalingWriteBuffer); the SDK order stays, as the
+// captured frames are the only shape known to be accepted.
 func orderedCommandFrame(name string, sequence int64, payload any) ([]byte, error) {
 	nameJSON, err := json.Marshal(name)
 	if err != nil {
 		return nil, err //nolint:wrapcheck // marshalling a plain string
 	}
 	head := append([]byte(`{"command":`), nameJSON...)
-	// The SDK's key order; a sorted map marshal gets invalid-request.
+	// The SDK's key order, as captured.
 	//nolint:gocritic // building JSON in a fixed key order
 	head = append(head, fmt.Sprintf(`,"%s":%d,`, fieldSequence, sequence)...)
 	body, err := json.Marshal(payload)
