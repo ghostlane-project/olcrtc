@@ -190,7 +190,7 @@ func (s *Session) Connect(ctx context.Context) error {
 // negotiate answers one producer offer: the bundled peer connection mirrors
 // the offer's codecs, the shaped answer passes the transport gate and
 // accept-producer completes the session.
-func (s *Session) negotiate(ctx context.Context, gen *generation, offer string) error {
+func (s *Session) negotiate(ctx context.Context, gen *generation, offer string) error { //nolint:gocyclo,cyclop
 	api, err := newWebRTCAPI(offer, s.cfg, s.cfg.Resolver)
 	if err != nil {
 		return err
@@ -334,7 +334,9 @@ func (s *Session) openControlChannels(gen *generation, pc *webrtc.PeerConnection
 			frame := encodeChangeSimulcast(seq, "l", w, h, fps, kbps*1000)
 			if expOn("chsim3") {
 				// Chrome's rs(1280,720): three layers announced, h inactive.
-				frame = encodeChangeSimulcastLayers(seq, [][5]any{{"l", 320, 180, 20, 180000}, {"m", 640, 360, 20, 500000}, {"h", 1280, 720, 20, 1200000}})
+				layers := [][5]any{{"l", 320, 180, 20, 180000}, {"m", 640, 360, 20, 500000},
+					{"h", 1280, 720, 20, 1200000}}
+				frame = encodeChangeSimulcastLayers(seq, layers)
 			}
 			logger.Debugf("vkcalls: change-simulcast %x: %v", frame, command.Send(frame))
 		}
@@ -566,7 +568,7 @@ func (gen *generation) perfStatLoop() {
 		var received uint32
 		for _, entry := range gen.pc.GetStats() {
 			inbound, ok := entry.(webrtc.InboundRTPStreamStats)
-			if !ok || inbound.Kind != "video" {
+			if !ok || inbound.Kind != kindVideo {
 				continue
 			}
 			received += inbound.PacketsReceived

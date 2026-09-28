@@ -24,11 +24,13 @@ import (
 
 // maxSDPSize bounds accepted SDP inputs; live offers are ~70 KB.
 const (
-	maxSDPSize = 1 << 20
-	trickleLn  = "a=ice-options:trickle"
-	activeLn   = "a=setup:active"
-	kindAudio  = "audio"
-	zeroAddrLn = "c=IN IP4 0.0.0.0"
+	maxSDPSize  = 1 << 20
+	trickleLn   = "a=ice-options:trickle"
+	activeLn    = "a=setup:active"
+	kindAudio   = "audio"
+	kindVideo   = "video"
+	dirSendOnly = "sendonly"
+	zeroAddrLn  = "c=IN IP4 0.0.0.0"
 )
 
 // Shaping errors. They name the missing piece, never the values.
@@ -142,7 +144,7 @@ func (st *ShapeState) audioSSRC(mid string) uint32 {
 // and the video publish declaration come from native, the Pion-generated
 // answer. The session header is fully generated: the transport gate accepts
 // it (spike hybrid-16) and no captured template is needed.
-func ShapeAnswer(offer, native string, st *ShapeState) (string, error) {
+func ShapeAnswer(offer, native string, st *ShapeState) (string, error) { //nolint:gocognit,gocyclo,cyclop
 	offer = strings.ReplaceAll(offer, "\r\n", "\n")
 	native = strings.ReplaceAll(native, "\r\n", "\n")
 	ufrag := iceUfragLine.FindStringSubmatch(native)
@@ -162,7 +164,7 @@ func ShapeAnswer(offer, native string, st *ShapeState) (string, error) {
 	}
 	st.NativeVideoSSRC = nil
 	st.NativeAudioSSRC = map[string]uint32{}
-	if nativeSections, splitErr := splitSections(native); splitErr == nil {
+	if nativeSections, splitErr := splitSections(native); splitErr == nil { //nolint:nestif
 		for _, sec := range nativeSections {
 			if sec.kind() == kindAudio && sec.direction() == "sendonly" {
 				for _, line := range sec {
@@ -174,11 +176,13 @@ func ShapeAnswer(offer, native string, st *ShapeState) (string, error) {
 					}
 				}
 			}
-			if sec.kind() != "video" || sec.direction() != "sendonly" {
+			if sec.kind() != kindVideo || sec.direction() != dirSendOnly {
 				continue
 			}
 			for _, line := range sec {
-				if strings.HasPrefix(line, "a=ssrc-group:") || (strings.HasPrefix(line, "a=ssrc:") && (strings.Contains(line, " cname:") || (expOn("simssrc") && strings.Contains(line, " msid:")))) {
+				isCName := strings.HasPrefix(line, "a=ssrc:") && strings.Contains(line, " cname:")
+				isMsid := expOn("simssrc") && strings.HasPrefix(line, "a=ssrc:") && strings.Contains(line, " msid:")
+				if strings.HasPrefix(line, "a=ssrc-group:") || isCName || isMsid {
 					st.NativeVideoSSRC = append(st.NativeVideoSSRC, line)
 				}
 			}
@@ -228,8 +232,8 @@ func cryptoBlock(ufrag, pwd, fingerprint string) []string {
 }
 
 // shapeSection reconstructs one offer section in the reference byte order.
-func shapeSection(sec section, crypto []string, st *ShapeState, msid, msidStream string,
-	publishSSRC uint32, cname string,
+func shapeSection(sec section, crypto []string, st *ShapeState, msid, msidStream string, //nolint:cyclop
+	_ uint32, cname string,
 ) ([]string, error) {
 	mid := sec.mid()
 	if mid == "" {
@@ -251,7 +255,7 @@ func shapeSection(sec section, crypto []string, st *ShapeState, msid, msidStream
 		}
 	}
 	switch sec.direction() {
-	case "sendonly":
+	case dirSendOnly:
 		// The SFU sends here: answer recv-only with the offered vocabulary.
 		out = append(out, "a=recvonly", "a=rtcp-mux")
 		out = append(out, codecLines(sec)...)
@@ -284,8 +288,8 @@ func shapeSection(sec section, crypto []string, st *ShapeState, msid, msidStream
 		}
 		if kind == kindAudio {
 			ssrc := st.audioSSRC(mid)
-			if real, ok := st.NativeAudioSSRC[mid]; ok && expOn("audio") {
-				ssrc = real
+			if actual, ok := st.NativeAudioSSRC[mid]; ok && expOn("audio") {
+				ssrc = actual
 			}
 			out = append(out, "a=ssrc:"+strconv.FormatUint(uint64(ssrc), 10)+" cname:"+cname)
 			return out, nil
@@ -327,7 +331,7 @@ func videoPublishOf(native string) (uint32, string, string, string, error) {
 		return 0, "", "", "", err
 	}
 	for _, sec := range sections {
-		if sec.kind() != "video" || sec.direction() != "sendonly" {
+		if sec.kind() != kindVideo || sec.direction() != dirSendOnly {
 			continue
 		}
 		msid := "a=msid:proofkit video"
@@ -414,10 +418,14 @@ func withoutVP9(sec section, out []string) (string, []string) {
 	}
 	f := strings.Fields(sec[0])
 	m := strings.Join(f[:3], " ")
+	parts := make([]string, 0, len(f))
 	for _, pt := range f[3:] {
 		if !drop[pt] {
-			m += " " + pt
+			parts = append(parts, pt)
 		}
+	}
+	if len(parts) > 0 {
+		m += " " + strings.Join(parts, " ")
 	}
 	return m, out
 }

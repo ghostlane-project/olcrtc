@@ -95,7 +95,7 @@ const (
 // localProviders is every provider the local target carries, in the order a
 // default run walks them (-olcrtc.gate-providers).
 func localProviders() []string {
-	return []string{providerJitsi, providerTelemost, providerWBStream, providerSaluteJazz}
+	return []string{providerJitsi, providerTelemost, providerWBStream, providerSaluteJazz, providerVKCalls}
 }
 
 // transportsOf is which transports a provider carries (amendment A1, the

@@ -109,6 +109,9 @@ func (Provider) DefaultServiceURL() string { return "" }
 
 // Credential keys of the v1 Extra contract (spec section 7.2).
 const (
+	strTrue  = "true"
+	strFalse = "false"
+
 	KeySchema        = "vkcalls_schema"
 	KeyRoomURL       = "room_url"
 	KeyICEServers    = "ice_servers"
@@ -120,6 +123,8 @@ const (
 )
 
 // Issue runs the guest chain for cfg.RoomURL.
+//
+//nolint:gocyclo,cyclop,funlen // the five-step guest chain, one step per call
 func (p Provider) Issue(ctx context.Context, cfg auth.Config) (auth.Credentials, error) {
 	if cfg.RoomURL == "" {
 		return auth.Credentials{}, ErrRoomURLRequired
@@ -211,13 +216,13 @@ func (p Provider) Issue(ctx context.Context, cfg auth.Config) (auth.Credentials,
 		TurnServer any    `json:"turn_server"`
 	}{}
 	joinParams := map[string]string{
-		"joinLink": linkID(link), "isVideo": "false", "protocolVersion": "5",
+		"joinLink": linkID(link), "isVideo": strFalse, "protocolVersion": "5",
 		"anonymToken": issued.Response.Token, "session_key": session.SessionKey,
 	}
 	if os.Getenv("VKCALLS_JOIN") == "browser" {
 		// EXPERIMENT: the web SDK's join: a video-capable client with the
 		// capabilities mask it also puts in the signaling URL.
-		joinParams["isVideo"] = "true"
+		joinParams["isVideo"] = strTrue
 		joinParams["capabilities"] = "6F7F"
 	}
 	if joinErr := p.fbCall(ctx, client, stageJoin, joinParams, &join); joinErr != nil {
@@ -413,7 +418,7 @@ func credentialsFromJoin(link, userID, endpoint, token string, deviceIdx any,
 	if clientType == "" {
 		return auth.Credentials{}, ErrMissingClientType
 	}
-	p2pValue := "true" // absent or invalid forbids DIRECT (spec 7.2)
+	p2pValue := strTrue // absent or invalid forbids DIRECT (spec 7.2)
 	if p2p != nil {
 		p2pValue = strconv.FormatBool(*p2p)
 	}

@@ -2,10 +2,11 @@ package vkcalls
 
 import (
 	"fmt"
-	"github.com/pion/interceptor"
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/pion/interceptor"
 
 	"github.com/pion/webrtc/v4"
 
@@ -98,7 +99,7 @@ func registerSectionCodecs(media *webrtc.MediaEngine, sec section) error {
 		return nil
 	}
 	kind := strings.TrimPrefix(head[0], "m=")
-	if kind != kindAudio && kind != "video" {
+	if kind != kindAudio && kind != kindVideo {
 		return nil
 	}
 	codecType := webrtc.RTPCodecTypeVideo

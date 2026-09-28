@@ -349,7 +349,7 @@ func TestShapeAnswerPublishDropsVP9(t *testing.T) {
 			}
 		}
 	}
-	if publish == nil || publish[0] != "m=video 9 UDP/TLS/RTP/SAVPF 100 101" {
+	if len(publish) == 0 || publish[0] != "m=video 9 UDP/TLS/RTP/SAVPF 100 101" {
 		t.Fatalf("publish m-line %q, want VP8 and its rtx only", publish[:1])
 	}
 	for _, l := range publish {
