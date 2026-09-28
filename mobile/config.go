@@ -568,7 +568,7 @@ func validateDNSEntry(entry string) error {
 // here cannot be selected at all.
 func supportedProvider(provider string) bool {
 	switch provider {
-	case "jitsi", "telemost", "wbstream", "salutejazz", providerNone:
+	case "jitsi", "telemost", "wbstream", "salutejazz", "vkcalls", providerNone:
 		return true
 	default:
 		return false
