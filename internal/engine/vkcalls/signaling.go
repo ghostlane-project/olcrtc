@@ -1,0 +1,341 @@
+package vkcalls
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/url"
+	"strconv"
+	"sync"
+	"time"
+
+	"github.com/gorilla/websocket"
+
+	"github.com/openlibrecommunity/olcrtc/internal/logger"
+	"github.com/openlibrecommunity/olcrtc/internal/protect"
+)
+
+// Signaling errors, all static for wrapping discipline.
+var (
+	ErrSignalingEndpoint  = errors.New("vkcalls: invalid signaling endpoint")
+	ErrParticipantID      = errors.New("vkcalls: invalid participant id")
+	ErrSignalingClosed    = errors.New("vkcalls: signaling socket closed")
+	ErrSignalingRejected  = errors.New("vkcalls: signaling command rejected")
+	ErrSignalingTimeout   = errors.New("vkcalls: signaling response timeout")
+	ErrSignalingNotServer = errors.New("vkcalls: conversation is not in SERVER topology")
+)
+
+const (
+	wsHandshakeTimeout = 20 * time.Second
+	commandTimeout     = 15 * time.Second
+	connectionTimeout  = 30 * time.Second
+
+	// Wire field names and values used more than once.
+	fieldSequence  = "sequence"
+	frameTypeError = "error"
+	reasonHungup   = "HUNGUP"
+	topologyServer = "SERVER"
+
+	// capabilitiesBitmask is the feature set this engine actually implements:
+	// unified plan, single session and the producer-command data channel. The
+	// SDK reference mask is a diagnostic control in the spike, not a constant
+	// to copy (spec 7.4).
+	capabilitiesBitmask = "2F7F"
+)
+
+// notification is one server frame. Only the fields the engine acts on are
+// decoded; everything else stays raw for diagnostics.
+type notification struct {
+	Type         string `json:"type"`
+	Sequence     int64  `json:"sequence"`
+	Response     string `json:"response"`
+	Notification string `json:"notification"`
+	Stamp        int64  `json:"stamp"`
+	PeerID       *struct {
+		ID string `json:"id"`
+	} `json:"peerId"` //nolint:tagliatelle // connector wire is camelCase
+	SessionID    string `json:"sessionId"` //nolint:tagliatelle // connector wire is camelCase
+	Description  string `json:"description"`
+	Conversation *struct {
+		Topology     string `json:"topology"`
+		Participants []struct {
+			ID    any    `json:"id"`
+			State string `json:"state"`
+		} `json:"participants"`
+	} `json:"conversation"`
+	ParticipantID any `json:"participantId"` //nolint:tagliatelle // connector wire is camelCase
+}
+
+// signalingClient is one signaling WebSocket: a single reader goroutine, a
+// serialized writer and pending commands correlated by sequence.
+type signalingClient struct {
+	conn    *websocket.Conn
+	writeMu sync.Mutex
+	pending sync.Map // int64 -> chan notification
+
+	sequence int64
+	stamp    int64
+	self     string
+
+	notifications chan notification
+	closed        chan struct{}
+	closeOnce     sync.Once
+}
+
+// dialSignaling opens the signaling socket. The endpoint comes from the auth
+// provider's join response and already carries the token and userId query.
+func dialSignaling(ctx context.Context, endpoint, peerID string, resolver protect.Lookup) (*signalingClient, error) {
+	target, err := signalingURL(endpoint, peerID)
+	if err != nil {
+		return nil, err
+	}
+	dialer := protect.NewWebSocketDialer(wsHandshakeTimeout, resolver)
+	conn, response, err := dialer.DialContext(ctx, target, http.Header{
+		"Origin":  {"https://vk.com"},
+		"Referer": {"https://vk.com/"},
+	})
+	if response != nil && response.Body != nil {
+		_ = response.Body.Close()
+	}
+	if err != nil {
+		return nil, fmt.Errorf("vkcalls: signaling dial: %w", err)
+	}
+	client := &signalingClient{
+		conn:          conn,
+		self:          selfParticipant(endpoint),
+		notifications: make(chan notification, 16),
+		closed:        make(chan struct{}),
+	}
+	go client.readLoop()
+	return client, nil
+}
+
+// signalingURL extends the join endpoint with the client parameters the SDK
+// sends on a fresh join.
+func signalingURL(endpoint, peerID string) (string, error) {
+	u, err := url.Parse(endpoint)
+	// ws:// is the local-test transport; production endpoints arrive from the
+	// auth provider, which accepts only wss.
+	if err != nil || (u.Scheme != "wss" && u.Scheme != "ws") {
+		return "", fmt.Errorf("%w: %w", ErrSignalingEndpoint, err)
+	}
+	q := u.Query()
+	q.Set("platform", "WEB")
+	q.Set("appVersion", "1.1")
+	q.Set("version", "5")
+	q.Set("device", "browser")
+	q.Set("capabilities", capabilitiesBitmask)
+	q.Set("clientType", "VK")
+	q.Set("tgt", "join")
+	if peerID != "" {
+		q.Set("peerId", peerID)
+	}
+	u.RawQuery = q.Encode()
+	return u.String(), nil
+}
+
+func selfParticipant(endpoint string) string {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return ""
+	}
+	return u.Query().Get("userId")
+}
+
+// Self returns this session's participant id.
+func (c *signalingClient) Self() string { return c.self }
+
+// Notifications exposes the server frames; the reader drops nothing.
+func (c *signalingClient) Notifications() <-chan notification { return c.notifications }
+
+// Closed is closed once the socket is gone.
+func (c *signalingClient) Closed() <-chan struct{} { return c.closed }
+
+// readLoop is the socket's only reader.
+func (c *signalingClient) readLoop() {
+	defer c.shutdown()
+	for {
+		messageType, data, err := c.conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		if messageType != websocket.TextMessage {
+			continue
+		}
+		if string(data) == "ping" {
+			_ = c.write(websocket.TextMessage, []byte("pong"))
+			continue
+		}
+		var note notification
+		if err := json.Unmarshal(data, &note); err != nil {
+			logger.Debugf("vkcalls: invalid signaling frame")
+			continue
+		}
+		if note.Stamp != 0 {
+			c.stamp = note.Stamp
+		}
+		c.deliver(note)
+	}
+}
+
+func (c *signalingClient) deliver(note notification) {
+	if note.Sequence != 0 {
+		if loaded, ok := c.pending.LoadAndDelete(note.Sequence); ok {
+			if ch, ok := loaded.(chan notification); ok {
+				select {
+				case ch <- note:
+				default:
+				}
+			}
+			return
+		}
+	}
+	select {
+	case c.notifications <- note:
+	case <-c.closed:
+	default:
+		logger.Debugf("vkcalls: notification dropped, queue full")
+	}
+}
+
+// command sends one command frame and waits for its response or error frame.
+func (c *signalingClient) command(ctx context.Context, name string, payload any) (notification, error) {
+	c.writeMu.Lock()
+	sequence := c.sequence + 1
+	c.sequence = sequence
+	frame := map[string]any{"command": name, fieldSequence: sequence}
+	if m, ok := payload.(map[string]any); ok {
+		for key, value := range m {
+			frame[key] = value
+		}
+	}
+	raw, err := json.Marshal(frame)
+	if err == nil {
+		err = c.conn.WriteMessage(websocket.TextMessage, raw)
+	}
+	c.writeMu.Unlock()
+	if err != nil {
+		return notification{}, fmt.Errorf("vkcalls: signaling write %s: %w", name, err)
+	}
+
+	ch := make(chan notification, 1)
+	c.pending.Store(sequence, ch)
+	defer c.pending.Delete(sequence)
+
+	timer := time.NewTimer(commandTimeout)
+	defer timer.Stop()
+	select {
+	case note := <-ch:
+		if note.Type == frameTypeError {
+			return note, fmt.Errorf("%w: %s", ErrSignalingRejected, name)
+		}
+		return note, nil
+	case <-timer.C:
+		return notification{}, fmt.Errorf("%w: %s", ErrSignalingTimeout, name)
+	case <-c.closed:
+		return notification{}, fmt.Errorf("%w: %s", ErrSignalingClosed, name)
+	case <-ctx.Done():
+		return notification{}, fmt.Errorf("vkcalls: signaling %s: %w", name, ctx.Err())
+	}
+}
+
+// write is the serialized low-level writer used by pong and hangup.
+func (c *signalingClient) write(messageType int, data []byte) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return c.conn.WriteMessage(messageType, data) //nolint:wrapcheck // transport-level failure, caller logs
+}
+
+// hangup leaves the conversation best-effort before close.
+func (c *signalingClient) hangup() {
+	raw, err := json.Marshal(map[string]any{"command": "hangup", fieldSequence: c.sequence + 1, "reason": reasonHungup})
+	if err != nil {
+		return
+	}
+	_ = c.write(websocket.TextMessage, raw)
+}
+
+func (c *signalingClient) shutdown() {
+	c.closeOnce.Do(func() {
+		_ = c.conn.Close()
+		close(c.closed)
+		c.pending.Range(func(_, value any) bool {
+			if ch, ok := value.(chan notification); ok {
+				select {
+				case ch <- notification{Type: frameTypeError}:
+				default:
+				}
+			}
+			return true
+		})
+	})
+}
+
+// close hangs up and tears the socket down.
+func (c *signalingClient) close() {
+	c.hangup()
+	c.shutdown()
+}
+
+// waitConnection waits for the connection notification carrying the topology
+// and the participant list.
+func (c *signalingClient) waitConnection(ctx context.Context) (notification, error) {
+	timer := time.NewTimer(connectionTimeout)
+	defer timer.Stop()
+	for {
+		select {
+		case note := <-c.notifications:
+			if note.Notification == "connection" {
+				if note.Conversation == nil || note.Conversation.Topology != topologyServer {
+					return note, ErrSignalingNotServer
+				}
+				return note, nil
+			}
+		case <-timer.C:
+			return notification{}, fmt.Errorf("%w: connection", ErrSignalingTimeout)
+		case <-c.closed:
+			return notification{}, fmt.Errorf("%w: connection", ErrSignalingClosed)
+		case <-ctx.Done():
+			return notification{}, fmt.Errorf("vkcalls: connection wait: %w", ctx.Err())
+		}
+	}
+}
+
+// participantIDs returns the numeric ids of participants that are still in
+// the conversation, as decimal strings (json.Number-safe).
+func participantIDs(note notification, self string) []string {
+	if note.Conversation == nil {
+		return nil
+	}
+	var out []string
+	for _, p := range note.Conversation.Participants {
+		if p.State == reasonHungup || p.State == "REJECTED" {
+			continue
+		}
+		id, err := decimalID(p.ID)
+		if err != nil || id == self {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
+}
+
+func decimalID(v any) (string, error) {
+	switch t := v.(type) {
+	case float64:
+		if t != float64(int64(t)) {
+			return "", fmt.Errorf("%w: non-integer", ErrParticipantID)
+		}
+		return strconv.FormatInt(int64(t), 10), nil
+	case string:
+		if _, err := strconv.ParseInt(t, 10, 64); err != nil {
+			return "", fmt.Errorf("%w: non-numeric", ErrParticipantID)
+		}
+		return t, nil
+	default:
+		return "", fmt.Errorf("%w: unsupported type", ErrParticipantID)
+	}
+}
