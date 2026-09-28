@@ -155,6 +155,7 @@ func (s *Session) Connect(ctx context.Context) error {
 		shape:     NewShapeState(),
 		registry:  Registry{},
 		connected: make(chan struct{}),
+		done:      make(chan struct{}),
 		// The reconnect hook outlives this context; Reconnect owns its own.
 		reconnect:  func() { go s.Reconnect("signaling") }, //nolint:contextcheck // deliberate detached reconnect
 		shouldRecn: func() bool { return true },
@@ -637,6 +638,9 @@ func (gen *generation) maybeReconnect() {
 }
 
 func (gen *generation) stop() {
+	if gen.done == nil {
+		return
+	}
 	gen.doneOnce.Do(func() { close(gen.done) })
 }
 
