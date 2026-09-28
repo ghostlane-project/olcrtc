@@ -78,7 +78,7 @@ func TestSignalingCommandFlow(t *testing.T) {
 		go fsfu.serve()
 		fsfu.write(map[string]any{
 			"type": "notification", "notification": "connection",
-			"peerId": map[string]any{"id": "u1"},
+			"peerId": map[string]any{"id": 111},
 			"conversation": map[string]any{"topology": "SERVER", "participants": []any{
 				map[string]any{"id": 42, "state": "ACCEPTED"},
 				map[string]any{"id": 43, "state": "HUNGUP"},

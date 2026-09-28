@@ -25,7 +25,8 @@ var (
 	ssrcLine    = regexp.MustCompile(`(?m)^a=ssrc:(\d+)\s`)
 )
 
-// offerCodec parses one offered codec block.
+// offerCodec parses one offered codec block: the rtpmap name and rate, then
+// a bare-number channel count (audio) and fmtp:/fb: extras in any order.
 func offerCodec(kind string, fields []string, payload uint8) (webrtc.RTPCodecParameters, bool) {
 	spec := webrtc.RTPCodecParameters{
 		RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: kind + "/" + fields[0]},
@@ -36,14 +37,7 @@ func offerCodec(kind string, fields []string, payload uint8) (webrtc.RTPCodecPar
 		return spec, false
 	}
 	spec.ClockRate = uint32(rate)
-	if len(fields) > 2 {
-		channels, err := strconv.ParseUint(fields[2], 10, 16)
-		if err != nil {
-			return spec, false
-		}
-		spec.Channels = uint16(channels)
-	}
-	for _, extra := range fields[3:] {
+	for _, extra := range fields[2:] {
 		switch {
 		case strings.HasPrefix(extra, "fmtp:"):
 			spec.SDPFmtpLine = strings.TrimPrefix(extra, "fmtp:")
@@ -54,6 +48,12 @@ func offerCodec(kind string, fields []string, payload uint8) (webrtc.RTPCodecPar
 				fb.Parameter = parts[1]
 			}
 			spec.RTCPFeedback = append(spec.RTCPFeedback, fb)
+		default:
+			channels, err := strconv.ParseUint(extra, 10, 16)
+			if err != nil {
+				return spec, false
+			}
+			spec.Channels = uint16(channels)
 		}
 	}
 	return spec, true

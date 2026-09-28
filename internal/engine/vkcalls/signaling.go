@@ -1,12 +1,15 @@
 package vkcalls
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
@@ -54,7 +57,7 @@ type notification struct {
 	Notification string `json:"notification"`
 	Stamp        int64  `json:"stamp"`
 	PeerID       *struct {
-		ID string `json:"id"`
+		ID int64 `json:"id"`
 	} `json:"peerId"` //nolint:tagliatelle // connector wire is camelCase
 	SessionID    string `json:"sessionId"` //nolint:tagliatelle // connector wire is camelCase
 	Description  string `json:"description"`
@@ -113,7 +116,8 @@ func dialSignaling(ctx context.Context, endpoint, peerID string, resolver protec
 }
 
 // signalingURL extends the join endpoint with the client parameters the SDK
-// sends on a fresh join.
+// sends on a fresh join. A peer id belongs to a retry join only; carrying it
+// on a fresh join makes the SFU answer the session differently.
 func signalingURL(endpoint, peerID string) (string, error) {
 	u, err := url.Parse(endpoint)
 	// ws:// is the local-test transport; production endpoints arrive from the
@@ -134,6 +138,31 @@ func signalingURL(endpoint, peerID string) (string, error) {
 	}
 	u.RawQuery = q.Encode()
 	return u.String(), nil
+}
+
+// frameRecord is one recorded signaling frame.
+type frameRecord struct {
+	Direction string `json:"dir"`
+	Raw       string `json:"raw"`
+}
+
+// recordFrame appends a raw signaling frame to VKCALLS_DUMP_DIR when set:
+// a diagnostic aid for the spike's private artifacts, never on by default.
+func recordFrame(direction string, data []byte) {
+	dir := os.Getenv("VKCALLS_DUMP_DIR")
+	if dir == "" {
+		return
+	}
+	f, err := os.OpenFile(filepath.Join(dir, "signaling.jsonl"), //nolint:gosec // fixed private path
+		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	entry, err := json.Marshal(frameRecord{Direction: direction, Raw: string(data)})
+	if err == nil {
+		_, _ = f.Write(append(entry, '\n'))
+	}
 }
 
 func selfParticipant(endpoint string) string {
@@ -164,13 +193,15 @@ func (c *signalingClient) readLoop() {
 		if messageType != websocket.TextMessage {
 			continue
 		}
+		recordFrame("in", data)
 		if string(data) == "ping" {
 			_ = c.write(websocket.TextMessage, []byte("pong"))
 			continue
 		}
 		var note notification
 		if err := json.Unmarshal(data, &note); err != nil {
-			logger.Debugf("vkcalls: invalid signaling frame")
+			// Frames are never logged raw: they carry the endpoint's token.
+			logger.Debugf("vkcalls: invalid signaling frame: %d bytes: %v", len(data), err)
 			continue
 		}
 		if note.Stamp != 0 {
@@ -205,14 +236,9 @@ func (c *signalingClient) command(ctx context.Context, name string, payload any)
 	c.writeMu.Lock()
 	sequence := c.sequence + 1
 	c.sequence = sequence
-	frame := map[string]any{"command": name, fieldSequence: sequence}
-	if m, ok := payload.(map[string]any); ok {
-		for key, value := range m {
-			frame[key] = value
-		}
-	}
-	raw, err := json.Marshal(frame)
+	raw, err := orderedCommandFrame(name, sequence, payload)
 	if err == nil {
+		recordFrame("out", raw)
 		err = c.conn.WriteMessage(websocket.TextMessage, raw)
 	}
 	c.writeMu.Unlock()
@@ -239,6 +265,30 @@ func (c *signalingClient) command(ctx context.Context, name string, payload any)
 	case <-ctx.Done():
 		return notification{}, fmt.Errorf("vkcalls: signaling %s: %w", name, ctx.Err())
 	}
+}
+
+// orderedCommandFrame renders a command frame with command and sequence
+// first, then the payload's own fields: the order the SDK writes and the
+// SFU's accept-producer parser accepts — a Go map marshal would sort the
+// keys and the server answers invalid-request.
+func orderedCommandFrame(name string, sequence int64, payload any) ([]byte, error) {
+	nameJSON, err := json.Marshal(name)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // marshalling a plain string
+	}
+	head := append([]byte(`{"command":`), nameJSON...)
+	// The SDK's key order; a sorted map marshal gets invalid-request.
+	//nolint:gocritic // building JSON in a fixed key order
+	head = append(head, fmt.Sprintf(`,"%s":%d,`, fieldSequence, sequence)...)
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // caller-provided payload
+	}
+	body = bytes.TrimPrefix(body, []byte{'{'})
+	body = bytes.TrimSuffix(body, []byte{'}'})
+	out := head
+	out = append(out, body...)
+	return append(out, '}'), nil
 }
 
 // write is the serialized low-level writer used by pong and hangup.

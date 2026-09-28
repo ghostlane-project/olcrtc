@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -92,8 +94,11 @@ func New(_ context.Context, cfg engine.Config) (engine.Session, error) {
 	return s, nil
 }
 
-// StoreVideoTrack records a local track for the next connection.
-func (s *Session) StoreVideoTrack(track webrtc.TrackLocal) { s.video.StoreVideoTrack(track) }
+// AddVideoTrack records a local track for the next connection.
+func (s *Session) AddVideoTrack(track webrtc.TrackLocal) error { //nolint:unparam // the VideoTrackCapable contract
+	s.video.StoreVideoTrack(track)
+	return nil
+}
 
 // SetVideoTrackHandler registers the remote-track callback.
 func (s *Session) SetVideoTrackHandler(cb func(*webrtc.TrackRemote, *webrtc.RTPReceiver)) {
@@ -110,7 +115,9 @@ func (s *Session) Connect(ctx context.Context) error {
 	}
 	s.mu.Unlock()
 
-	signal, err := dialSignaling(ctx, s.endpoint, s.peerID, s.cfg.Resolver)
+	// A fresh join carries no peer id: the hint names this client only to a
+	// retry join (tgt=retry), which the reconnect path issues.
+	signal, err := dialSignaling(ctx, s.endpoint, "", s.cfg.Resolver)
 	if err != nil {
 		return err
 	}
@@ -180,6 +187,12 @@ func (s *Session) negotiate(ctx context.Context, gen *generation, offer string) 
 	}
 	gen.pc = pc
 
+	// The remote description is set before tracks attach: AddTrack then
+	// reuses the offer's publish transceiver instead of opening a fresh one
+	// that would pair with a receive-only section (the worker's proven order).
+	if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offer}); err != nil {
+		return fmt.Errorf("vkcalls: set remote description: %w", err)
+	}
 	// The publish slot carries the video transport's track; its SSRC lands in
 	// the native answer and the shaper declares it to the SFU.
 	s.video.RangeVideoTracks(func(track webrtc.TrackLocal, _ bool) {
@@ -237,10 +250,6 @@ func (s *Session) openControlChannels(gen *generation, pc *webrtc.PeerConnection
 // acceptOffer shapes the answer for the current offer and completes the
 // accept-producer handshake.
 func (s *Session) acceptOffer(ctx context.Context, gen *generation, offer string) error {
-	offer = strings.ReplaceAll(offer, "\r\n", "\n")
-	if err := gen.pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offer}); err != nil {
-		return fmt.Errorf("vkcalls: set remote description: %w", err)
-	}
 	native, err := gen.pc.CreateAnswer(nil)
 	if err != nil {
 		return fmt.Errorf("vkcalls: create answer: %w", err)
@@ -252,6 +261,7 @@ func (s *Session) acceptOffer(ctx context.Context, gen *generation, offer string
 	if err != nil {
 		return err
 	}
+	dumpNegotiation(offer, native.SDP, shaped)
 	if _, err := gen.signal.command(ctx, "accept-producer", acceptPayload(offer, shaped, gen.sessionID)); err != nil {
 		return err
 	}
@@ -262,6 +272,21 @@ func (s *Session) acceptOffer(ctx context.Context, gen *generation, offer string
 		return ErrConnectTimeout
 	case <-ctx.Done():
 		return fmt.Errorf("vkcalls: connect wait: %w", ctx.Err())
+	}
+}
+
+// dumpNegotiation writes this exchange's three SDP documents to
+// VKCALLS_DUMP_DIR when the operator set it: the spike's diagnostic capture,
+// never on by default.
+func dumpNegotiation(offer, native, shaped string) {
+	dir := os.Getenv("VKCALLS_DUMP_DIR")
+	if dir == "" {
+		return
+	}
+	for name, body := range map[string]string{
+		"engine-offer.sdp": offer, "engine-native.sdp": native, "engine-shaped.sdp": shaped,
+	} {
+		_ = os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600) //nolint:gosec // diagnostic artifact
 	}
 }
 
@@ -348,6 +373,7 @@ func (s *Session) reanswer(gen *generation, offer string) error {
 	if err != nil {
 		return err
 	}
+	dumpNegotiation(offer, native.SDP, shaped)
 	_, err = gen.signal.command(context.Background(), "accept-producer",
 		acceptPayload(offer, shaped, gen.sessionID))
 	return err
