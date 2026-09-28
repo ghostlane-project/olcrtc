@@ -49,6 +49,7 @@ go test -count=1 -tags olcrtc_lean -timeout 45m ./internal/gate -run '^TestGate$
 | `-olcrtc.gate-transports` | `datachannel,seichannel,vp8channel` | транспорты локальной цели, см. [Пары](#пары); `videochannel` запускается, только если его назвать |
 | `-olcrtc.gate-clients` | свой для сборки | `cli` в обычной сборке, `mobile` в сборке `olcrtc_lean`, один вариант на процесс |
 | `-olcrtc.gate-telemost-rooms` | пусто | пул Telemost; иначе `OLCRTC_GATE_TELEMOST_ROOMS` |
+| `-olcrtc.gate-vkcalls-rooms` | пусто | пул VK Calls, ссылки на комнаты; иначе `OLCRTC_GATE_VKCALLS_ROOMS` |
 | `-olcrtc.gate-wbstream-rooms` | пусто | пул WB Stream; иначе `OLCRTC_GATE_WBSTREAM_ROOMS` |
 | `-olcrtc.gate-jitsi-hosts` | пусто | хосты Jitsi вместо списка инстансов; иначе `OLCRTC_GATE_JITSI_HOSTS` |
 | `-olcrtc.gate-jitsi-instances` | `docs/jitsi.instances.yaml` | список инстансов Jitsi; относительный путь считается от корня модуля |

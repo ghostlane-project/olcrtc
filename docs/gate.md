@@ -49,6 +49,7 @@ go test -count=1 -tags olcrtc_lean -timeout 45m ./internal/gate -run '^TestGate$
 | `-olcrtc.gate-transports` | `datachannel,seichannel,vp8channel` | transports of the local target, see [Pairs](#pairs); `videochannel` runs only when named |
 | `-olcrtc.gate-clients` | the build's own | `cli` in a default build, `mobile` in an `olcrtc_lean` one, one flavour per process |
 | `-olcrtc.gate-telemost-rooms` | empty | Telemost pool; else `OLCRTC_GATE_TELEMOST_ROOMS` |
+| `-olcrtc.gate-vkcalls-rooms` | empty | VK Calls pool, join links; else `OLCRTC_GATE_VKCALLS_ROOMS` |
 | `-olcrtc.gate-wbstream-rooms` | empty | WB Stream pool; else `OLCRTC_GATE_WBSTREAM_ROOMS` |
 | `-olcrtc.gate-jitsi-hosts` | empty | Jitsi hosts used instead of the instance list; else `OLCRTC_GATE_JITSI_HOSTS` |
 | `-olcrtc.gate-jitsi-instances` | `docs/jitsi.instances.yaml` | the Jitsi instance list; a relative path is taken from the module root |
