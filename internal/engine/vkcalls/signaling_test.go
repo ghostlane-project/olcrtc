@@ -141,8 +141,10 @@ func TestSignalingCommandFlow(t *testing.T) {
 	fsfu.mu.Lock()
 	fsfu.reject = true
 	fsfu.mu.Unlock()
-	if _, err := client.command(context.Background(), "update-media-modifiers", nil); err == nil {
-		t.Fatal("expected rejection")
+	// A command with no payload fields is still one JSON object, so the fake
+	// SFU parses it and its error frame maps to ErrSignalingRejected.
+	if _, err := client.command(context.Background(), "update-media-modifiers", nil); !errors.Is(err, ErrSignalingRejected) {
+		t.Fatalf("got %v, want ErrSignalingRejected", err)
 	}
 
 	// Closing the socket fails pending and future commands.
@@ -264,5 +266,22 @@ func TestSignalingLargeCommandIsOneFrame(t *testing.T) {
 	huge := map[string]any{fieldDescription: strings.Repeat("x", signalingWriteBuffer)}
 	if _, err := client.command(context.Background(), "accept-producer", huge); !errors.Is(err, ErrSignalingFrameTooLarge) {
 		t.Fatalf("oversized command: got %v, want ErrSignalingFrameTooLarge", err)
+	}
+}
+
+// TestOrderedCommandFrameIsJSON pins the frame to one JSON object whatever
+// the payload holds: none, no fields, or fields.
+func TestOrderedCommandFrameIsJSON(t *testing.T) {
+	for _, payload := range []any{nil, map[string]any{}, map[string]any{"a": 1}} {
+		raw, err := orderedCommandFrame("x", 2, payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !json.Valid(raw) || !strings.HasPrefix(string(raw), `{"command":"x","sequence":2`) {
+			t.Fatalf("payload %v: frame %s", payload, raw)
+		}
+	}
+	if _, err := orderedCommandFrame("x", 2, []int{1}); !errors.Is(err, ErrSignalingPayload) {
+		t.Fatalf("array payload: got %v, want ErrSignalingPayload", err)
 	}
 }

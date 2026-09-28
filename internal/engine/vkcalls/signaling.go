@@ -28,6 +28,8 @@ var (
 	ErrSignalingRejected  = errors.New("vkcalls: signaling command rejected")
 	ErrSignalingTimeout   = errors.New("vkcalls: signaling response timeout")
 	ErrSignalingNotServer = errors.New("vkcalls: conversation is not in SERVER topology")
+	// ErrSignalingPayload refuses a command payload that is not a JSON object.
+	ErrSignalingPayload = errors.New("vkcalls: signaling command payload")
 	// ErrSignalingFrameTooLarge refuses a command that would not fit one frame.
 	ErrSignalingFrameTooLarge = errors.New("vkcalls: signaling command exceeds one frame")
 )
@@ -300,6 +302,13 @@ func orderedCommandFrame(name string, sequence int64, payload any) ([]byte, erro
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err //nolint:wrapcheck // caller-provided payload
+	}
+	// No payload, or one without fields, closes the frame after the sequence.
+	if bytes.Equal(body, []byte("null")) || bytes.Equal(body, []byte("{}")) {
+		return append(head[:len(head)-1], '}'), nil
+	}
+	if body[0] != '{' {
+		return nil, fmt.Errorf("%w: %s payload is not an object", ErrSignalingPayload, name)
 	}
 	body = bytes.TrimPrefix(body, []byte{'{'})
 	body = bytes.TrimSuffix(body, []byte{'}'})
