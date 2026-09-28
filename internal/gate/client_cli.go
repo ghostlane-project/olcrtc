@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/openlibrecommunity/olcrtc/internal/engine"
 	"github.com/openlibrecommunity/olcrtc/pkg/olcrtc/client"
 )
 
@@ -73,6 +74,7 @@ func cliConfig(ep Endpoint) client.Config {
 	cfg := client.Config{
 		Transport: ep.Transport, Provider: ep.Provider, RoomURL: ep.Room, ChannelID: ep.Channel,
 		KeyHex: ep.Key, LocalAddr: "127.0.0.1:0", DNSServer: ep.DNS, DeviceID: "gate-cli",
+		DTLSProfile: engine.DTLSProfile(ep.DTLSProfile),
 	}
 	switch ep.Transport {
 	case transportVP8:

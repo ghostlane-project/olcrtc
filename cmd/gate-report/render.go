@@ -19,6 +19,9 @@ func Render(r gate.Report) string {
 	if r.AppVersion != "" {
 		heading += ", app " + r.AppVersion
 	}
+	if r.DTLSProfile != "" {
+		heading += ", DTLS " + r.DTLSProfile
+	}
 	var b strings.Builder
 	_, _ = fmt.Fprintf(&b, "%s\n\n%s\n\n| Cell | Verdict | Key metrics | Took |\n| --- | --- | --- | --- |\n",
 		heading, summary(r))

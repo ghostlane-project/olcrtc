@@ -11,8 +11,11 @@ import (
 	"net"
 	"net/http"
 	"slices"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/openlibrecommunity/olcrtc/internal/engine"
 )
 
 // ai-generated: the whole file (the shared types, the scenario registry and
@@ -37,6 +40,9 @@ type Endpoint struct {
 	DNS       string
 	VP8FPS    int
 	VP8Batch  int
+	// DTLSProfile is the DTLS ClientHello profile both ends handshake with
+	// (dtls.profile), empty for the stock handshake. Not a secret.
+	DTLSProfile string
 	// ServerLog is the raw log of the server behind this endpoint, for a
 	// target that runs one; empty for the link target, whose server is a
 	// fleet node. A failed cell is read for what the relay did to it (see
@@ -48,12 +54,31 @@ type Endpoint struct {
 	ServerJoined time.Time
 }
 
+// DTLSProfile reads a run's dtls.profile the way the engine does: empty and
+// off are the stock handshake, returned as empty so a report and a server
+// config name a profile only when one is on; any other name must be one the
+// engine knows, refused here before a server or a client starts.
+func DTLSProfile(value string) (string, error) {
+	p := engine.DTLSProfile(strings.TrimSpace(value))
+	if err := engine.ValidateDTLSProfile(p); err != nil {
+		return "", fmt.Errorf("dtls profile: %w", err)
+	}
+	if p == engine.DTLSProfileOff {
+		return "", nil
+	}
+	return string(p), nil
+}
+
 // String describes the endpoint without its secrets: a room or a key that is
 // set prints as <room> or <key>, the scrubber's placeholders, so a log line or
 // a test failure that prints an endpoint leaks neither.
 func (e Endpoint) String() string {
-	return fmt.Sprintf("%s/%s room=%s key=%s dns=%s vp8=%d/%d", e.Provider, e.Transport,
+	s := fmt.Sprintf("%s/%s room=%s key=%s dns=%s vp8=%d/%d", e.Provider, e.Transport,
 		withheld(e.Room, "<room>"), withheld(e.Key, "<key>"), e.DNS, e.VP8FPS, e.VP8Batch)
+	if e.DTLSProfile != "" {
+		s += " dtls=" + e.DTLSProfile
+	}
+	return s
 }
 
 // GoString is String, so %#v withholds the same fields.

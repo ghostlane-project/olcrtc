@@ -91,6 +91,7 @@ func configureMobile(rt *mobile.Runtime, ep Endpoint) error {
 		{"dns", rt.SetDNS(ep.DNS)},
 		{"socks host", rt.SetSocksListenHost(mobileSocksHost)},
 		{"vp8", rt.SetVP8Options(cmp.Or(ep.VP8FPS, appVP8FPS), cmp.Or(ep.VP8Batch, appVP8Batch))},
+		{"dtls profile", rt.SetDTLSProfile(ep.DTLSProfile)},
 	}
 	for _, s := range steps {
 		if s.err != nil {

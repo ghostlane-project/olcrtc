@@ -17,12 +17,20 @@ type LinkTarget struct {
 	l    link.Link
 	load LoadURLs
 	dns  string
+	dtls string // the client's dtls.profile; the node's own is its operator's
 }
 
 // NewLinkTarget wraps a parsed link, the public load URLs and the resolver
 // the client uses.
 func NewLinkTarget(l link.Link, load LoadURLs, dns string) *LinkTarget {
 	return &LinkTarget{l: l, load: load, dns: dns}
+}
+
+// WithDTLSProfile has the client handshake with a DTLS profile, one that
+// DTLSProfile accepted; the node behind the link keeps its own setting.
+func (t *LinkTarget) WithDTLSProfile(profile string) *LinkTarget {
+	t.dtls = profile
+	return t
 }
 
 // Name implements Target.
@@ -48,6 +56,6 @@ func (t *LinkTarget) Open(_ context.Context, p Pair, _ string, _ OpenOptions) (E
 	}
 	return Endpoint{
 		Provider: t.l.Provider, Transport: t.l.Transport, Room: t.l.Room, Key: t.l.Key,
-		DNS: t.dns, VP8FPS: t.l.VP8FPS, VP8Batch: t.l.VP8Batch,
+		DNS: t.dns, VP8FPS: t.l.VP8FPS, VP8Batch: t.l.VP8Batch, DTLSProfile: t.dtls,
 	}, func() {}, nil
 }

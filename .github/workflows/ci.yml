@@ -259,11 +259,11 @@ jobs:
     permissions:
       contents: read
     # The two flavours run one after the other (amendment A8): 25 and 45
-    # minutes of go test, plus the builds and the upload. So a pool room
-    # holds one server of this job at a time, unless a crashed test binary
-    # leaves its server there until the job ends; A4's per-pair channels
-    # keep the two apart.
-    timeout-minutes: 85
+    # minutes of go test, then the cli cells again with the DTLS profile
+    # (15), plus the builds and the upload. So a pool room holds one server
+    # of this job at a time, unless a crashed test binary leaves its server
+    # there until the job ends; A4's per-pair channels keep the two apart.
+    timeout-minutes: 100
     # One gate at a time across the whole repository, not per branch: every
     # run takes the same pool rooms, and two servers in one room (two branches
     # pushed together, or the same WB account twice) knock each other out.
@@ -351,13 +351,33 @@ jobs:
           go test -count=1 -tags olcrtc_lean -timeout 45m ./internal/gate -run '^TestGate$' -v \
             -olcrtc.gate -olcrtc.gate-target=local -olcrtc.gate-dir=gate-artifacts/mobile
 
+      - name: Run the gate, cli flavour with the DTLS profile
+        # The fixed ClientHello profile (dtls.profile, off by default) on
+        # every local server and the client, cli cells only: a report of its
+        # own, gate-artifacts/cli-dtls, whose heading names the profile. The
+        # profile is experimental and ships off, so a red row is shown in the
+        # summary without failing the job; drop continue-on-error once it
+        # ships on.
+        if: ${{ !cancelled() && steps.go.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          OLCRTC_GATE_TELEMOST_ROOMS: ${{ secrets.GATE_TELEMOST_ROOMS }}
+          OLCRTC_GATE_WBSTREAM_ROOMS: ${{ secrets.GATE_WBSTREAM_ROOMS }}
+          OLCRTC_GATE_WBSTREAM_TOKEN: ${{ secrets.GATE_WBSTREAM_TOKEN }}
+          OLCRTC_GATE_JITSI_HOSTS: ${{ secrets.GATE_JITSI_HOSTS }}
+          OLCRTC_GATE_VKCALLS_ROOMS: ${{ secrets.GATE_VKCALLS_ROOMS }}
+        run: |
+          go test -count=1 -timeout 15m ./internal/gate -run '^TestGate$' -v \
+            -olcrtc.gate -olcrtc.gate-target=local -olcrtc.gate-dir=gate-artifacts/cli-dtls \
+            -olcrtc.gate-dtls-profile=chrome-linux-138-compat-v1
+
       - name: Summary
         if: ${{ always() && steps.go.outcome == 'success' }}
         run: |
           # A report that cannot be read fails the step, after the other
           # flavour's table is written.
           unreadable=0
-          for flavour in cli mobile; do
+          for flavour in cli mobile cli-dtls; do
             report="gate-artifacts/$flavour/gate-report.json"
             if [ ! -f "$report" ]; then
               echo "### Gate: the $flavour run wrote no report"

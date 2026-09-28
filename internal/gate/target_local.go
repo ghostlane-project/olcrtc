@@ -142,7 +142,10 @@ type LocalOptions struct {
 	Providers     []string
 	Transports    []string
 	DNS           string // default 8.8.8.8:53
-	Origin        *Origin
+	// DTLSProfile is the dtls.profile every server and client of the run
+	// handshakes with; empty (or off) is the stock handshake.
+	DTLSProfile string
+	Origin      *Origin
 }
 
 // LocalTarget builds cmd/olcrtc once and runs it as mode: srv per pair.
@@ -175,6 +178,9 @@ func NewLocalTarget(opts LocalOptions) (*LocalTarget, error) {
 	opts.WorkDir = work
 	if opts.DNS == "" {
 		opts.DNS = defaultDNS
+	}
+	if opts.DTLSProfile, err = DTLSProfile(opts.DTLSProfile); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrLocalOptions, err)
 	}
 	pairs, err := planPairs(opts.Providers, opts.Transports)
 	if err != nil {
@@ -330,7 +336,7 @@ func (t *LocalTarget) endpoint(ctx context.Context, p Pair) (Endpoint, error) {
 	}
 	// VP8FPS and VP8Batch are the app's vp8channel numbers.
 	return Endpoint{Provider: p.Provider, Transport: p.Transport, Room: room, Key: key, Channel: channel,
-		DNS: t.opts.DNS, VP8FPS: 60, VP8Batch: 64}, nil
+		DNS: t.opts.DNS, VP8FPS: 60, VP8Batch: 64, DTLSProfile: t.opts.DTLSProfile}, nil
 }
 
 // room is where the pair's server goes: a fresh room on a Jitsi host that
@@ -421,6 +427,9 @@ func RenderServerConfig(ep Endpoint, token string) string {
 		lines = append(lines, fmt.Sprintf("vp8: { fps: %d, batch_size: %d }", cmp.Or(ep.VP8FPS, 60), cmp.Or(ep.VP8Batch, 64)))
 	case transportSEI:
 		lines = append(lines, "sei: { fps: 60, batch_size: 64, fragment_size: 900, ack_timeout_ms: 2000 }")
+	}
+	if ep.DTLSProfile != "" {
+		lines = append(lines, "dtls: { profile: "+strconv.Quote(ep.DTLSProfile)+" }")
 	}
 	return strings.Join(append(lines, "debug: true"), "\n") + "\n"
 }
