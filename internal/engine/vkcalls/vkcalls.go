@@ -77,12 +77,15 @@ type generation struct {
 
 	registryMu sync.Mutex
 	registry   Registry
-	layoutSeq  int
-	sessionID  string
-	connected  chan struct{}
-	fireOnce   sync.Once
-	reconnect  func()
-	shouldRecn func() bool
+	// participants are the others in the conversation, whose cameras the
+	// layout asks for (by string key until the registry names them).
+	participants map[string]bool
+	layoutSeq    int
+	sessionID    string
+	connected    chan struct{}
+	fireOnce     sync.Once
+	reconnect    func()
+	shouldRecn   func() bool
 }
 
 // New builds a VK Calls session from provider credentials.
@@ -236,6 +239,9 @@ func (s *Session) openControlChannels(gen *generation, pc *webrtc.PeerConnection
 		return fmt.Errorf("vkcalls: producer command channel: %w", err)
 	}
 	gen.command = command
+	// The participants known at connect, and a registry that arrived first,
+	// are subscribed as soon as the channel can carry the layout.
+	command.OnOpen(gen.subscribeAll)
 	notify, err := pc.CreateDataChannel("producerNotification", nil)
 	if err != nil {
 		return fmt.Errorf("vkcalls: producer notification channel: %w", err)
@@ -325,11 +331,21 @@ func waitOffer(ctx context.Context, signal *signalingClient) notification {
 // run owns the session after a successful connect: renegotiations and the
 // signaling socket's lifetime.
 func (s *Session) run(gen *generation, connection notification) {
-	logger.Debugf("vkcalls: connected, %d other participants", len(participantIDs(connection, gen.signal.Self())))
+	others := participantIDs(connection, gen.signal.Self())
+	logger.Debugf("vkcalls: connected, %d other participants", len(others))
+	for _, id := range others {
+		gen.noteParticipant(id)
+	}
+	gen.subscribeAll()
 	for {
 		select {
 		case note := <-gen.signal.Notifications():
 			switch note.Notification {
+			case "participant-joined", "media-settings-changed":
+				// A camera may appear with either: ask for it by key.
+				if id, err := decimalID(note.ParticipantID); err == nil && id != gen.signal.Self() && gen.noteParticipant(id) {
+					gen.subscribeAll()
+				}
 			case "producer-updated":
 				if note.Description == "" || note.SessionID == gen.sessionID {
 					continue
@@ -407,6 +423,8 @@ func (s *Session) onServiceFrame(gen *generation, data []byte) {
 func (gen *generation) removeStream(participant string) {
 	prefixes := []string{"u" + participant + ":", participant + ":"}
 	gen.registryMu.Lock()
+	delete(gen.participants, participant)
+	delete(gen.registry, "u"+participant)
 	for key := range gen.registry {
 		for _, prefix := range prefixes {
 			if len(key) > len(prefix) && key[:len(prefix)] == prefix {
@@ -422,13 +440,14 @@ func (gen *generation) removeStream(participant string) {
 // it nothing flows (spike hybrid-03…11).
 func (gen *generation) subscribeAll() {
 	gen.registryMu.Lock()
-	entries, err := gen.registry.LayoutFor()
+	entries := layoutEntries(gen.registry, gen.participantList())
+	gen.layoutSeq++
+	sequence := gen.layoutSeq % layoutSeqMod
 	gen.registryMu.Unlock()
-	if err != nil {
+	if len(entries) == 0 {
 		return
 	}
-	gen.layoutSeq++
-	frame, err := EncodeLayout(gen.layoutSeq%layoutSeqMod, entries)
+	frame, err := EncodeLayout(sequence, entries)
 	if err != nil {
 		logger.Debugf("vkcalls: layout encode: %v", err)
 		return
@@ -438,7 +457,33 @@ func (gen *generation) subscribeAll() {
 	}
 	if err := gen.command.Send(frame); err != nil {
 		logger.Debugf("vkcalls: layout send: %v", err)
+		return
 	}
+	logger.Debugf("vkcalls: layout %d sent for %d streams", sequence, len(entries))
+}
+
+// noteParticipant records another participant and says whether it is new.
+func (gen *generation) noteParticipant(id string) bool {
+	gen.registryMu.Lock()
+	defer gen.registryMu.Unlock()
+	if gen.participants[id] {
+		return false
+	}
+	if gen.participants == nil {
+		gen.participants = map[string]bool{}
+	}
+	gen.participants[id] = true
+	return true
+}
+
+// participantList is the participants noted so far; the caller holds
+// registryMu.
+func (gen *generation) participantList() []string {
+	out := make([]string, 0, len(gen.participants))
+	for id := range gen.participants {
+		out = append(out, id)
+	}
+	return out
 }
 
 // maybeReconnect triggers one reconnect when the policy allows it.

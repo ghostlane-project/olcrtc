@@ -17,6 +17,7 @@ var (
 	ErrRegistryShape  = errors.New("vkcalls: producerNotification registry is not a one-entry map")
 	ErrLayoutNoStream = errors.New("vkcalls: layout update without any registry stream")
 	ErrLayoutKeyLong  = errors.New("vkcalls: registry stream key exceeds the fixstr bound")
+	ErrLayoutTooMany  = errors.New("vkcalls: layout update exceeds the array16 bound")
 	// ErrNotRegistry marks an expected non-registry notification frame.
 	ErrNotRegistry = errors.New("vkcalls: frame is not a registry update")
 )
@@ -45,19 +46,60 @@ func ParseRegistry(frame []byte) (Registry, error) {
 	if len(frame) < 4 {
 		return nil, ErrRegistryShort
 	}
-	if frame[1] != 0x81 || frame[2]&0xE0 != 0xA0 {
+	var count, pos int
+	switch {
+	case frame[1]&0xF0 == 0x80: // fixmap
+		count, pos = int(frame[1]&0x0F), 2
+	case frame[1] == 0xDE: // map16
+		count, pos = int(binary.BigEndian.Uint16(frame[2:4])), 4
+	default:
 		return nil, ErrRegistryShape
 	}
-	keyLen := int(frame[2] & 0x1F)
-	if len(frame) < 4+keyLen {
-		return nil, ErrRegistryShort
+	out := make(Registry, count)
+	for range count {
+		key, next, err := readRegistryKey(frame, pos)
+		if err != nil {
+			return nil, err
+		}
+		id, after, err := readRegistryID(frame, next)
+		if err != nil {
+			return nil, err
+		}
+		out[key], pos = id, after
 	}
-	key := string(frame[3 : 3+keyLen])
-	id := frame[3+keyLen]
-	if id >= 128 {
-		return nil, ErrRegistryShape
+	return out, nil
+}
+
+// readRegistryKey reads the fixstr stream description at pos.
+func readRegistryKey(frame []byte, pos int) (string, int, error) {
+	if pos >= len(frame) {
+		return "", 0, ErrRegistryShort
 	}
-	return Registry{key: id}, nil
+	if frame[pos]&0xE0 != 0xA0 {
+		return "", 0, ErrRegistryShape
+	}
+	end := pos + 1 + int(frame[pos]&0x1F)
+	if end > len(frame) {
+		return "", 0, ErrRegistryShort
+	}
+	return string(frame[pos+1 : end]), end, nil
+}
+
+// readRegistryID reads the compact id at pos: a positive fixint, or the
+// uint8 form the encoder picks from 128 on.
+func readRegistryID(frame []byte, pos int) (uint8, int, error) {
+	switch {
+	case pos >= len(frame):
+		return 0, 0, ErrRegistryShort
+	case frame[pos] < 0x80:
+		return frame[pos], pos + 1, nil
+	case frame[pos] == 0xCC && pos+1 < len(frame):
+		return frame[pos+1], pos + 2, nil
+	case frame[pos] == 0xCC:
+		return 0, 0, ErrRegistryShort
+	default:
+		return 0, 0, ErrRegistryShape
+	}
 }
 
 // LayoutEntry is one stream subscription: the tile priority and the size the
@@ -82,13 +124,18 @@ func EncodeLayout(sequence int, entries []LayoutEntry) ([]byte, error) {
 	if len(entries) == 0 {
 		return nil, ErrLayoutNoStream
 	}
-	if len(entries) >= 16 {
-		return nil, fmt.Errorf("%w: %d entries", ErrLayoutNoStream, len(entries))
+	if len(entries) > math.MaxUint16 {
+		return nil, fmt.Errorf("%w: %d entries", ErrLayoutTooMany, len(entries))
 	}
 	out := appendMPInt(nil, 0)
 	out = appendMPInt(out, 0)
 	out = appendMPInt(out, sequence)
-	out = append(out, 0xC0, 0x90|byte(len(entries))) //nolint:gosec // bounded to 15 entries above
+	out = append(out, 0xC0)
+	if len(entries) < 16 {
+		out = append(out, 0x90|byte(len(entries))) //nolint:gosec // bounded to 15 entries here
+	} else {
+		out = append(out, 0xDC, byte(len(entries)>>8), byte(len(entries))) //nolint:gosec // bounded to uint16 above
+	}
 	for _, e := range entries {
 		blob := make([]byte, 0, 32)
 		switch {
@@ -147,6 +194,29 @@ func (r Registry) sortedStreams() []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// cameraKey is the stream description of a participant's camera.
+func cameraKey(participant string) string { return "u" + participant + ":sCAMERA" }
+
+// layoutEntries is the whole subscription: every registry stream by its
+// compact id, then the camera of every participant the registry does not
+// name yet by its string key. The SFU answers a string key with a registry
+// entry for it: without asking, a participant who joins later is never
+// named and never forwarded (live, 2026-09-28).
+func layoutEntries(r Registry, participants []string) []LayoutEntry {
+	entries, _ := r.LayoutFor() // an empty registry adds nothing
+	asked := make([]string, 0, len(participants))
+	for _, participant := range participants {
+		if _, known := r[cameraKey(participant)]; !known {
+			asked = append(asked, cameraKey(participant))
+		}
+	}
+	sort.Strings(asked)
+	for _, key := range asked {
+		entries = append(entries, LayoutEntry{Key: key, Priority: 1, Width: 640, Height: 360})
+	}
+	return entries
 }
 
 // LayoutFor builds the subscription of every registry stream.

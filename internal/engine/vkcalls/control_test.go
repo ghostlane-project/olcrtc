@@ -3,6 +3,8 @@ package vkcalls
 import (
 	"encoding/base64"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -20,6 +22,27 @@ func TestParseRegistry(t *testing.T) {
 			// 01 81 b5 <21-byte key "u588003930589:sCAMERA"> 01, live capture
 			b64:  "AYG1dTU4ODAwMzkzMDU4OTpzQ0FNRVJBAQ==",
 			want: Registry{"u588003930589:sCAMERA": 1},
+		},
+		{
+			// The shape the SFU sends when a layout asked for several streams
+			// by string key at once (live 2026-09-28): one fixmap, many
+			// entries. Constructed with test ids in that shape.
+			name: "three cameras in one frame",
+			b64: base64.StdEncoding.EncodeToString(append(append(append([]byte{0x01, 0x83},
+				mpEntry("u100000000001:sCAMERA", 0x00)...), mpEntry("u100000000002:sCAMERA", 0x01)...),
+				mpEntry("u100000000003", 0x02)...)),
+			want: Registry{"u100000000001:sCAMERA": 0, "u100000000002:sCAMERA": 1, "u100000000003": 2},
+		},
+		{
+			name: "map16 with a uint8 compact id",
+			b64: base64.StdEncoding.EncodeToString(append(append([]byte{0x01, 0xDE, 0x00, 0x02},
+				mpEntry("u1:sCAMERA", 0x05)...), append(mpStr("u2:sCAMERA"), 0xCC, 0x80)...)),
+			want: Registry{"u1:sCAMERA": 5, "u2:sCAMERA": 128},
+		},
+		{
+			name:    "second entry truncated",
+			b64:     base64.StdEncoding.EncodeToString(append([]byte{0x01, 0x82}, mpEntry("u1:sCAMERA", 0x00)...)),
+			wantErr: true,
 		},
 		{
 			name:    "empty frame",
@@ -64,6 +87,13 @@ func TestParseRegistry(t *testing.T) {
 		})
 	}
 }
+
+// mpStr is a msgpack fixstr; mpEntry one registry entry with a fixint id.
+func mpStr(key string) []byte {
+	return append([]byte{0xA0 | byte(len(key)&0x1F)}, key...)
+}
+
+func mpEntry(key string, id byte) []byte { return append(mpStr(key), id) }
 
 // TestParseRegistryOtherKind checks non-registry frames are marked
 // distinctly: the notification channel carries several kinds.
@@ -135,4 +165,85 @@ func hexOf(b []byte) string {
 		out = append(out, digits[v>>4], digits[v&0x0f])
 	}
 	return string(out)
+}
+
+// TestLayoutEntriesAskUnknownCamerasByKey pins how a consumer subscribes: a
+// stream the registry names goes by its compact id; a participant's camera
+// the registry does not name yet goes by its string key, which is how the
+// SFU hands out a compact id for it (live 2026-09-28: without this the
+// engine never received a real client's camera).
+func TestLayoutEntriesAskUnknownCamerasByKey(t *testing.T) {
+	r := Registry{"u1:sCAMERA": 0, "u3": 2}
+	entries := layoutEntries(r, []string{"3", "1", "2"})
+	var got []string
+	for _, e := range entries {
+		if e.ByCompact {
+			got = append(got, fmt.Sprintf("%s#%d", e.Key, e.Compact))
+		} else {
+			got = append(got, e.Key+"#str")
+		}
+		if e.Priority != 1 || e.Width != 640 || e.Height != 360 {
+			t.Fatalf("layout fields %+v", e)
+		}
+	}
+	want := []string{"u1:sCAMERA#0", "u3#2", "u2:sCAMERA#str", "u3:sCAMERA#str"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("entries %v, want %v", got, want)
+	}
+	if entries := layoutEntries(Registry{}, nil); len(entries) != 0 {
+		t.Fatalf("nothing to ask for, got %v", entries)
+	}
+}
+
+// TestEncodeLayoutManyEntries: sixteen streams and more take the array16
+// form instead of failing the whole subscription.
+func TestEncodeLayoutManyEntries(t *testing.T) {
+	entries := make([]LayoutEntry, 17)
+	for i := range entries {
+		entries[i] = LayoutEntry{Compact: uint8(i), ByCompact: true, Priority: 1, Width: 640, Height: 360}
+	}
+	frame, err := EncodeLayout(3, entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame[3] != 0xC0 || frame[4] != 0xDC || frame[5] != 0x00 || frame[6] != 17 {
+		t.Fatalf("header % x, want array16 of 17", frame[:7])
+	}
+}
+
+// TestGenerationTracksParticipants: a participant noted is asked for by its
+// camera key until the registry names it; one who hangs up leaves both the
+// asked set and the registry. Layouts built from several goroutines at once
+// stay race-free (run with -race).
+func TestGenerationTracksParticipants(t *testing.T) {
+	gen := &generation{registry: Registry{"u7:sCAMERA": 3, "u7": 4, "u8:sCAMERA": 5}}
+	if !gen.noteParticipant("9") || gen.noteParticipant("9") {
+		t.Fatal("noteParticipant reports a new id once")
+	}
+	gen.noteParticipant("7")
+	keys := func() string {
+		gen.registryMu.Lock()
+		defer gen.registryMu.Unlock()
+		entries := layoutEntries(gen.registry, gen.participantList())
+		out := make([]string, 0, len(entries))
+		for _, e := range entries {
+			out = append(out, e.Key)
+		}
+		return strings.Join(out, ",")
+	}
+	if got := keys(); got != "u7,u7:sCAMERA,u8:sCAMERA,u9:sCAMERA" {
+		t.Fatalf("layout keys %s", got)
+	}
+	gen.removeStream("7")
+	gen.removeStream("9")
+	if got := keys(); got != "u8:sCAMERA" {
+		t.Fatalf("after hang-ups: %s", got)
+	}
+	done := make(chan struct{})
+	for range 4 {
+		go func() { gen.subscribeAll(); done <- struct{}{} }()
+	}
+	for range 4 {
+		<-done
+	}
 }
