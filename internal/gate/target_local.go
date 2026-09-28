@@ -56,6 +56,7 @@ const (
 const (
 	providerJitsi      = "jitsi"
 	providerTelemost   = "telemost"
+	providerVKCalls    = "vkcalls"
 	providerWBStream   = "wbstream"
 	providerSaluteJazz = "salutejazz"
 
@@ -111,6 +112,11 @@ func transportsOf(provider string) []string {
 		return []string{transportVP8, transportVideo}
 	case providerWBStream:
 		return []string{transportVP8, transportVideo, transportSEI}
+	case providerVKCalls:
+		// The SFU re-stamps forwarded RTP (red-wrapped VP8 observed in the
+		// spike), so the codec-agnostic videochannel is the proven lane;
+		// vp8channel rides the same publish slot.
+		return []string{transportVP8, transportVideo}
 	case providerSaluteJazz:
 		return []string{transportData}
 	default:
@@ -128,6 +134,7 @@ type LocalOptions struct {
 	JitsiHosts    []string // used instead of Instances when it names a host
 	TelemostRooms []string // pool: bare ids or room URLs
 	WBStreamRooms []string // pool: bare ids or room URLs
+	VKCallsRooms  []string // pool: VK Calls join links
 	// WBStreamToken is the WB account token the server joins with; the
 	// client stays a guest, as the app is. From EnvWBStreamToken.
 	WBStreamToken string
@@ -358,6 +365,14 @@ func (t *LocalTarget) room(ctx context.Context, provider string) (string, error)
 			return "", fmt.Errorf("wbstream: %w: the entry names no room id", ErrPoolRoom)
 		}
 		return id, nil
+	case providerVKCalls:
+		// The pool entries are the join links the provider validates
+		// (vk.ru/vk.com /call/join/<id>), taken verbatim.
+		link, err := PoolRoom(t.opts.VKCallsRooms, t.opts.RunNumber)
+		if err != nil {
+			return "", fmt.Errorf("vkcalls: %w", err)
+		}
+		return link, nil
 	default:
 		return "", fmt.Errorf("%w: provider %s", ErrPairNotCarried, provider)
 	}

@@ -34,6 +34,7 @@ const (
 	envLink          = "OLCRTC_GATE_LINK"
 	envTelemostRooms = "OLCRTC_GATE_TELEMOST_ROOMS"
 	envWBStreamRooms = "OLCRTC_GATE_WBSTREAM_ROOMS"
+	envVKCallsRooms  = "OLCRTC_GATE_VKCALLS_ROOMS"
 	envJitsiHosts    = "OLCRTC_GATE_JITSI_HOSTS"
 	envEngineCommit  = "OLCRTC_GATE_ENGINE_COMMIT"
 	envEngineRef     = "OLCRTC_GATE_ENGINE_REF"
@@ -88,6 +89,8 @@ var (
 		"Telemost room pool, comma-separated ids or URLs; else "+envTelemostRooms)
 	gateWBStream = flag.String("olcrtc.gate-wbstream-rooms", "",
 		"WB Stream room pool, comma-separated ids or URLs; else "+envWBStreamRooms)
+	gateVKCalls = flag.String("olcrtc.gate-vkcalls-rooms", "",
+		"VK Calls room pool, comma-separated join links; else "+envVKCallsRooms)
 	gateJitsiHosts = flag.String("olcrtc.gate-jitsi-hosts", "",
 		"comma-separated Jitsi hosts to use instead of the instance list; else "+envJitsiHosts)
 	gateInstances = flag.String("olcrtc.gate-jitsi-instances", instancesFile,
@@ -344,6 +347,7 @@ func localTarget(t *testing.T, root string, dry bool) (*LocalTarget, []string) {
 		JitsiHosts:    listOf(*gateJitsiHosts, os.Getenv(envJitsiHosts)),
 		TelemostRooms: listOf(*gateTelemost, os.Getenv(envTelemostRooms)),
 		WBStreamRooms: listOf(*gateWBStream, os.Getenv(envWBStreamRooms)),
+		VKCallsRooms:  listOf(*gateVKCalls, os.Getenv(envVKCallsRooms)),
 		// ai-generated: trimmed, as the CI's require step reads it: a line
 		// break stored after the token would reach the server's YAML.
 		WBStreamToken: strings.TrimSpace(os.Getenv(EnvWBStreamToken)),
