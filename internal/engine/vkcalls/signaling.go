@@ -145,6 +145,9 @@ func signalingURL(endpoint, peerID string) (string, error) {
 	q.Set("version", "5")
 	q.Set("device", "browser")
 	q.Set("capabilities", capabilitiesBitmask)
+	if expOn("caps6f") {
+		q.Set("capabilities", "6F7F")
+	}
 	q.Set("clientType", "VK")
 	q.Set("tgt", "join")
 	if peerID != "" {

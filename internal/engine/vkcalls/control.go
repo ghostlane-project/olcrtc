@@ -216,6 +216,11 @@ func layoutEntries(r Registry, participants []string) []LayoutEntry {
 	for _, key := range asked {
 		entries = append(entries, LayoutEntry{Key: key, Priority: 1, Width: 640, Height: 360})
 	}
+	if expOn("small") {
+		for i := range entries {
+			entries[i].Width, entries[i].Height = 320, 180
+		}
+	}
 	return entries
 }
 

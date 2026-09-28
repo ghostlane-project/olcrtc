@@ -2,6 +2,8 @@ package vkcalls
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -42,8 +44,8 @@ func referenceCapabilities() map[string]any {
 		"consumerScreenDataChannelVersion": 1, "producerScreenDataChannelVersion": 1,
 		"asrDataChannelVersion": 1, "animojiDataChannelVersion": 2, "animojiBackendRender": true,
 		"onDemandTracks": true, "unifiedPlan": true, "singleSession": true, "videoTracksCount": 36,
-		"red": true, "audioShare": true, "fastScreenShare": true, "videoSuspend": true,
-		"simulcast": true, "simulcastNativeOrder": true, "consumerFastScreenShare": false,
+		"red": true, "audioShare": true, "fastScreenShare": true, "videoSuspend": !expOn("nosuspend"),
+		"simulcast": !expOn("nosim"), "simulcastNativeOrder": true, "consumerFastScreenShare": false,
 		"consumerFastScreenShareQualityOnDemand": false, "transparentAudio": false,
 	}
 }
@@ -59,11 +61,12 @@ type Session struct {
 
 	video engine.VideoTrackState
 
-	mu      sync.Mutex
-	gen     *generation
-	closed  bool
-	endOnce sync.Once
-	ended   func(string)
+	mu        sync.Mutex
+	gen       *generation
+	encodings []webrtc.RTPEncodingParameters // EXPERIMENT: the publish encodings
+	closed    bool
+	endOnce   sync.Once
+	ended     func(string)
 }
 
 // generation bundles everything one connection attempt owns, so closing it
@@ -157,9 +160,9 @@ func (s *Session) Connect(ctx context.Context) error {
 	}
 	gen.sessionID = offerNote.SessionID
 	if _, err := signal.command(ctx, "change-media-settings", map[string]any{
-		"mediaSettings": map[string]any{"isAudioEnabled": false, "isVideoEnabled": false,
+		"mediaSettings": map[string]any{"isAudioEnabled": expOn("audioon"), "isVideoEnabled": expOn("vidon"),
 			"isScreenSharingEnabled": false, "isFastScreenSharingEnabled": false,
-			"isAudioSharingEnabled": false, "isAnimojiEnabled": true},
+			"isAudioSharingEnabled": false, "isAnimojiEnabled": !expOn("animoff")},
 	}); err != nil {
 		signal.close()
 		return err
@@ -198,12 +201,40 @@ func (s *Session) negotiate(ctx context.Context, gen *generation, offer string) 
 	}
 	// The publish slot carries the video transport's track; its SSRC lands in
 	// the native answer and the shaper declares it to the SFU.
+	senders := map[string]*webrtc.RTPSender{}
 	s.video.RangeVideoTracks(func(track webrtc.TrackLocal, _ bool) {
-		if _, err := pc.AddTrack(track); err != nil {
-			logger.Debugf("vkcalls: add track: %v", err)
+		// EXPERIMENT: a track with a RID joins the sender of its track id as
+		// one more simulcast encoding.
+		if base, ok := senders[track.ID()]; ok && track.RID() != "" {
+			if err := base.AddEncoding(track); err != nil {
+				logger.Debugf("vkcalls: add encoding %s: %v", track.RID(), err)
+			}
+			return
 		}
+		sender, err := pc.AddTrack(track)
+		if err != nil {
+			logger.Debugf("vkcalls: add track: %v", err)
+			return
+		}
+		senders[track.ID()] = sender
+		go drainRTCP(sender)
 	})
+	s.mu.Lock()
+	s.encodings = nil
+	s.mu.Unlock()
+	for _, sender := range senders {
+		for _, enc := range sender.GetParameters().Encodings {
+			if enc.RID != "" {
+				ssrcRID.Store(uint32(enc.SSRC), enc.RID)
+				logger.Debugf("vkcalls: encoding rid=%s ssrc=%d", enc.RID, enc.SSRC)
+			}
+			s.mu.Lock()
+			s.encodings = append(s.encodings, enc)
+			s.mu.Unlock()
+		}
+	}
 	pc.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
+		logger.Debugf("vkcalls: remote track kind=%s codec=%s ssrc=%d", track.Kind(), track.Codec().MimeType, track.SSRC())
 		if handler := s.video.VideoTrackHandler(); handler != nil {
 			handler(track, receiver)
 		}
@@ -241,7 +272,31 @@ func (s *Session) openControlChannels(gen *generation, pc *webrtc.PeerConnection
 	gen.command = command
 	// The participants known at connect, and a registry that arrived first,
 	// are subscribed as soon as the channel can carry the layout.
-	command.OnOpen(gen.subscribeAll)
+	command.OnOpen(func() {
+		if expOn("chsim") {
+			gen.registryMu.Lock()
+			gen.layoutSeq++
+			seq := gen.layoutSeq
+			gen.registryMu.Unlock()
+			w, h, fps, br := 320, 180, 15, 180000
+			if v := os.Getenv("VKCALLS_CHSIM"); v != "" {
+				_, _ = fmt.Sscanf(v, "%d,%d,%d,%d", &w, &h, &fps, &br)
+			}
+			frame := encodeChangeSimulcast(seq, "l", w, h, fps, br)
+			if expOn("chsim2") {
+				frame = encodeChangeSimulcastLayers(seq, [][5]any{{"l", 320, 180, 15, 180000}, {"m", 640, 360, 15, 500000}})
+			}
+			if expOn("chsim3") {
+				// Chrome's rs(1280,720): three layers announced, h inactive.
+				frame = encodeChangeSimulcastLayers(seq, [][5]any{{"l", 320, 180, 20, 180000}, {"m", 640, 360, 20, 500000}, {"h", 1280, 720, 20, 1200000}})
+			}
+			logger.Debugf("vkcalls: change-simulcast %x: %v", frame, command.Send(frame))
+		}
+		gen.subscribeAll()
+	})
+	command.OnMessage(func(message webrtc.DataChannelMessage) {
+		logger.Debugf("vkcalls: command reply %x", message.Data)
+	})
 	notify, err := pc.CreateDataChannel("producerNotification", nil)
 	if err != nil {
 		return fmt.Errorf("vkcalls: producer notification channel: %w", err)
@@ -332,7 +387,7 @@ func waitOffer(ctx context.Context, signal *signalingClient) notification {
 // signaling socket's lifetime.
 func (s *Session) run(gen *generation, connection notification) {
 	others := participantIDs(connection, gen.signal.Self())
-	logger.Debugf("vkcalls: connected, %d other participants", len(others))
+	logger.Debugf("vkcalls: connected as <%s>, %d other participants", idTag(gen.signal.Self()), len(others))
 	for _, id := range others {
 		gen.noteParticipant(id)
 	}
@@ -398,6 +453,9 @@ func (s *Session) reanswer(gen *generation, offer string) error {
 // onServiceFrame folds producerNotification registry frames into the stream
 // registry and re-subscribes to everything the SFU offers us.
 func (s *Session) onServiceFrame(gen *generation, data []byte) {
+	if len(data) > 0 && data[0] != registryKind && data[0] != 6 && len(data) <= 48 {
+		logger.Debugf("vkcalls: service frame kind=%d hex %x", data[0], data)
+	}
 	entries, err := ParseRegistry(data)
 	if errors.Is(err, ErrNotRegistry) {
 		return
@@ -412,6 +470,7 @@ func (s *Session) onServiceFrame(gen *generation, data []byte) {
 	gen.registryMu.Lock()
 	for key, id := range entries {
 		gen.registry[key] = id
+		logger.Debugf("vkcalls: registry %s -> %d", streamKind(key), id)
 	}
 	gen.registryMu.Unlock()
 	gen.subscribeAll()
@@ -538,6 +597,13 @@ func (s *Session) Reconnect(reason string) {
 	}
 }
 
+// Encodings (EXPERIMENT) lists the publish sender's encodings.
+func (s *Session) Encodings() []webrtc.RTPEncodingParameters {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]webrtc.RTPEncodingParameters(nil), s.encodings...)
+}
+
 // Send is unsupported: the SFU bridges only its known service channels, so
 // payload rides the video transport.
 func (s *Session) Send([]byte) error { return ErrSendUnsupported }
@@ -630,6 +696,34 @@ func (s *Session) Close() error {
 		gen.teardown()
 	}
 	return nil
+}
+
+// drainRTCP reads a sender's RTCP until the sender closes, so the RTCP
+// reaches the interceptors.
+func drainRTCP(sender *webrtc.RTPSender) {
+	buf := make([]byte, 1500)
+	for {
+		if _, _, err := sender.Read(buf); err != nil {
+			return
+		}
+	}
+}
+
+// streamKind is a registry key with its participant id replaced by a tag.
+func streamKind(key string) string {
+	head, suffix, _ := strings.Cut(key, ":")
+	prefix := strings.TrimRight(head, "0123456789")
+	tag := idTag(strings.TrimPrefix(head, prefix))
+	if suffix == "" {
+		return prefix + "<" + tag + ">"
+	}
+	return prefix + "<" + tag + ">:" + suffix
+}
+
+// idTag tells participant ids apart in a debug log without printing them.
+func idTag(id string) string {
+	sum := sha256.Sum256([]byte(id))
+	return hex.EncodeToString(sum[:2])
 }
 
 // iceServersOf decodes the provider's ice_servers JSON document; an empty or

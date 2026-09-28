@@ -57,6 +57,8 @@ const fixtureOffer = "v=0\r\n" +
 	"a=rtcp-mux\r\n" +
 	"a=rtpmap:102 VP9/90000\r\n" +
 	"a=rtcp-fb:102 transport-cc\r\n" +
+	"a=rtpmap:103 rtx/90000\r\n" +
+	"a=fmtp:103 apt=102\r\n" +
 	"a=rtpmap:100 VP8/90000\r\n" +
 	"a=rtcp-fb:100 nack\r\n" +
 	"a=rtcp-fb:100 nack pli\r\n" +
@@ -310,4 +312,41 @@ func lineOf(lines []string, prefix string) string {
 		}
 	}
 	return ""
+}
+
+// TestShapeAnswerPublishDropsVP9 pins the publish section to the shape a
+// browser's local answer has: the offer's codec list without VP9 and its
+// rtx, VP8 first, the rest as offered. The SFU takes the first payload type
+// as the codec it will receive; with VP9 first it never forwarded our VP8.
+func TestShapeAnswerPublishDropsVP9(t *testing.T) {
+	t.Setenv("VKCALLS_EXP", "browserm")
+	shaped, err := ShapeAnswer(fixtureOffer, fixtureNative, NewShapeState())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(shaped, "\r\n")
+	var publish []string
+	for i, l := range lines {
+		if strings.HasPrefix(l, "m=video") {
+			for _, x := range lines[i:] {
+				if x == "a=sendonly" {
+					publish = lines[i:]
+				}
+			}
+			if publish != nil {
+				break
+			}
+		}
+	}
+	if publish == nil || publish[0] != "m=video 9 UDP/TLS/RTP/SAVPF 100 101" {
+		t.Fatalf("publish m-line %q, want VP8 and its rtx only", publish[:1])
+	}
+	for _, l := range publish {
+		if strings.HasPrefix(l, "m=") && l != publish[0] {
+			break
+		}
+		if strings.Contains(l, "VP9") || strings.HasPrefix(l, "a=rtpmap:102") || strings.HasPrefix(l, "a=fmtp:103") {
+			t.Fatalf("VP9 line kept in the publish section: %q", l)
+		}
+	}
 }

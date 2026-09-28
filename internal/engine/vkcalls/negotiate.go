@@ -2,6 +2,7 @@ package vkcalls
 
 import (
 	"fmt"
+	"github.com/pion/interceptor"
 	"regexp"
 	"strconv"
 	"strings"
@@ -199,10 +200,33 @@ func newWebRTCAPI(offer string, cfg engine.Config, resolver protect.Lookup) (*we
 	if apply != nil {
 		apply(&settings)
 	}
-	return webrtc.NewAPI(
-		webrtc.WithSettingEngine(settings),
-		webrtc.WithMediaEngine(media),
-	), nil
+	opts := []func(*webrtc.API){webrtc.WithSettingEngine(settings), webrtc.WithMediaEngine(media)}
+	if expOn("rid") || expOn("mid") || expOn("defint") || expOn("rtcplog") {
+		rid := ""
+		if expOn("rid") {
+			rid = "l"
+		}
+		registry := &interceptor.Registry{}
+		if expOn("defint") {
+			if err := webrtc.RegisterDefaultInterceptorsWithOptions(media, registry, engine.DefaultInterceptorOptions()...); err != nil {
+				return nil, fmt.Errorf("vkcalls: interceptors: %w", err)
+			}
+			if err := webrtc.ConfigureTWCCHeaderExtensionSender(media, registry); err != nil {
+				return nil, fmt.Errorf("vkcalls: twcc: %w", err)
+			}
+		}
+		if expOn("rid") || expOn("mid") {
+			registry.Add(sdesStamperFactory{mid: publishMid(offer), rid: rid})
+		}
+		if expOn("rtcplog") {
+			registry.Add(rtcpLoggerFactory{})
+		}
+		if expOn("sdes") {
+			registry.Add(sdesWriterFactory{cname: expCName})
+		}
+		opts = append(opts, webrtc.WithInterceptorRegistry(registry))
+	}
+	return webrtc.NewAPI(opts...), nil
 }
 
 // remoteSSRCs lists the distinct SSRC attributions of an offer — the streams

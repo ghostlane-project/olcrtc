@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -110,6 +111,12 @@ type ShapeState struct {
 	SessionID int64
 	Version   int
 	AudioSSRC map[string]uint32
+	// NativeVideoSSRC: EXPERIMENT (temporary) the native publish section's
+	// FID group and cname lines.
+	NativeVideoSSRC []string
+	// NativeAudioSSRC: EXPERIMENT (temporary) the native answer's real
+	// audio sender SSRC per mid.
+	NativeAudioSSRC map[string]uint32
 }
 
 // NewShapeState builds shaping state with a fresh session id.
@@ -147,6 +154,35 @@ func ShapeAnswer(offer, native string, st *ShapeState) (string, error) {
 	publishSSRC, cname, msid, msidStream, err := videoPublishOf(native)
 	if err != nil {
 		return "", err
+	}
+	if expOn("sdes") {
+		// The SDES cname on the wire and the SDP cname must agree.
+		native = strings.ReplaceAll(native, " cname:"+cname, " cname:"+expCName)
+		cname = expCName
+	}
+	st.NativeVideoSSRC = nil
+	st.NativeAudioSSRC = map[string]uint32{}
+	if nativeSections, splitErr := splitSections(native); splitErr == nil {
+		for _, sec := range nativeSections {
+			if sec.kind() == kindAudio && sec.direction() == "sendonly" {
+				for _, line := range sec {
+					if m := ssrcCNameLine.FindStringSubmatch(line); m != nil {
+						if v, perr := strconv.ParseUint(m[1], 10, 32); perr == nil {
+							st.NativeAudioSSRC[sec.mid()] = uint32(v)
+						}
+						break
+					}
+				}
+			}
+			if sec.kind() != "video" || sec.direction() != "sendonly" {
+				continue
+			}
+			for _, line := range sec {
+				if strings.HasPrefix(line, "a=ssrc-group:") || (strings.HasPrefix(line, "a=ssrc:") && (strings.Contains(line, " cname:") || (expOn("simssrc") && strings.Contains(line, " msid:")))) {
+					st.NativeVideoSSRC = append(st.NativeVideoSSRC, line)
+				}
+			}
+		}
 	}
 	bundle := bundleLine.FindStringSubmatch(offer)
 	if bundle == nil {
@@ -232,10 +268,41 @@ func shapeSection(sec section, crypto []string, st *ShapeState, msid, msidStream
 			out = append(out, msid)
 		}
 		out = append(out, "a=rtcp-mux")
-		out = append(out, codecLines(sec)...)
+		switch {
+		case kind != kindAudio && expOn("browserm"):
+			// Chrome's publish section: the offer's codec set minus VP9 and
+			// its rtx, VP8 first, everything else as offered.
+			var mline string
+			mline, out = withoutVP9(sec, out)
+			out[0] = mline
+		case kind != kindAudio && expOn("vp8first"):
+			var mline string
+			mline, out = vp8Only(sec, out)
+			out[0] = mline
+		default:
+			out = append(out, codecLines(sec)...)
+		}
 		ssrc := publishSSRC
 		if kind == kindAudio {
 			ssrc = st.audioSSRC(mid)
+			if real, ok := st.NativeAudioSSRC[mid]; ok && expOn("audio") {
+				ssrc = real
+			}
+		}
+		if kind != kindAudio && expOn("rid") && expOn("simssrc") && len(st.NativeVideoSSRC) > 0 {
+			out = append(out, st.NativeVideoSSRC...)
+		}
+		if kind != kindAudio && expOn("rid") {
+			out = append(out,
+				"a=rid:l send max-width=320;max-height=180;max-fps=20;max-br=180000",
+				"a=rid:m send max-width=640;max-height=360;max-fps=20;max-br=500000",
+				"a=rid:h send max-width=1280;max-height=720;max-fps=20;max-br=1200000",
+				"a=simulcast:send l;m;h")
+			return out, nil
+		}
+		if kind != kindAudio && expOn("fid") && len(st.NativeVideoSSRC) > 0 {
+			out = append(out, st.NativeVideoSSRC...)
+			return out, nil
 		}
 		out = append(out, "a=ssrc:"+strconv.FormatUint(uint64(ssrc), 10)+" cname:"+cname)
 		return out, nil
@@ -284,4 +351,77 @@ func videoPublishOf(native string) (uint32, string, string, string, error) {
 		}
 	}
 	return 0, "", "", "", ErrShapeNoPublish
+}
+
+// EXPERIMENT (temporary): VKCALLS_EXP switches, removed before commit.
+func expOn(name string) bool {
+	for _, v := range strings.Split(os.Getenv("VKCALLS_EXP"), ",") {
+		if strings.TrimSpace(v) == name {
+			return true
+		}
+	}
+	return false
+}
+
+// vp8Only restricts a publish section to the offer's VP8 payload type and
+// its rtx, rewriting the m= line.
+func vp8Only(sec section, out []string) (string, []string) {
+	vp8, rtx := "", ""
+	for _, line := range sec {
+		if strings.HasPrefix(line, "a=rtpmap:") && strings.Contains(line, " VP8/90000") {
+			vp8 = strings.Fields(strings.TrimPrefix(line, "a=rtpmap:"))[0]
+		}
+	}
+	for _, line := range sec {
+		if strings.HasPrefix(line, "a=fmtp:") && strings.HasSuffix(strings.TrimRight(line, "\r"), "apt="+vp8) {
+			rtx = strings.Fields(strings.TrimPrefix(line, "a=fmtp:"))[0]
+		}
+	}
+	keep := map[string]bool{vp8: true, rtx: true}
+	for _, line := range codecLines(sec) {
+		pt := strings.Fields(strings.SplitN(line, ":", 2)[1])[0]
+		if keep[pt] {
+			out = append(out, line)
+		}
+	}
+	f := strings.Fields(sec[0])
+	m := strings.Join(f[:3], " ") + " " + vp8
+	if rtx != "" {
+		m += " " + rtx
+	}
+	return m, out
+}
+
+// withoutVP9 drops VP9 and its rtx from a publish section, as Chrome's
+// local answer does, keeping the offer's order for the rest.
+func withoutVP9(sec section, out []string) (string, []string) {
+	vp9 := ""
+	for _, line := range sec {
+		if strings.HasPrefix(line, "a=rtpmap:") && strings.Contains(line, " VP9/90000") {
+			vp9 = strings.Fields(strings.TrimPrefix(line, "a=rtpmap:"))[0]
+		}
+	}
+	drop := map[string]bool{}
+	if vp9 != "" {
+		drop[vp9] = true
+		for _, line := range sec {
+			if strings.HasPrefix(line, "a=fmtp:") && strings.HasSuffix(strings.TrimRight(line, "\r"), "apt="+vp9) {
+				drop[strings.Fields(strings.TrimPrefix(line, "a=fmtp:"))[0]] = true
+			}
+		}
+	}
+	for _, line := range codecLines(sec) {
+		pt := strings.Fields(strings.SplitN(line, ":", 2)[1])[0]
+		if !drop[pt] {
+			out = append(out, line)
+		}
+	}
+	f := strings.Fields(sec[0])
+	m := strings.Join(f[:3], " ")
+	for _, pt := range f[3:] {
+		if !drop[pt] {
+			m += " " + pt
+		}
+	}
+	return m, out
 }
