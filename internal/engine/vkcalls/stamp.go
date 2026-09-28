@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -132,7 +133,7 @@ func (l *rtcpLogger) answerRRT(from uint32, ntp uint64) {
 	if w == nil || len(ssrcs) == 0 {
 		return
 	}
-	lastRR := uint32(ntp >> 16) //nolint:gosec // middle 32 bits by definition
+	lastRR := uint32(ntp >> 16)                                         //nolint:gosec // middle 32 bits by definition
 	reports := []rtcp.DLRRReport{{SSRC: from, LastRR: lastRR, DLRR: 1}} // ~15 µs: answered at once
 	pkts := make([]rtcp.Packet, 0, len(ssrcs))
 	for _, ssrc := range ssrcs {
@@ -229,7 +230,35 @@ func encodeChangeSimulcast(sequence int, rid string, width, height, fps, bitrate
 	out = appendMPInt(out, width)
 	out = appendMPInt(out, height)
 	out = appendMPInt(out, fps)
-	return appendMPInt(out, bitrate)
+	// The web client's serializeChangeSimulcast writes eT.enc(bitrate/1e3):
+	// the layer bitrate travels in kbit/s, not bit/s.
+	return appendMPInt(out, bitrate/1000)
+}
+
+// layerProfile is the simulcast layer the engine declares, in the change
+// command and the answer's rid constraints. The default matches a small
+// videochannel frame; VKCALLS_LAYER=w,h,fps,kbps overrides it so the
+// declaration can follow the transport actually configured (the SFU polices
+// the forward against it — spike tun-vp8-01).
+func layerProfile() (w, h, fps, kbps int) {
+	w, h, fps, kbps = 320, 180, 15, 180
+	if v := os.Getenv("VKCALLS_LAYER"); v != "" {
+		_, _ = fmt.Sscanf(v, "%d,%d,%d,%d", &w, &h, &fps, &kbps)
+	}
+	return w, h, fps, kbps
+}
+
+// encodePerfStatReport is the SDK's report-perf-stat producer command (type
+// 1): [1, 0, sequence, framesDecoded, framesReceived]. The SDK sends it every
+// statisticsInterval (5 s) from getStats; the SFU feeds its consumer-leg
+// liveness with it — without the reports the forward is stalled within a
+// minute (spike tun-rr-01).
+func encodePerfStatReport(sequence int, framesDecoded, framesReceived uint32) []byte {
+	out := appendMPInt(nil, 1)
+	out = appendMPInt(out, 0)
+	out = appendMPInt(out, sequence)
+	out = appendMPInt(out, int(framesDecoded))
+	return appendMPInt(out, int(framesReceived))
 }
 
 // encodeChangeSimulcastLayers is change-simulcast for several camera layers
@@ -244,8 +273,11 @@ func encodeChangeSimulcastLayers(sequence int, layers [][5]any) []byte {
 		rid, _ := l[0].(string)
 		out = append(out, 0xA0|byte(len(rid)))
 		out = append(out, rid...)
-		for _, v := range l[1:] {
+		for i, v := range l[1:] {
 			n, _ := v.(int)
+			if i == 3 { // bitrate: kbit/s on the wire (serializeChangeSimulcast)
+				n /= 1000
+			}
 			out = appendMPInt(out, n)
 		}
 	}

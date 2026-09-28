@@ -109,6 +109,15 @@ func dialSignaling(ctx context.Context, endpoint, peerID string, resolver protec
 	}
 	dialer := protect.NewWebSocketDialer(wsHandshakeTimeout, resolver)
 	dialer.WriteBufferSize = signalingWriteBuffer
+	if u, err := url.Parse(target); err == nil {
+		q := u.Query()
+		for _, k := range []string{"token", "userId", "conversationId", "peerId"} {
+			if q.Has(k) {
+				q.Set(k, "<r>")
+			}
+		}
+		logger.Debugf("vkcalls: signaling url %s?%s", u.Path, q.Encode())
+	}
 	conn, response, err := dialer.DialContext(ctx, target, http.Header{
 		"Origin":  {"https://vk.com"},
 		"Referer": {"https://vk.com/"},

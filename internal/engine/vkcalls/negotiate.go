@@ -200,31 +200,31 @@ func newWebRTCAPI(offer string, cfg engine.Config, resolver protect.Lookup) (*we
 	if apply != nil {
 		apply(&settings)
 	}
-	opts := []func(*webrtc.API){webrtc.WithSettingEngine(settings), webrtc.WithMediaEngine(media)}
-	if expOn("rid") || expOn("mid") || expOn("defint") || expOn("rtcplog") {
-		rid := ""
-		if expOn("rid") {
-			rid = "l"
-		}
-		registry := &interceptor.Registry{}
-		if expOn("defint") {
-			if err := webrtc.RegisterDefaultInterceptorsWithOptions(media, registry, engine.DefaultInterceptorOptions()...); err != nil {
-				return nil, fmt.Errorf("vkcalls: interceptors: %w", err)
-			}
-			if err := webrtc.ConfigureTWCCHeaderExtensionSender(media, registry); err != nil {
-				return nil, fmt.Errorf("vkcalls: twcc: %w", err)
-			}
-		}
-		if expOn("rid") || expOn("mid") {
-			registry.Add(sdesStamperFactory{mid: publishMid(offer), rid: rid})
-		}
-		if expOn("rtcplog") {
-			registry.Add(rtcpLoggerFactory{})
-		}
-		if expOn("sdes") {
-			registry.Add(sdesWriterFactory{cname: expCName})
-		}
-		opts = append(opts, webrtc.WithInterceptorRegistry(registry))
+	// The engine answers as a browser-class endpoint: default interceptors
+	// (RTCP receiver/sender reports, NACK, TWCC) keep the SFU's consumer-leg
+	// liveness fed — without them the SFU stalls the forward after a minute —
+	// and every outbound packet carries the mid and rid header extensions the
+	// SFU maps our single simulcast layer by.
+	registry := &interceptor.Registry{}
+	if err := webrtc.RegisterDefaultInterceptorsWithOptions(
+		media, registry, engine.DefaultInterceptorOptions()...,
+	); err != nil {
+		return nil, fmt.Errorf("vkcalls: interceptors: %w", err)
+	}
+	if err := webrtc.ConfigureTWCCHeaderExtensionSender(media, registry); err != nil {
+		return nil, fmt.Errorf("vkcalls: twcc: %w", err)
+	}
+	registry.Add(sdesStamperFactory{mid: publishMid(offer), rid: "l"})
+	if expOn("rtcplog") {
+		registry.Add(rtcpLoggerFactory{})
+	}
+	if expOn("sdes") {
+		registry.Add(sdesWriterFactory{cname: expCName})
+	}
+	opts := []func(*webrtc.API){
+		webrtc.WithSettingEngine(settings),
+		webrtc.WithMediaEngine(media),
+		webrtc.WithInterceptorRegistry(registry),
 	}
 	return webrtc.NewAPI(opts...), nil
 }

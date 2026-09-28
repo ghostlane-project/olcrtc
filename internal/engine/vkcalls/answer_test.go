@@ -156,15 +156,26 @@ func TestShapeAnswerStructure(t *testing.T) {
 		t.Fatalf("recv section:\n%s", strings.Join(recv, "\n"))
 	}
 
-	// The video publish slot declares the Pion track's SSRC plainly, no rid.
+	// The video publish slot takes the browser's simulcast declaration:
+	// three rid constraints, one simulcast line, no SSRC attribution — the
+	// SFU binds the stream by the rid RTP header (spike rid-onelayer).
 	pub := sectionOf(t, lines, "m=video 9 UDP/TLS/RTP/SAVPF 102 103 100 101")
-	if !contains(pub, "a=sendonly") || !contains(pub, "a=msid:proofkit video") ||
-		!contains(pub, "a=ssrc:3842537998 cname:proofkit") {
+	if !contains(pub, "a=sendonly") || !contains(pub, "a=msid:proofkit video") {
 		t.Fatalf("publish section %v", pub)
 	}
+	for _, want := range []string{
+		"a=rid:l send max-width=320;max-height=180;max-fps=15;max-br=180000",
+		"a=rid:m send max-width=640;max-height=360;max-fps=20;max-br=500000",
+		"a=rid:h send max-width=1280;max-height=720;max-fps=20;max-br=1200000",
+		"a=simulcast:send l;m;h",
+	} {
+		if !contains(pub, want) {
+			t.Fatalf("publish section missing %q: %v", want, pub)
+		}
+	}
 	for _, line := range pub {
-		if strings.HasPrefix(line, "a=rid:") || strings.HasPrefix(line, "a=simulcast:") {
-			t.Fatalf("rid leaked into publish section: %q", line)
+		if strings.HasPrefix(line, "a=ssrc:") {
+			t.Fatalf("ssrc attribution leaked into the video publish slot: %q", line)
 		}
 	}
 

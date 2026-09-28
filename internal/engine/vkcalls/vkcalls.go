@@ -29,9 +29,12 @@ var (
 )
 
 const (
-	offerWait    = 30 * time.Second
-	connectWait  = 30 * time.Second
-	layoutSeqMod = 1 << 20
+	offerWait     = 30 * time.Second
+	connectWait   = 30 * time.Second
+	commandSeqMod = 1 << 20
+	// perfStatInterval is the SDK's statisticsInterval: how often the client
+	// reports decoded frames to the SFU.
+	perfStatInterval = 5 * time.Second
 )
 
 // referenceCapabilities is the allocate-consumer feature report: only what
@@ -44,7 +47,7 @@ func referenceCapabilities() map[string]any {
 		"consumerScreenDataChannelVersion": 1, "producerScreenDataChannelVersion": 1,
 		"asrDataChannelVersion": 1, "animojiDataChannelVersion": 2, "animojiBackendRender": true,
 		"onDemandTracks": true, "unifiedPlan": true, "singleSession": true, "videoTracksCount": 36,
-		"red": true, "audioShare": true, "fastScreenShare": true, "videoSuspend": !expOn("nosuspend"),
+		"red": true, "audioShare": true, "fastScreenShare": true, "videoSuspend": expOn("suspcap"),
 		"simulcast": !expOn("nosim"), "simulcastNativeOrder": true, "consumerFastScreenShare": false,
 		"consumerFastScreenShareQualityOnDemand": false, "transparentAudio": false,
 	}
@@ -76,6 +79,7 @@ type generation struct {
 	pc      *webrtc.PeerConnection
 	command *webrtc.DataChannel
 	notify  *webrtc.DataChannel
+	extraDC []*webrtc.DataChannel // EXPERIMENT: the SDK's other service channels
 	shape   *ShapeState
 
 	registryMu sync.Mutex
@@ -83,9 +87,11 @@ type generation struct {
 	// participants are the others in the conversation, whose cameras the
 	// layout asks for (by string key until the registry names them).
 	participants map[string]bool
-	layoutSeq    int
+	commandSeq   int
 	sessionID    string
 	connected    chan struct{}
+	done         chan struct{}
+	doneOnce     sync.Once
 	fireOnce     sync.Once
 	reconnect    func()
 	shouldRecn   func() bool
@@ -175,6 +181,7 @@ func (s *Session) Connect(ctx context.Context) error {
 	s.mu.Lock()
 	s.gen = gen
 	s.mu.Unlock()
+	go gen.perfStatLoop()
 	go s.run(gen, connection) //nolint:contextcheck // the session owns its post-connect lifetime
 	return nil
 }
@@ -201,6 +208,11 @@ func (s *Session) negotiate(ctx context.Context, gen *generation, offer string) 
 	}
 	// The publish slot carries the video transport's track; its SSRC lands in
 	// the native answer and the shaper declares it to the SFU.
+	// The service channels are created before the tracks, in the SDK's
+	// order (channel ids 0,2,4,… before the media sections' SSRCs).
+	if err := s.openControlChannels(gen, pc); err != nil {
+		return err
+	}
 	senders := map[string]*webrtc.RTPSender{}
 	s.video.RangeVideoTracks(func(track webrtc.TrackLocal, _ bool) {
 		// EXPERIMENT: a track with a RID joins the sender of its track id as
@@ -255,8 +267,12 @@ func (s *Session) negotiate(ctx context.Context, gen *generation, offer string) 
 		}
 	})
 
-	if err := s.openControlChannels(gen, pc); err != nil {
-		return err
+	if expOn("sixdc") {
+		ordered := true
+		if dc, err := pc.CreateDataChannel("consumerScreenShare", &webrtc.DataChannelInit{Ordered: &ordered}); err == nil {
+			dc.OnOpen(func() { logger.Debugf("vkcalls: service channel consumerScreenShare open") })
+			gen.extraDC = append(gen.extraDC, dc)
+		}
 	}
 	return s.acceptOffer(ctx, gen, offer)
 }
@@ -265,27 +281,56 @@ func (s *Session) negotiate(ctx context.Context, gen *generation, offer string) 
 // speaks: producerCommand carries the layout subscription, and
 // producerNotification delivers the stream registry.
 func (s *Session) openControlChannels(gen *generation, pc *webrtc.PeerConnection) error {
-	command, err := pc.CreateDataChannel("producerCommand", nil)
+	ordered := true
+	notify, err := pc.CreateDataChannel("producerNotification", &webrtc.DataChannelInit{Ordered: &ordered})
+	if err != nil {
+		return fmt.Errorf("vkcalls: producer notification channel: %w", err)
+	}
+	gen.notify = notify
+	command, err := pc.CreateDataChannel("producerCommand", &webrtc.DataChannelInit{Ordered: &ordered})
 	if err != nil {
 		return fmt.Errorf("vkcalls: producer command channel: %w", err)
 	}
 	gen.command = command
+	if expOn("sixdc") {
+		// EXPERIMENT: the SDK's full channel set in its order; the consumer
+		// screen share channel follows the tracks (see negotiate).
+		for _, label := range []string{"producerScreenShare", "asr", "animoji"} {
+			dc, err := pc.CreateDataChannel(label, &webrtc.DataChannelInit{Ordered: &ordered})
+			if err != nil {
+				return fmt.Errorf("vkcalls: %s channel: %w", label, err)
+			}
+			l := label
+			dc.OnOpen(func() { logger.Debugf("vkcalls: service channel %s open", l) })
+			dc.OnMessage(func(m webrtc.DataChannelMessage) { logger.Debugf("vkcalls: %s message %x", l, m.Data) })
+			gen.extraDC = append(gen.extraDC, dc)
+		}
+	}
 	// The participants known at connect, and a registry that arrived first,
 	// are subscribed as soon as the channel can carry the layout.
 	command.OnOpen(func() {
-		if expOn("chsim") {
+		if expOn("vsusp") {
+			// EXPERIMENT: the web app's initVideoSuspend on CONNECTED in
+			// SERVER topology: enable-video-suspend(true) (AUTO mode).
 			gen.registryMu.Lock()
-			gen.layoutSeq++
-			seq := gen.layoutSeq
+			gen.commandSeq++
+			seq := gen.commandSeq
 			gen.registryMu.Unlock()
-			w, h, fps, br := 320, 180, 15, 180000
-			if v := os.Getenv("VKCALLS_CHSIM"); v != "" {
-				_, _ = fmt.Sscanf(v, "%d,%d,%d,%d", &w, &h, &fps, &br)
-			}
-			frame := encodeChangeSimulcast(seq, "l", w, h, fps, br)
-			if expOn("chsim2") {
-				frame = encodeChangeSimulcastLayers(seq, [][5]any{{"l", 320, 180, 15, 180000}, {"m", 640, 360, 15, 500000}})
-			}
+			frame := append(appendMPInt(appendMPInt(appendMPInt(nil, 5), 0), seq), 0xC3)
+			logger.Debugf("vkcalls: enable-video-suspend %x: %v", frame, command.Send(frame))
+		}
+		// The SDK configures its encodings right after accept-producer
+		// (sync({force:true})): without this the SFU accepts the stream but
+		// never forwards it, and the command is fire-and-forget, so the
+		// mistake is silent. The engine publishes one layer: l at the
+		// transport's small frame. Bitrate is written in kbit/s.
+		{
+			gen.registryMu.Lock()
+			gen.commandSeq++
+			seq := gen.commandSeq
+			gen.registryMu.Unlock()
+			w, h, fps, kbps := layerProfile()
+			frame := encodeChangeSimulcast(seq, "l", w, h, fps, kbps*1000)
 			if expOn("chsim3") {
 				// Chrome's rs(1280,720): three layers announced, h inactive.
 				frame = encodeChangeSimulcastLayers(seq, [][5]any{{"l", 320, 180, 20, 180000}, {"m", 640, 360, 20, 500000}, {"h", 1280, 720, 20, 1200000}})
@@ -297,11 +342,7 @@ func (s *Session) openControlChannels(gen *generation, pc *webrtc.PeerConnection
 	command.OnMessage(func(message webrtc.DataChannelMessage) {
 		logger.Debugf("vkcalls: command reply %x", message.Data)
 	})
-	notify, err := pc.CreateDataChannel("producerNotification", nil)
-	if err != nil {
-		return fmt.Errorf("vkcalls: producer notification channel: %w", err)
-	}
-	gen.notify = notify
+
 	notify.OnMessage(func(message webrtc.DataChannelMessage) {
 		s.onServiceFrame(gen, message.Data)
 	})
@@ -494,14 +535,56 @@ func (gen *generation) removeStream(participant string) {
 	gen.registryMu.Unlock()
 }
 
+// nextSeq takes the next producerCommand sequence number; every command on
+// that channel shares one counter, as in the SDK.
+func (gen *generation) nextSeq() int {
+	gen.registryMu.Lock()
+	defer gen.registryMu.Unlock()
+	gen.commandSeq++
+	return gen.commandSeq % commandSeqMod
+}
+
+// perfStatLoop reports the consumer's decoded frames every five seconds, the
+// SDK's statisticsInterval: the SFU's consumer-leg liveness depends on these
+// reports (spike tun-rr-01: without them the forward stalls within a minute).
+func (gen *generation) perfStatLoop() {
+	ticker := time.NewTicker(perfStatInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-gen.done:
+			return
+		case <-ticker.C:
+		}
+		if gen.pc == nil || gen.command == nil || gen.command.ReadyState() != webrtc.DataChannelStateOpen {
+			continue
+		}
+		// Pion never populates FramesDecoded (nothing in the stack decodes),
+		// so the honest progression signal is received video packets — the
+		// report exists to prove the consumer consumes, and packet counts do.
+		var received uint32
+		for _, entry := range gen.pc.GetStats() {
+			inbound, ok := entry.(webrtc.InboundRTPStreamStats)
+			if !ok || inbound.Kind != "video" {
+				continue
+			}
+			received += inbound.PacketsReceived
+		}
+		frame := encodePerfStatReport(gen.nextSeq(), received, received)
+		if err := gen.command.Send(frame); err != nil {
+			logger.Debugf("vkcalls: perf stat: %v", err)
+		}
+	}
+}
+
 // subscribeAll sends the update-display-layout producer command for every
 // registry stream. The SFU forwards exactly what the layout lists; without
 // it nothing flows (spike hybrid-03…11).
 func (gen *generation) subscribeAll() {
 	gen.registryMu.Lock()
 	entries := layoutEntries(gen.registry, gen.participantList())
-	gen.layoutSeq++
-	sequence := gen.layoutSeq % layoutSeqMod
+	gen.commandSeq++
+	sequence := gen.commandSeq % commandSeqMod
 	gen.registryMu.Unlock()
 	if len(entries) == 0 {
 		return
@@ -553,7 +636,12 @@ func (gen *generation) maybeReconnect() {
 	gen.fireOnce.Do(gen.reconnect)
 }
 
+func (gen *generation) stop() {
+	gen.doneOnce.Do(func() { close(gen.done) })
+}
+
 func (gen *generation) teardown() {
+	gen.stop()
 	if gen.pc != nil {
 		_ = gen.pc.Close()
 	}

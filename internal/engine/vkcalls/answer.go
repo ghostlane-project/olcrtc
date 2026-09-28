@@ -282,29 +282,25 @@ func shapeSection(sec section, crypto []string, st *ShapeState, msid, msidStream
 		default:
 			out = append(out, codecLines(sec)...)
 		}
-		ssrc := publishSSRC
 		if kind == kindAudio {
-			ssrc = st.audioSSRC(mid)
+			ssrc := st.audioSSRC(mid)
 			if real, ok := st.NativeAudioSSRC[mid]; ok && expOn("audio") {
 				ssrc = real
 			}
-		}
-		if kind != kindAudio && expOn("rid") && expOn("simssrc") && len(st.NativeVideoSSRC) > 0 {
-			out = append(out, st.NativeVideoSSRC...)
-		}
-		if kind != kindAudio && expOn("rid") {
-			out = append(out,
-				"a=rid:l send max-width=320;max-height=180;max-fps=20;max-br=180000",
-				"a=rid:m send max-width=640;max-height=360;max-fps=20;max-br=500000",
-				"a=rid:h send max-width=1280;max-height=720;max-fps=20;max-br=1200000",
-				"a=simulcast:send l;m;h")
+			out = append(out, "a=ssrc:"+strconv.FormatUint(uint64(ssrc), 10)+" cname:"+cname)
 			return out, nil
 		}
-		if kind != kindAudio && expOn("fid") && len(st.NativeVideoSSRC) > 0 {
-			out = append(out, st.NativeVideoSSRC...)
-			return out, nil
-		}
-		out = append(out, "a=ssrc:"+strconv.FormatUint(uint64(ssrc), 10)+" cname:"+cname)
+		// The video slot takes the browser's simulcast declaration: three
+		// rid constraints with the engine publishing the low layer only, and
+		// no a=ssrc — the SFU binds the stream by the rid header instead.
+		// This is the form the SDK's finalizeAnswer writes and the SFU
+		// forwards (spike rid-onelayer).
+		w, h, fps, kbps := layerProfile()
+		out = append(out,
+			fmt.Sprintf("a=rid:l send max-width=%d;max-height=%d;max-fps=%d;max-br=%d", w, h, fps, kbps*1000),
+			"a=rid:m send max-width=640;max-height=360;max-fps=20;max-br=500000",
+			"a=rid:h send max-width=1280;max-height=720;max-fps=20;max-br=1200000",
+			"a=simulcast:send l;m;h")
 		return out, nil
 	default:
 		return nil, fmt.Errorf("%w: mid %s", ErrShapeDirection, mid)

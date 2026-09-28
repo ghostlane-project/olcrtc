@@ -501,8 +501,12 @@ func (p *streamTransport) decodeSamples(decoder *goDecoder, samples <-chan []byt
 	}
 }
 
-func (p *streamTransport) handleRemoteTrack(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
-	codec, ok := codecSpecForMime(track.Codec().MimeType)
+func (p *streamTransport) handleRemoteTrack(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
+	var codecs []webrtc.RTPCodecParameters
+	if receiver != nil {
+		codecs = receiver.GetParameters().Codecs
+	}
+	source, codec, ok := remoteSource(track, codecs)
 	if !ok {
 		logger.Warnf("videochannel unsupported remote codec: %s", track.Codec().MimeType)
 		return
@@ -526,7 +530,7 @@ func (p *streamTransport) handleRemoteTrack(track *webrtc.TrackRemote, _ *webrtc
 	samples := make(chan []byte, sampleQueueDepth)
 	go p.popDecoderFrames(decoder)
 	go p.decodeSamples(decoder, samples)
-	go p.readDecoderInput(track, track.Codec().ClockRate, decoder, samples, codec)
+	go p.readDecoderInput(source, track.Codec().ClockRate, decoder, samples, codec)
 }
 
 func (p *streamTransport) handleFrame(frame []byte) {

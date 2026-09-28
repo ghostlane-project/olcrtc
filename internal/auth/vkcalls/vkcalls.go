@@ -25,6 +25,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -209,10 +210,17 @@ func (p Provider) Issue(ctx context.Context, cfg auth.Config) (auth.Credentials,
 		StunServer any    `json:"stun_server"`
 		TurnServer any    `json:"turn_server"`
 	}{}
-	if joinErr := p.fbCall(ctx, client, stageJoin, map[string]string{
+	joinParams := map[string]string{
 		"joinLink": linkID(link), "isVideo": "false", "protocolVersion": "5",
 		"anonymToken": issued.Response.Token, "session_key": session.SessionKey,
-	}, &join); joinErr != nil {
+	}
+	if os.Getenv("VKCALLS_JOIN") == "browser" {
+		// EXPERIMENT: the web SDK's join: a video-capable client with the
+		// capabilities mask it also puts in the signaling URL.
+		joinParams["isVideo"] = "true"
+		joinParams["capabilities"] = "6F7F"
+	}
+	if joinErr := p.fbCall(ctx, client, stageJoin, joinParams, &join); joinErr != nil {
 		return auth.Credentials{}, joinErr
 	}
 
@@ -229,9 +237,16 @@ type sdkSession struct {
 // sdkLogin runs the SDK anonymous login (step 4) and returns its session.
 func (p Provider) sdkLogin(ctx context.Context, client *http.Client) (sdkSession, error) {
 	var session sdkSession
-	sessionData, marshalErr := json.Marshal(map[string]any{
+	sessionPayload := map[string]any{
 		"version": 2, fieldDeviceID: "olcrtc-sdk-" + randomToken(16), "client_version": sdkClientVer,
-	})
+	}
+	if os.Getenv("VKCALLS_JOIN") == "browser" {
+		// EXPERIMENT: the web SDK's session data shape (2.8.12-beta.15).
+		sessionPayload = map[string]any{
+			"version": 2, fieldDeviceID: uuidLike(), "client_version": 1.1, "client_type": "SDK_JS",
+		}
+	}
+	sessionData, marshalErr := json.Marshal(sessionPayload)
 	if marshalErr != nil {
 		return session, fmt.Errorf("vkcalls: session data: %w", marshalErr)
 	}
@@ -554,4 +569,10 @@ func redact(body []byte) string {
 		s = s[:200]
 	}
 	return s
+}
+
+// uuidLike renders a random v4-shaped UUID (EXPERIMENT).
+func uuidLike() string {
+	t := randomToken(32)
+	return t[0:8] + "-" + t[8:12] + "-4" + t[13:16] + "-a" + t[17:20] + "-" + t[20:32]
 }
