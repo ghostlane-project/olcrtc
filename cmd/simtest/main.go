@@ -8,6 +8,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -33,7 +34,7 @@ func (stamper) BindLocalStream(info *interceptor.StreamInfo, writer interceptor.
 		}
 	}
 	rid, _ := ridOf.Load(info.SSRC)
-	fmt.Printf("sender: bind ssrc=%d mid ext=%d rid ext=%d rid=%v\n", info.SSRC, midID, ridID, rid)
+	fmt.Fprintf(os.Stderr, "sender: bind ssrc=%d mid ext=%d rid ext=%d rid=%v\n", info.SSRC, midID, ridID, rid)
 	return interceptor.RTPWriterFunc(func(h *rtp.Header, p []byte, a interceptor.Attributes) (int, error) {
 		if midID != 0 {
 			_ = h.SetExtension(midID, []byte("0"))
@@ -91,11 +92,11 @@ func main() {
 	}
 	for _, e := range sender.GetParameters().Encodings {
 		ridOf.Store(uint32(e.SSRC), e.RID)
-		fmt.Printf("sender encoding rid=%s ssrc=%d\n", e.RID, e.SSRC)
+		fmt.Fprintf(os.Stderr, "sender encoding rid=%s ssrc=%d\n", e.RID, e.SSRC)
 	}
 	seen := sync.Map{}
 	answerer.OnTrack(func(t *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
-		fmt.Printf("receiver: track rid=%q ssrc=%d\n", t.RID(), t.SSRC())
+		fmt.Fprintf(os.Stderr, "receiver: track rid=%q ssrc=%d\n", t.RID(), t.SSRC())
 		n := 0
 		for {
 			if _, _, err := t.ReadRTP(); err != nil {
@@ -127,7 +128,7 @@ func main() {
 	if err := offerer.SetRemoteDescription(*answerer.LocalDescription()); err != nil {
 		panic(err)
 	}
-	fmt.Println("offer publish lines:", strings.Join(filter(offerer.LocalDescription().SDP, "a=rid", "a=simulcast", "a=ssrc"), " | "))
+	fmt.Fprintln(os.Stderr, "offer publish lines:", strings.Join(filter(offerer.LocalDescription().SDP, "a=rid", "a=simulcast", "a=ssrc"), " | "))
 	time.Sleep(2 * time.Second)
 	var seq uint16
 	for i := 0; i < 60; i++ {
@@ -135,13 +136,13 @@ func main() {
 			seq++
 			p := &rtp.Packet{Header: rtp.Header{Version: 2, SequenceNumber: seq, Timestamp: uint32(i) * 6000, Marker: true}, Payload: append([]byte{0x90, 0xE0, 0x80, 0x01, 0x01, 0x00}, make([]byte, 200)...)}
 			if err := t.WriteRTP(p); err != nil {
-				fmt.Println("write", t.RID(), err)
+				fmt.Fprintln(os.Stderr, "write", t.RID(), err)
 			}
 		}
 		time.Sleep(66 * time.Millisecond)
 	}
 	time.Sleep(time.Second)
-	seen.Range(func(k, v any) bool { fmt.Printf("received rid=%q packets=%v\n", k, v); return true })
+	seen.Range(func(k, v any) bool { fmt.Fprintf(os.Stderr, "received rid=%q packets=%v\n", k, v); return true })
 }
 
 func filter(s string, prefixes ...string) []string {

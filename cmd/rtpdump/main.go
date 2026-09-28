@@ -14,6 +14,7 @@ import (
 	"os"
 	"sync"
 
+	"github.com/pion/interceptor"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -43,10 +44,32 @@ func main() {
 	}
 	var mu sync.Mutex
 	m := &webrtc.MediaEngine{}
-	if err := m.RegisterDefaultCodecs(); err != nil {
+	// VP8 with a RED wrapper on offer, as the VK SFU offers it: a browser
+	// then sends RED (PT 104) and the recording shows the exact block layout.
+	for _, c := range []webrtc.RTPCodecParameters{
+		{RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8, ClockRate: 90000, RTCPFeedback: []webrtc.RTCPFeedback{{Type: "nack"}, {Type: "nack", Parameter: "pli"}, {Type: "ccm", Parameter: "fir"}, {Type: "goog-remb"}, {Type: "transport-cc"}}}, PayloadType: 100},
+		{RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: "video/rtx", ClockRate: 90000, SDPFmtpLine: "apt=100"}, PayloadType: 101},
+		{RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: "video/red", ClockRate: 90000}, PayloadType: 104},
+		{RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: "video/rtx", ClockRate: 90000, SDPFmtpLine: "apt=104"}, PayloadType: 105},
+		{RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: "video/ulpfec", ClockRate: 90000}, PayloadType: 106},
+	} {
+		if err := m.RegisterCodec(c, webrtc.RTPCodecTypeVideo); err != nil {
+			panic(err)
+		}
+	}
+	// NACK generator + receiver reports, so the browser retransmits what
+	// the loopback drops and the recording has no holes.
+	if err := webrtc.ConfigureSimulcastExtensionHeaders(m); err != nil {
 		panic(err)
 	}
-	api := webrtc.NewAPI(webrtc.WithMediaEngine(m))
+	registry := &interceptor.Registry{}
+	if err := webrtc.ConfigureNack(m, registry); err != nil {
+		panic(err)
+	}
+	if err := webrtc.ConfigureRTCPReports(registry); err != nil {
+		panic(err)
+	}
+	api := webrtc.NewAPI(webrtc.WithMediaEngine(m), webrtc.WithInterceptorRegistry(registry))
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, page) })
 	http.HandleFunc("/offer", func(w http.ResponseWriter, r *http.Request) {
 		var offer webrtc.SessionDescription
@@ -59,7 +82,7 @@ func main() {
 			panic(err)
 		}
 		pc.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
-			fmt.Println("track", track.RID(), track.SSRC(), track.Codec().MimeType)
+			fmt.Fprintln(os.Stderr, "track", track.RID(), track.SSRC(), track.Codec().MimeType)
 			for {
 				pkt, _, err := track.ReadRTP()
 				if err != nil {
@@ -73,6 +96,7 @@ func main() {
 				var hdr [6]byte
 				hdr[0] = byte(len(track.RID()))
 				copy(hdr[1:], track.RID())
+				hdr[3] = byte(pkt.PayloadType)
 				binary.BigEndian.PutUint16(hdr[4:], uint16(len(raw))) //nolint:gosec // packets are < 64 KiB
 				_, _ = out.Write(hdr[:])
 				_, _ = out.Write(raw)
@@ -93,6 +117,6 @@ func main() {
 		<-done
 		_ = json.NewEncoder(w).Encode(pc.LocalDescription())
 	})
-	fmt.Println("listening", os.Args[1])
+	fmt.Fprintln(os.Stderr, "listening", os.Args[1])
 	panic(http.ListenAndServe(os.Args[1], nil))
 }

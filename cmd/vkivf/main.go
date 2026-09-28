@@ -98,11 +98,15 @@ func main() {
 	// track, sequence numbers and timestamps re-based per layer.
 	rtpFile := os.Getenv("VP8_RTP_FILE")
 	if rtpFile != "" {
-		rtpTrack, err = webrtc.NewTrackLocalStaticRTP(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8, ClockRate: 90000}, "video", "proofkit", webrtc.WithRTPStreamID("l"))
+		replayMime := webrtc.MimeTypeVP8
+		if withRED {
+			replayMime = "video/red"
+		}
+		rtpTrack, err = webrtc.NewTrackLocalStaticRTP(webrtc.RTPCodecCapability{MimeType: replayMime, ClockRate: 90000}, "video", "proofkit", webrtc.WithRTPStreamID("l"))
 		if err != nil {
 			panic(err)
 		}
-		trackM, err = webrtc.NewTrackLocalStaticRTP(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8, ClockRate: 90000}, "video", "proofkit", webrtc.WithRTPStreamID("m"))
+		trackM, err = webrtc.NewTrackLocalStaticRTP(webrtc.RTPCodecCapability{MimeType: replayMime, ClockRate: 90000}, "video", "proofkit", webrtc.WithRTPStreamID("m"))
 		if err != nil {
 			panic(err)
 		}
@@ -316,7 +320,7 @@ func main() {
 	}
 	fmt.Println("IVF publisher connected")
 	if rtpFile != "" {
-		replayRTP(ctx, rtpFile, map[string]*webrtc.TrackLocalStaticRTP{"l": rtpTrack, "m": trackM})
+		replayRTP(ctx, rtpFile, map[string]*webrtc.TrackLocalStaticRTP{"l": rtpTrack, "m": trackM}, withRED, byte(vp8PT))
 		_ = sess.Close()
 		return
 	}
@@ -421,7 +425,7 @@ func senderSSRCs(sess any) []layerInfo {
 // replayRTP plays a rtpdump recording in a loop at the recorded pace (the
 // RTP timestamps, 90 kHz), each layer on its own track. Sequence numbers
 // and timestamps continue across loops so a receiver sees one stream.
-func replayRTP(ctx context.Context, path string, tracks map[string]*webrtc.TrackLocalStaticRTP) {
+func replayRTP(ctx context.Context, path string, tracks map[string]*webrtc.TrackLocalStaticRTP, withRED bool, vp8PT byte) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		panic(err)
@@ -429,6 +433,12 @@ func replayRTP(ctx context.Context, path string, tracks map[string]*webrtc.Track
 	type rec struct {
 		rid string
 		pkt rtp.Packet
+	}
+	// A recording made against a RED offer already carries RED: its RED
+	// payload type is named in RED_PT_IN (Pion's local negotiation picked 119).
+	redPT := byte(104)
+	if v, _ := strconv.Atoi(os.Getenv("RED_PT_IN")); v > 0 {
+		redPT = byte(v)
 	}
 	var recs []rec
 	seen := map[string]map[uint16]bool{}
@@ -495,6 +505,10 @@ func replayRTP(ctx context.Context, path string, tracks map[string]*webrtc.Track
 			// stamper adds mid/rid/abs-send-time/twcc for this session.
 			out.Extension = false
 			out.Extensions = nil
+			if withRED && r.pkt.PayloadType != redPT {
+				// RFC 2198 RED with one primary block: F=0, block PT = VP8's.
+				out.Payload = append([]byte{vp8PT}, out.Payload...)
+			}
 			if err := t.WriteRTP(&out); err != nil {
 				fmt.Println("replay write:", err)
 			}

@@ -270,6 +270,11 @@ linters:
           - noctx
           - unparam
           - wrapcheck
+      # The vk spike's experiment tools: one-shot publishers, replay and
+      # capture harnesses (docs/spikes/vkcalls), written against a live SFU
+      # under iteration and not shipped. They leave with the spike's wind-down.
+      - path: cmd/(vkivf|rtpdump|simtest)/main\.go$
+        text: .*
 
 formatters:
   enable:
