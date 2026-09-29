@@ -339,7 +339,11 @@ jobs:
             -olcrtc.gate -olcrtc.gate-target=local -olcrtc.gate-dir=gate-artifacts/cli
 
       - name: Run the gate, mobile flavour (olcrtc_lean build)
-        # Its cells are owed to the report whatever the cli run did.
+        # Its cells are owed to the report whatever the cli run did. The 60 m
+        # budget covers the full mobile matrix — every load pair runs S1-S5
+        # and S7 — with the slow SaluteJazz leg (a 300 s S0 measured) and the
+        # vkcalls cells added on 2026-09-28: 45 m minus the report margin cut
+        # the run at 2610 s mid-S4 (run 36483073049).
         if: ${{ !cancelled() && steps.go.outcome == 'success' }}
         env:
           OLCRTC_GATE_TELEMOST_ROOMS: ${{ secrets.GATE_TELEMOST_ROOMS }}
@@ -348,7 +352,7 @@ jobs:
           OLCRTC_GATE_JITSI_HOSTS: ${{ secrets.GATE_JITSI_HOSTS }}
           OLCRTC_GATE_VKCALLS_ROOMS: ${{ secrets.GATE_VKCALLS_ROOMS }}
         run: |
-          go test -count=1 -tags olcrtc_lean -timeout 45m ./internal/gate -run '^TestGate$' -v \
+          go test -count=1 -tags olcrtc_lean -timeout 60m ./internal/gate -run '^TestGate$' -v \
             -olcrtc.gate -olcrtc.gate-target=local -olcrtc.gate-dir=gate-artifacts/mobile
 
       - name: Run the gate, cli flavour with the DTLS profile

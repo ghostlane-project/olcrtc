@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pion/webrtc/v4"
@@ -32,6 +33,10 @@ const (
 	offerWait     = 30 * time.Second
 	connectWait   = 30 * time.Second
 	commandSeqMod = 1 << 20
+	// maxReconnects bounds the supervisor's rejoin attempts before the
+	// session ends with the limit reason.
+	maxReconnects = 10
+
 	// perfStatInterval is the SDK's statisticsInterval: how often the client
 	// reports decoded frames to the SFU.
 	perfStatInterval = 5 * time.Second
@@ -64,12 +69,16 @@ type Session struct {
 
 	video engine.VideoTrackState
 
-	mu        sync.Mutex
-	gen       *generation
-	encodings []webrtc.RTPEncodingParameters // EXPERIMENT: the publish encodings
-	closed    bool
-	endOnce   sync.Once
-	ended     func(string)
+	engine.Reconnector
+
+	mu           sync.Mutex
+	gen          *generation
+	encodings    []webrtc.RTPEncodingParameters // EXPERIMENT: the publish encodings
+	closed       atomic.Bool
+	reconnecting atomic.Bool
+	closeCh      chan struct{}
+	closeOnce    sync.Once
+	endOnce      sync.Once
 }
 
 // generation bundles everything one connection attempt owns, so closing it
@@ -92,17 +101,28 @@ type generation struct {
 	connected    chan struct{}
 	done         chan struct{}
 	doneOnce     sync.Once
-	fireOnce     sync.Once
-	reconnect    func()
-	shouldRecn   func() bool
 }
+
+// isDone says whether this attempt was torn down: a failure it raised after
+// that says nothing about the session (see reconnectAttempt).
 
 // New builds a VK Calls session from provider credentials.
 func New(_ context.Context, cfg engine.Config) (engine.Session, error) {
 	if cfg.URL == "" {
 		return nil, ErrNoEndpoint
 	}
-	s := &Session{cfg: cfg, endpoint: cfg.URL, peerID: cfg.Extra["peer_id_hint"], iceJSON: cfg.Extra["ice_servers"]}
+	s := &Session{
+		cfg: cfg, endpoint: cfg.URL,
+		peerID: cfg.Extra["peer_id_hint"], iceJSON: cfg.Extra["ice_servers"],
+		closeCh: make(chan struct{}),
+	}
+	s.Configure(engine.ReconnectorConfig{
+		MaxAttempts: maxReconnects,
+		Reconnect:   s.reconnect,
+		OnError:     func(err error) { logger.Debugf("vkcalls: reconnect failed: %v", err) },
+		OnLimit:     func(string) { s.signalEnded("reconnect limit reached") },
+		LimitReason: "reconnect limit reached",
+	})
 	return s, nil
 }
 
@@ -120,12 +140,9 @@ func (s *Session) SetVideoTrackHandler(cb func(*webrtc.TrackRemote, *webrtc.RTPR
 // Connect joins the conversation and brings the bundled peer connection to
 // the connected state with an active media subscription.
 func (s *Session) Connect(ctx context.Context) error {
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
+	if s.closed.Load() {
 		return ErrSessionClosed
 	}
-	s.mu.Unlock()
 
 	// A fresh join carries no peer id: the hint names this client only to a
 	// retry join (tgt=retry), which the reconnect path issues.
@@ -156,9 +173,6 @@ func (s *Session) Connect(ctx context.Context) error {
 		registry:  Registry{},
 		connected: make(chan struct{}),
 		done:      make(chan struct{}),
-		// The reconnect hook outlives this context; Reconnect owns its own.
-		reconnect:  func() { go s.Reconnect("signaling") }, //nolint:contextcheck // deliberate detached reconnect
-		shouldRecn: func() bool { return true },
 	}
 	offerNote := waitOffer(ctx, signal)
 	if offerNote.Description == "" {
@@ -262,7 +276,7 @@ func (s *Session) negotiate(ctx context.Context, gen *generation, offer string) 
 				close(gen.connected)
 			}
 		case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed:
-			gen.maybeReconnect()
+			s.reconnectAttempt(gen)
 		case webrtc.PeerConnectionStateNew, webrtc.PeerConnectionStateConnecting,
 			webrtc.PeerConnectionStateDisconnected, webrtc.PeerConnectionStateUnknown:
 		}
@@ -452,7 +466,7 @@ func (s *Session) run(gen *generation, connection notification) {
 				gen.sessionID = note.SessionID
 				if err := s.reanswer(gen, note.Description); err != nil {
 					logger.Debugf("vkcalls: renegotiation: %v", err)
-					gen.maybeReconnect()
+					s.reconnectAttempt(gen)
 				}
 			case "hungup":
 				if id, err := decimalID(note.ParticipantID); err == nil {
@@ -460,8 +474,9 @@ func (s *Session) run(gen *generation, connection notification) {
 				}
 			}
 		case <-gen.signal.Closed():
-			gen.maybeReconnect()
-			s.end("signaling_closed")
+			// The supervisor owns the verdict: a rejoin is asked for, and the
+			// session only ends through its limit or the caller's policy.
+			s.reconnectAttempt(gen)
 			return
 		}
 	}
@@ -631,12 +646,25 @@ func (gen *generation) participantList() []string {
 	return out
 }
 
-// maybeReconnect triggers one reconnect when the policy allows it.
-func (gen *generation) maybeReconnect() {
-	if gen.reconnect == nil || (gen.shouldRecn != nil && !gen.shouldRecn()) {
+// reconnectAttempt asks the session's supervisor for a rejoin on behalf of
+// one connection attempt. A failure raised by an attempt already torn down
+// says nothing about the session - Close, a superseding attempt or a giving-up
+// Connect did it deliberately - so it asks nothing. The supervisor coalesces
+// repeats and consults the caller's own policy (SetShouldReconnect).
+func (s *Session) reconnectAttempt(gen *generation) {
+	if s.closed.Load() || gen.isDone() {
 		return
 	}
-	gen.fireOnce.Do(gen.reconnect)
+	s.Request(s.closed.Load(), s.reconnecting.Load())
+}
+
+func (gen *generation) isDone() bool {
+	select {
+	case <-gen.done:
+		return true
+	default:
+		return false
+	}
 }
 
 func (gen *generation) stop() {
@@ -656,39 +684,53 @@ func (gen *generation) teardown() {
 	}
 }
 
-// Reconnect tears the current generation down and connects again with fresh
-// credentials when the provider supplies them.
+// Reconnect asks the session to rejoin the room. Upper layers call it when a
+// liveness probe declares the path dead before the engine has noticed; the
+// supervisor serializes it with the failure-driven rejoins.
 func (s *Session) Reconnect(reason string) {
-	logger.Debugf("vkcalls: reconnect: %s", reason)
+	if s.closed.Load() {
+		return
+	}
+	logger.Debugf("vkcalls: reconnect requested: %s", reason)
+	s.Request(s.closed.Load(), s.reconnecting.Load())
+}
+
+// reconnect tears the current attempt down and joins again. The old attempt
+// goes whole - signaling and the bundled peer connection - so the SFU never
+// carries two guests of ours; then the provider's fresh credentials, then a
+// join from scratch (spec 7.3: state never crosses generations).
+func (s *Session) reconnect(ctx context.Context) error {
+	if s.closed.Load() {
+		return ErrSessionClosed
+	}
+	s.reconnecting.Store(true)
+	defer s.reconnecting.Store(false)
+
 	s.mu.Lock()
 	gen := s.gen
 	s.gen = nil
-	closed := s.closed
 	s.mu.Unlock()
 	if gen != nil {
 		gen.teardown()
 	}
-	if closed {
-		return
-	}
 	if s.cfg.Refresh != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), connectWait)
 		creds, err := s.cfg.Refresh(ctx)
-		cancel()
-		if err == nil {
-			s.mu.Lock()
-			s.endpoint = creds.URL
-			s.peerID = creds.Extra["peer_id_hint"]
-			s.iceJSON = creds.Extra["ice_servers"]
-			s.mu.Unlock()
+		if err != nil {
+			return fmt.Errorf("refresh credentials: %w", err)
 		}
+		s.mu.Lock()
+		s.endpoint = creds.URL
+		s.peerID = creds.Extra["peer_id_hint"]
+		s.iceJSON = creds.Extra["ice_servers"]
+		s.mu.Unlock()
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), connectWait*2)
-	defer cancel()
 	if err := s.Connect(ctx); err != nil {
-		logger.Debugf("vkcalls: reconnect failed: %v", err)
-		s.end("reconnect_failed")
+		return err
 	}
+	// The transport re-handshakes the tunnel over the rebuilt carrier when
+	// it hears this, the shared contract's successful-reconnect notice.
+	s.NotifyReconnect()
+	return nil
 }
 
 // Encodings (EXPERIMENT) lists the publish sender's encodings.
@@ -727,68 +769,39 @@ func (s *Session) GetBufferedAmount() uint64 {
 	return gen.command.BufferedAmount()
 }
 
-// SetReconnectCallback records the reconnect policy hooks for future
-// generations.
-func (s *Session) SetReconnectCallback(cb func()) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.gen != nil {
-		s.gen.reconnect = cb
-	}
-}
-
-// SetShouldReconnect records the reconnect policy predicate.
-func (s *Session) SetShouldReconnect(fn func() bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.gen != nil {
-		s.gen.shouldRecn = fn
-	}
-}
-
-// SetEndedCallback registers the ended notification.
-func (s *Session) SetEndedCallback(cb func(string)) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.ended = cb
-}
-
-// WatchConnection blocks until the session ends or ctx is cancelled.
+// WatchConnection services the session's reconnect requests until ctx ends
+// or the session closes.
 func (s *Session) WatchConnection(ctx context.Context) {
-	s.mu.Lock()
-	gen := s.gen
-	s.mu.Unlock()
-	if gen == nil {
-		return
-	}
-	select {
-	case <-ctx.Done():
-	case <-gen.signal.Closed():
-		s.end("signaling_closed")
-	}
+	s.Watch(ctx, s.closeCh)
 }
 
+// end reports the session's terminal verdict once, through the shared
+// Reconnector's callback slot.
 func (s *Session) end(reason string) {
-	s.endOnce.Do(func() {
-		s.mu.Lock()
-		cb := s.ended
-		s.mu.Unlock()
-		if cb != nil {
-			cb(reason)
-		}
-	})
+	s.endOnce.Do(func() { s.SignalEnded(reason) })
 }
 
-// Close leaves the conversation and frees the peer connection.
+// signalEnded ends the session for good: the verdict is about the room, so
+// no rejoin is asked for, and everything waiting on the session's done
+// channel - the reconnect supervisor included - stops with it.
+func (s *Session) signalEnded(reason string) {
+	s.end(reason)
+	s.closed.Store(true)
+	s.closeOnce.Do(func() { close(s.closeCh) })
+}
+
+// Close leaves the conversation and frees the peer connection. A closed
+// session refuses every later reconnect request and stops the supervisor.
 func (s *Session) Close() error {
+	s.closed.Store(true)
 	s.mu.Lock()
 	gen := s.gen
-	s.closed = true
 	s.gen = nil
 	s.mu.Unlock()
 	if gen != nil {
 		gen.teardown()
 	}
+	s.closeOnce.Do(func() { close(s.closeCh) })
 	return nil
 }
 
