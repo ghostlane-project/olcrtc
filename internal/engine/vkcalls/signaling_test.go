@@ -90,7 +90,7 @@ func TestSignalingCommandFlow(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := dialSignaling(context.Background(), "ws"+server.URL[4:]+"?token=t&userId=42", "", nil)
+	client, err := dialSignaling(context.Background(), "ws"+server.URL[4:]+"?token=t&userId=42", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,16 +164,16 @@ func TestSignalingCommandFlow(t *testing.T) {
 }
 
 func TestSignalingURL(t *testing.T) {
-	got, err := signalingURL("wss://calls.example.okcdn.ru/fb?token=t&userId=1", "peer1")
+	got, err := signalingURL("wss://calls.example.okcdn.ru/fb?token=t&userId=1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"platform=WEB", "appVersion=1.1", "version=5", "capabilities=2F7F", "tgt=join", "peerId=peer1"} {
+	for _, want := range []string{"platform=WEB", "appVersion=1.1", "version=5", "capabilities=2F7F", "tgt=join"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("url %q missing %q", got, want)
 		}
 	}
-	if _, err := signalingURL("https://calls.example/", ""); err == nil {
+	if _, err := signalingURL("https://calls.example/"); err == nil {
 		t.Fatal("expected endpoint error")
 	}
 }
@@ -238,7 +238,7 @@ func TestSignalingLargeCommandIsOneFrame(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := dialSignaling(context.Background(), "ws"+server.URL[4:]+"?token=t&userId=42", "", nil)
+	client, err := dialSignaling(context.Background(), "ws"+server.URL[4:]+"?token=t&userId=42", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,5 +283,74 @@ func TestOrderedCommandFrameIsJSON(t *testing.T) {
 	}
 	if _, err := orderedCommandFrame("x", 2, []int{1}); !errors.Is(err, ErrSignalingPayload) {
 		t.Fatalf("array payload: got %v, want ErrSignalingPayload", err)
+	}
+}
+
+// TestSignalingWaitsForServerTopology pins the fresh-room path: a lone guest
+// is handed DIRECT, and the wait ends only on the topology-changed
+// notification a second participant triggers - or with the caller's context,
+// naming the topology as the reason.
+func TestSignalingWaitsForServerTopology(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	fsfu := &fakeSFU{}
+	connected := make(chan struct{})
+	var once sync.Once
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		fsfu.conn = conn
+		once.Do(func() { close(connected) })
+		go fsfu.serve()
+		fsfu.write(map[string]any{
+			"type": "notification", "notification": "connection",
+			"peerId":       map[string]any{"id": 111},
+			"conversation": map[string]any{"topology": "DIRECT", "participants": []any{}},
+		})
+	}))
+	defer server.Close()
+
+	client, err := dialSignaling(context.Background(), "ws"+server.URL[4:]+"?token=t&userId=42", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.close()
+	<-connected
+
+	ctx, cancel := context.WithCancel(context.Background())
+	got := make(chan error, 1)
+	go func() {
+		_, err := client.waitConnection(ctx)
+		got <- err
+	}()
+
+	// Still waiting while the room is DIRECT.
+	select {
+	case err := <-got:
+		t.Fatalf("wait ended early: %v", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+	fsfu.write(map[string]any{"type": "notification", "notification": "topology-changed", "topology": "SERVER"})
+	select {
+	case err := <-got:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the switch to SERVER did not end the wait")
+	}
+	cancel()
+
+	// A context that ends in DIRECT names the topology. The first wait
+	// consumed the connection notification, so the fake sends it again.
+	fsfu.write(map[string]any{
+		"type": "notification", "notification": "connection",
+		"conversation": map[string]any{"topology": "DIRECT", "participants": []any{}},
+	})
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel2()
+	if _, err := client.waitConnection(ctx2); !errors.Is(err, ErrSignalingNotServer) {
+		t.Fatalf("want ErrSignalingNotServer, got %v", err)
 	}
 }

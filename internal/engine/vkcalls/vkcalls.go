@@ -143,7 +143,7 @@ func (s *Session) Connect(ctx context.Context) error {
 
 	// A fresh join carries no peer id: the hint names this client only to a
 	// retry join (tgt=retry), which the reconnect path issues.
-	signal, err := dialSignaling(ctx, s.endpoint, "", s.cfg.Resolver)
+	signal, err := dialSignaling(ctx, s.endpoint, s.cfg.Resolver)
 	if err != nil {
 		return err
 	}

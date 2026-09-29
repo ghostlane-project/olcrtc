@@ -1,13 +1,9 @@
 package vkcalls
 
 import (
-	"fmt"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/pion/interceptor"
-	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
 	"github.com/pion/sdp/v3"
 
@@ -84,122 +80,6 @@ func publishMid(offer string) string {
 	return ""
 }
 
-// EXPERIMENT (temporary): rtcpLogger counts the RTCP the SFU sends, by
-// type and media SSRC, and logs the tally every 5 s.
-type rtcpLogger struct {
-	interceptor.NoOp
-	mu     sync.Mutex
-	counts map[string]int
-	last   time.Time
-	writer interceptor.RTCPWriter
-	ssrcs  []uint32
-}
-
-// BindRTCPWriter keeps the writer so RRT blocks can be answered (EXPERIMENT).
-func (l *rtcpLogger) BindRTCPWriter(writer interceptor.RTCPWriter) interceptor.RTCPWriter {
-	l.mu.Lock()
-	l.writer = writer
-	l.mu.Unlock()
-	return writer
-}
-
-// answerRRT sends the DLRR block RFC 3611 pairs with a receiver reference
-// time: the last RR time (middle 32 bits of the NTP we were sent) and the
-// delay since, once per local sending SSRC, as browsers do.
-func (l *rtcpLogger) answerRRT(from uint32, ntp uint64) {
-	l.mu.Lock()
-	w := l.writer
-	ssrcs := append([]uint32(nil), l.ssrcs...)
-	l.mu.Unlock()
-	if w == nil || len(ssrcs) == 0 {
-		return
-	}
-	lastRR := uint32(ntp >> 16)                                         //nolint:gosec // middle 32 bits by definition
-	reports := []rtcp.DLRRReport{{SSRC: from, LastRR: lastRR, DLRR: 1}} // ~15 µs: answered at once
-	pkts := make([]rtcp.Packet, 0, len(ssrcs))
-	for _, ssrc := range ssrcs {
-		xr := &rtcp.ExtendedReport{SenderSSRC: ssrc,
-			Reports: []rtcp.ReportBlock{&rtcp.DLRRReportBlock{Reports: reports}}}
-		pkts = append(pkts, xr)
-	}
-	if _, err := w.Write(pkts, interceptor.Attributes{}); err != nil {
-		logger.Debugf("vkcalls: dlrr write: %v", err)
-		return
-	}
-	logger.Debugf("vkcalls: dlrr answered for %d ssrcs (lastRR=%d)", len(ssrcs), lastRR)
-}
-
-type rtcpLoggerFactory struct{}
-
-func (rtcpLoggerFactory) NewInterceptor(string) (interceptor.Interceptor, error) {
-	return &rtcpLogger{counts: map[string]int{}, last: time.Now()}, nil
-}
-
-//nolint:gocognit,gocyclo,cyclop // diagnostic scaffolding
-func (l *rtcpLogger) BindRTCPReader(reader interceptor.RTCPReader) interceptor.RTCPReader {
-	return interceptor.RTCPReaderFunc(func(b []byte, a interceptor.Attributes) (int, interceptor.Attributes, error) {
-		n, attrs, err := reader.Read(b, a)
-		if err != nil {
-			return n, attrs, err //nolint:wrapcheck
-		}
-		pkts, perr := rtcp.Unmarshal(b[:n])
-		if perr == nil { //nolint:nestif // diagnostic scaffolding
-			l.mu.Lock()
-			for _, p := range pkts {
-				l.noteKeyframeRequest(p)
-				name := fmt.Sprintf("%T", p)
-				for _, ssrc := range p.DestinationSSRC() {
-					l.counts[fmt.Sprintf("%s->%d", strings.TrimPrefix(name, "*rtcp."), ssrc)]++
-				}
-				if remb, ok := p.(*rtcp.ReceiverEstimatedMaximumBitrate); ok {
-					l.counts[fmt.Sprintf("REMB bitrate=%.0f", remb.Bitrate)]++
-				}
-				if rr, ok := p.(*rtcp.ReceiverReport); ok {
-					for _, rep := range rr.Reports {
-						logger.Debugf("vkcalls: sfu RR from=%d ssrc=%d fraction=%d lost=%d highest=%d jitter=%d lsr=%d dlsr=%d",
-							rr.SSRC, rep.SSRC, rep.FractionLost, rep.TotalLost, rep.LastSequenceNumber, rep.Jitter,
-							rep.LastSenderReport, rep.Delay)
-					}
-				}
-				if xr, ok := p.(*rtcp.ExtendedReport); ok && expOn("dlrr") {
-					for _, rep := range xr.Reports {
-						if rrt, ok := rep.(*rtcp.ReceiverReferenceTimeReportBlock); ok {
-							l.answerRRT(xr.SenderSSRC, rrt.NTPTimestamp)
-						}
-					}
-				}
-				if nack, ok := p.(*rtcp.TransportLayerNack); ok {
-					logger.Debugf("vkcalls: sfu NACK ssrc=%d pairs=%d", nack.MediaSSRC, len(nack.Nacks))
-				}
-				if xr, ok := p.(*rtcp.ExtendedReport); ok {
-					for _, rep := range xr.Reports {
-						logger.Debugf("vkcalls: sfu XR from=%d block=%T %+v", xr.SenderSSRC, rep, rep)
-					}
-				}
-				if raw, ok := p.(*rtcp.RawPacket); ok {
-					logger.Debugf("vkcalls: sfu RAW rtcp %x", []byte(*raw))
-				}
-			}
-			if time.Since(l.last) > 5*time.Second {
-				logger.Debugf("vkcalls: rtcp from sfu: %v", l.counts)
-				l.counts = map[string]int{}
-				l.last = time.Now()
-			}
-			l.mu.Unlock()
-		}
-		return n, attrs, err //nolint:wrapcheck
-	})
-}
-
-// EXPERIMENT (temporary): logs the local streams' SSRCs as bound.
-func (l *rtcpLogger) BindLocalStream(info *interceptor.StreamInfo, writer interceptor.RTPWriter) interceptor.RTPWriter {
-	logger.Debugf("vkcalls: local stream ssrc=%d mime=%s", info.SSRC, info.MimeType)
-	l.mu.Lock()
-	l.ssrcs = append(l.ssrcs, info.SSRC)
-	l.mu.Unlock()
-	return writer
-}
-
 // EXPERIMENT (temporary): encodeChangeSimulcast is the change-simulcast
 // producer command: 07 00 seq mediaSource(1=camera) count, then per layer
 // rid(str) width height fps bitrate.
@@ -238,28 +118,4 @@ func encodePerfStatReport(sequence int, framesDecoded, framesReceived uint32) []
 	out = appendMPInt(out, sequence)
 	out = appendMPInt(out, int(framesDecoded))
 	return appendMPInt(out, int(framesReceived))
-}
-
-// KeyframeRequests (EXPERIMENT) delivers the SSRC of every FIR/PLI the SFU
-// sends, so a publisher can answer with a keyframe as an encoder would.
-var KeyframeRequests = make(chan uint32, 64) //nolint:gochecknoglobals // a diagnostic counter
-
-func (l *rtcpLogger) noteKeyframeRequest(p rtcp.Packet) {
-	var ssrc uint32
-	switch v := p.(type) {
-	case *rtcp.FullIntraRequest:
-		if len(v.FIR) > 0 {
-			ssrc = v.FIR[0].SSRC
-		} else {
-			ssrc = v.MediaSSRC
-		}
-	case *rtcp.PictureLossIndication:
-		ssrc = v.MediaSSRC
-	default:
-		return
-	}
-	select {
-	case KeyframeRequests <- ssrc:
-	default:
-	}
 }
