@@ -1,8 +1,18 @@
 <!-- If you are an AI agent, please read agents.md -->
 
-# olcRTC
+<h1 align="center">olcRTC</h1>
 
-**RU** / [EN](readme.md)
+<p align="center">
+  <b>Зашифрованный TCP-over-WebRTC туннель.</b><br>
+  Транспортный движок <a href="https://github.com/ghostlane-project/ghostlane">Ghostlane</a>: библиотека на Go и программа командной строки.
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/ghostlane-project/olcrtc?color=b5f23d&labelColor=07080d" alt="License: Apache-2.0"></a>
+  <img src="https://img.shields.io/github/go-mod/go-version/ghostlane-project/olcrtc/proofkit?label=go&color=b5f23d&labelColor=07080d" alt="Go version">
+</p>
+
+<p align="center"><b>RU</b> / <a href="readme.md">EN</a></p>
 
 
 `olcRTC` (OpenLibreCommunity RTC) - зашифрованный TCP-over-WebRTC туннель. Трафик маскируется под обычный видеозвонок на разрешённых сервисах (Jitsi, Yandex Telemost, WbStream, Sber SaluteJazz). Внутри - шифрование XChaCha20-Poly1305 и мультиплексирование smux поверх WebRTC data/video каналов.
@@ -105,6 +115,13 @@ mage mobile  # gomobile bindings (Android)
   - [owenewans/owenclave](https://github.com/owenewans/owenclave) - Android-клиент прокси (форк exclave). Поддерживает все распространённые протоколы (vless, hysteria2, mieru, trojan, vmess, tuic, shadowsocks, socks ...) плюс `olcrtc`, формат URI `olcrtc://` и подписки
 - Клиент этого форка:
   - [ghostlane-project/ghostlane](https://github.com/ghostlane-project/ghostlane) - Ghostlane, форк olcbox из списка ниже. Kotlin Multiplatform/Compose для Android, iOS, macOS, Windows и Linux; olcRTC рядом с VLESS (Reality или TLS), Hysteria2, XHTTP, Trojan, Shadowsocks и VMess - тот клиент, ради которого сделано всё перечисленное выше
+
+    <a href="https://apps.apple.com/app/id6795355210"><img src="docs/badges/app-store-badge.svg" alt="Download on the App Store" width="168" align="middle"></a>
+    &nbsp;
+    <a href="https://play.google.com/store/apps/details?id=org.proofkit.app"><img src="docs/badges/google-play-badge.png" alt="Get it on Google Play" width="217" align="middle"></a>
+
+    Сборки для компьютеров и APK для Android: [GitHub Releases](https://github.com/ghostlane-project/ghostlane/releases).
+
 - Клиенты сообщества:
   - [venterum/veil](https://github.com/venterum/veil) - V2Ray/Xray клиент для Android (форк v2rayNG), Material 3. Протоколы: VMess, VLESS, Shadowsocks, Trojan, SOCKS, WireGuard, Hysteria2 + `olcrtc`
   - [alananisimov/olcbox](https://github.com/alananisimov/olcbox) - Мультиплатформенный UI-клиент (Android, iOS, macOS, Windows, Linux). Kotlin Multiplatform/Compose. Все провайдеры (Jitsi, Telemost, WB Stream, Jazz), все транспорты, split tunneling, режимы TUN/proxy
@@ -130,3 +147,5 @@ Apache License 2.0, см. [LICENSE](LICENSE).
 [docs/upstream-license-wtfpl.txt](docs/upstream-license-wtfpl.txt), происхождение и лицензии зависимостей
 описаны в [NOTICE](NOTICE).
 
+App Store — товарный знак Apple Inc., зарегистрированный в США и других
+странах. Google Play и логотип Google Play — товарные знаки Google LLC.
