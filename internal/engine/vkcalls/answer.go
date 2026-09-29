@@ -157,11 +157,6 @@ func ShapeAnswer(offer, native string, st *ShapeState) (string, error) { //nolin
 	if err != nil {
 		return "", err
 	}
-	if expOn("sdes") {
-		// The SDES cname on the wire and the SDP cname must agree.
-		native = strings.ReplaceAll(native, " cname:"+cname, " cname:"+expCName)
-		cname = expCName
-	}
 	st.NativeVideoSSRC = nil
 	st.NativeAudioSSRC = map[string]uint32{}
 	if nativeSections, splitErr := splitSections(native); splitErr == nil { //nolint:nestif
@@ -181,8 +176,7 @@ func ShapeAnswer(offer, native string, st *ShapeState) (string, error) { //nolin
 			}
 			for _, line := range sec {
 				isCName := strings.HasPrefix(line, "a=ssrc:") && strings.Contains(line, " cname:")
-				isMsid := expOn("simssrc") && strings.HasPrefix(line, "a=ssrc:") && strings.Contains(line, " msid:")
-				if strings.HasPrefix(line, "a=ssrc-group:") || isCName || isMsid {
+				if strings.HasPrefix(line, "a=ssrc-group:") || isCName {
 					st.NativeVideoSSRC = append(st.NativeVideoSSRC, line)
 				}
 			}
@@ -232,7 +226,7 @@ func cryptoBlock(ufrag, pwd, fingerprint string) []string {
 }
 
 // shapeSection reconstructs one offer section in the reference byte order.
-func shapeSection(sec section, crypto []string, st *ShapeState, msid, msidStream string, //nolint:cyclop
+func shapeSection(sec section, crypto []string, st *ShapeState, msid, msidStream string,
 	_ uint32, cname string,
 ) ([]string, error) {
 	mid := sec.mid()
@@ -272,25 +266,9 @@ func shapeSection(sec section, crypto []string, st *ShapeState, msid, msidStream
 			out = append(out, msid)
 		}
 		out = append(out, "a=rtcp-mux")
-		switch {
-		case kind != kindAudio && expOn("browserm"):
-			// Chrome's publish section: the offer's codec set minus VP9 and
-			// its rtx, VP8 first, everything else as offered.
-			var mline string
-			mline, out = withoutVP9(sec, out)
-			out[0] = mline
-		case kind != kindAudio && expOn("vp8first"):
-			var mline string
-			mline, out = vp8Only(sec, out)
-			out[0] = mline
-		default:
-			out = append(out, codecLines(sec)...)
-		}
+		out = append(out, codecLines(sec)...)
 		if kind == kindAudio {
 			ssrc := st.audioSSRC(mid)
-			if actual, ok := st.NativeAudioSSRC[mid]; ok && expOn("audio") {
-				ssrc = actual
-			}
 			out = append(out, "a=ssrc:"+strconv.FormatUint(uint64(ssrc), 10)+" cname:"+cname)
 			return out, nil
 		}
@@ -365,67 +343,3 @@ func expOn(name string) bool {
 
 // vp8Only restricts a publish section to the offer's VP8 payload type and
 // its rtx, rewriting the m= line.
-func vp8Only(sec section, out []string) (string, []string) {
-	vp8, rtx := "", ""
-	for _, line := range sec {
-		if strings.HasPrefix(line, "a=rtpmap:") && strings.Contains(line, " VP8/90000") {
-			vp8 = strings.Fields(strings.TrimPrefix(line, "a=rtpmap:"))[0]
-		}
-	}
-	for _, line := range sec {
-		if strings.HasPrefix(line, "a=fmtp:") && strings.HasSuffix(strings.TrimRight(line, "\r"), "apt="+vp8) {
-			rtx = strings.Fields(strings.TrimPrefix(line, "a=fmtp:"))[0]
-		}
-	}
-	keep := map[string]bool{vp8: true, rtx: true}
-	for _, line := range codecLines(sec) {
-		pt := strings.Fields(strings.SplitN(line, ":", 2)[1])[0]
-		if keep[pt] {
-			out = append(out, line)
-		}
-	}
-	f := strings.Fields(sec[0])
-	m := strings.Join(f[:3], " ") + " " + vp8
-	if rtx != "" {
-		m += " " + rtx
-	}
-	return m, out
-}
-
-// withoutVP9 drops VP9 and its rtx from a publish section, as Chrome's
-// local answer does, keeping the offer's order for the rest.
-func withoutVP9(sec section, out []string) (string, []string) {
-	vp9 := ""
-	for _, line := range sec {
-		if strings.HasPrefix(line, "a=rtpmap:") && strings.Contains(line, " VP9/90000") {
-			vp9 = strings.Fields(strings.TrimPrefix(line, "a=rtpmap:"))[0]
-		}
-	}
-	drop := map[string]bool{}
-	if vp9 != "" {
-		drop[vp9] = true
-		for _, line := range sec {
-			if strings.HasPrefix(line, "a=fmtp:") && strings.HasSuffix(strings.TrimRight(line, "\r"), "apt="+vp9) {
-				drop[strings.Fields(strings.TrimPrefix(line, "a=fmtp:"))[0]] = true
-			}
-		}
-	}
-	for _, line := range codecLines(sec) {
-		pt := strings.Fields(strings.SplitN(line, ":", 2)[1])[0]
-		if !drop[pt] {
-			out = append(out, line)
-		}
-	}
-	f := strings.Fields(sec[0])
-	m := strings.Join(f[:3], " ")
-	parts := make([]string, 0, len(f))
-	for _, pt := range f[3:] {
-		if !drop[pt] {
-			parts = append(parts, pt)
-		}
-	}
-	if len(parts) > 0 {
-		m += " " + strings.Join(parts, " ")
-	}
-	return m, out
-}

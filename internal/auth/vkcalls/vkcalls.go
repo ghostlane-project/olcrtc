@@ -25,7 +25,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -123,8 +122,6 @@ const (
 )
 
 // Issue runs the guest chain for cfg.RoomURL.
-//
-//nolint:gocyclo,cyclop,funlen // the five-step guest chain, one step per call
 func (p Provider) Issue(ctx context.Context, cfg auth.Config) (auth.Credentials, error) {
 	if cfg.RoomURL == "" {
 		return auth.Credentials{}, ErrRoomURLRequired
@@ -219,12 +216,6 @@ func (p Provider) Issue(ctx context.Context, cfg auth.Config) (auth.Credentials,
 		"joinLink": linkID(link), "isVideo": strFalse, "protocolVersion": "5",
 		"anonymToken": issued.Response.Token, "session_key": session.SessionKey,
 	}
-	if os.Getenv("VKCALLS_JOIN") == "browser" {
-		// EXPERIMENT: the web SDK's join: a video-capable client with the
-		// capabilities mask it also puts in the signaling URL.
-		joinParams["isVideo"] = strTrue
-		joinParams["capabilities"] = "6F7F"
-	}
 	if joinErr := p.fbCall(ctx, client, stageJoin, joinParams, &join); joinErr != nil {
 		return auth.Credentials{}, joinErr
 	}
@@ -244,12 +235,6 @@ func (p Provider) sdkLogin(ctx context.Context, client *http.Client) (sdkSession
 	var session sdkSession
 	sessionPayload := map[string]any{
 		"version": 2, fieldDeviceID: "olcrtc-sdk-" + randomToken(16), "client_version": sdkClientVer,
-	}
-	if os.Getenv("VKCALLS_JOIN") == "browser" {
-		// EXPERIMENT: the web SDK's session data shape (2.8.12-beta.15).
-		sessionPayload = map[string]any{
-			"version": 2, fieldDeviceID: uuidLike(), "client_version": 1.1, "client_type": "SDK_JS",
-		}
 	}
 	sessionData, marshalErr := json.Marshal(sessionPayload)
 	if marshalErr != nil {
@@ -574,10 +559,4 @@ func redact(body []byte) string {
 		s = s[:200]
 	}
 	return s
-}
-
-// uuidLike renders a random v4-shaped UUID (EXPERIMENT).
-func uuidLike() string {
-	t := randomToken(32)
-	return t[0:8] + "-" + t[8:12] + "-4" + t[13:16] + "-a" + t[17:20] + "-" + t[20:32]
 }

@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
@@ -154,9 +152,6 @@ func signalingURL(endpoint, peerID string) (string, error) {
 	q.Set("version", "5")
 	q.Set("device", "browser")
 	q.Set("capabilities", capabilitiesBitmask)
-	if expOn("caps6f") {
-		q.Set("capabilities", "6F7F")
-	}
 	q.Set("clientType", "VK")
 	q.Set("tgt", "join")
 	if peerID != "" {
@@ -164,31 +159,6 @@ func signalingURL(endpoint, peerID string) (string, error) {
 	}
 	u.RawQuery = q.Encode()
 	return u.String(), nil
-}
-
-// frameRecord is one recorded signaling frame.
-type frameRecord struct {
-	Direction string `json:"dir"`
-	Raw       string `json:"raw"`
-}
-
-// recordFrame appends a raw signaling frame to VKCALLS_DUMP_DIR when set:
-// a diagnostic aid for the spike's private artifacts, never on by default.
-func recordFrame(direction string, data []byte) {
-	dir := os.Getenv("VKCALLS_DUMP_DIR")
-	if dir == "" {
-		return
-	}
-	f, err := os.OpenFile(filepath.Join(dir, "signaling.jsonl"), //nolint:gosec // fixed private path
-		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	entry, err := json.Marshal(frameRecord{Direction: direction, Raw: string(data)})
-	if err == nil {
-		_, _ = f.Write(append(entry, '\n'))
-	}
 }
 
 func selfParticipant(endpoint string) string {
@@ -219,7 +189,6 @@ func (c *signalingClient) readLoop() {
 		if messageType != websocket.TextMessage {
 			continue
 		}
-		recordFrame("in", data)
 		if string(data) == "ping" {
 			_ = c.write(websocket.TextMessage, []byte("pong"))
 			continue
@@ -272,7 +241,6 @@ func (c *signalingClient) command(ctx context.Context, name string, payload any)
 		err = fmt.Errorf("%w: %d bytes", ErrSignalingFrameTooLarge, len(raw))
 	}
 	if err == nil {
-		recordFrame("out", raw)
 		err = c.conn.WriteMessage(websocket.TextMessage, raw)
 	}
 	c.writeMu.Unlock()

@@ -217,10 +217,9 @@ func newWebRTCAPI(offer string, cfg engine.Config, resolver protect.Lookup) (*we
 	}
 	registry.Add(sdesStamperFactory{mid: publishMid(offer), rid: "l"})
 	if expOn("rtcplog") {
+		// The stand's RTCP diagnostics: feeds cmd/vkivf's keyframe loop
+		// through KeyframeRequests. Off unless VKCALLS_EXP names it.
 		registry.Add(rtcpLoggerFactory{})
-	}
-	if expOn("sdes") {
-		registry.Add(sdesWriterFactory{cname: expCName})
 	}
 	opts := []func(*webrtc.API){
 		webrtc.WithSettingEngine(settings),

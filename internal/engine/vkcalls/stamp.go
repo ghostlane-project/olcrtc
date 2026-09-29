@@ -1,10 +1,7 @@
 package vkcalls
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -21,15 +18,20 @@ import (
 // outgoing video packet. Pion negotiates both extensions but writes neither,
 // and the SFU binds a published stream to its section and simulcast layer
 // by them, as Chrome's packets carry them.
+// The declared simulcast layer: the transport's small frame.
+const (
+	layerWidth  = 320
+	layerHeight = 180
+	layerFPS    = 15
+	layerKbps   = 180
+)
+
 type sdesStamper struct {
 	interceptor.NoOp
 	mid, rid string
 }
 
 type sdesStamperFactory struct{ mid, rid string }
-
-// ssrcRID maps a simulcast encoding's SSRC to its RID (EXPERIMENT).
-var ssrcRID sync.Map //nolint:gochecknoglobals // a diagnostic switch, read once
 
 // NewInterceptor implements interceptor.Factory.
 func (f sdesStamperFactory) NewInterceptor(string) (interceptor.Interceptor, error) {
@@ -38,8 +40,6 @@ func (f sdesStamperFactory) NewInterceptor(string) (interceptor.Interceptor, err
 
 // BindLocalStream stamps the stream's packets when it is video and the
 // extensions were negotiated for it.
-//
-//nolint:gocyclo,cyclop // scaffolding
 func (s *sdesStamper) BindLocalStream(info *interceptor.StreamInfo, w interceptor.RTPWriter) interceptor.RTPWriter {
 	if !strings.HasPrefix(strings.ToLower(info.MimeType), "video/") {
 		return w
@@ -58,36 +58,13 @@ func (s *sdesStamper) BindLocalStream(info *interceptor.StreamInfo, w intercepto
 	if midID == 0 && ridID == 0 && astID == 0 {
 		return w
 	}
-	rid := s.rid
-	if v, ok := ssrcRID.Load(info.SSRC); ok {
-		rid, _ = v.(string)
-	}
-	logger.Debugf("vkcalls: stamping ssrc=%d mid=%s rid=%s", info.SSRC, s.mid, rid)
-	// EXPERIMENT "midfirst": mid/rid only on the first packets of a stream,
-	// as Chrome does once the SFU has acknowledged the stream.
-	var stamped uint32
-	firstOnly := expOn("midfirst")
+	logger.Debugf("vkcalls: stamping ssrc=%d mid=%s rid=%s", info.SSRC, s.mid, s.rid)
 	return interceptor.RTPWriterFunc(func(header *rtp.Header, payload []byte, attrs interceptor.Attributes) (int, error) {
-		stamped++
-		if firstOnly && stamped > 30 {
-			if astID != 0 && expOn("ast") {
-				v := uint32((uint64(time.Now().UnixNano()) << 18) / 1e9) //nolint:gosec
-				ast := []byte{byte(v >> 16), byte(v >> 8), byte(v)}      //nolint:gosec // wire-format bit assembly
-				_ = header.SetExtension(astID, ast)
-			}
-			return w.Write(header, payload, attrs)
-		}
-		if astID != 0 && expOn("ast") {
-			// abs-send-time: 6.18 fixed-point seconds, 24 bits.
-			v := uint32((uint64(time.Now().UnixNano()) << 18) / 1e9) //nolint:gosec
-			ast := []byte{byte(v >> 16), byte(v >> 8), byte(v)}      //nolint:gosec // wire-format bit assembly
-			_ = header.SetExtension(astID, ast)
-		}
 		if midID != 0 && s.mid != "" {
 			_ = header.SetExtension(midID, []byte(s.mid))
 		}
-		if ridID != 0 && rid != "" {
-			_ = header.SetExtension(ridID, []byte(rid))
+		if ridID != 0 && s.rid != "" {
+			_ = header.SetExtension(ridID, []byte(s.rid))
 		}
 		return w.Write(header, payload, attrs)
 	})
@@ -243,16 +220,11 @@ func encodeChangeSimulcast(sequence int, rid string, width, height, fps, bitrate
 }
 
 // layerProfile is the simulcast layer the engine declares, in the change
-// command and the answer's rid constraints. The default matches a small
-// videochannel frame; VKCALLS_LAYER=w,h,fps,kbps overrides it so the
-// declaration can follow the transport actually configured (the SFU polices
-// the forward against it — spike tun-vp8-01).
+// command and the answer's rid constraints: the small layer the transport
+// publishes. The SFU forwards it whatever the transport's frame rate - the
+// CI gate measured the full matrix with this declaration.
 func layerProfile() (int, int, int, int) {
-	w, h, fps, kbps := 320, 180, 15, 180
-	if v := os.Getenv("VKCALLS_LAYER"); v != "" {
-		_, _ = fmt.Sscanf(v, "%d,%d,%d,%d", &w, &h, &fps, &kbps)
-	}
-	return w, h, fps, kbps
+	return layerWidth, layerHeight, layerFPS, layerKbps
 }
 
 // encodePerfStatReport is the SDK's report-perf-stat producer command (type
@@ -266,91 +238,6 @@ func encodePerfStatReport(sequence int, framesDecoded, framesReceived uint32) []
 	out = appendMPInt(out, sequence)
 	out = appendMPInt(out, int(framesDecoded))
 	return appendMPInt(out, int(framesReceived))
-}
-
-// encodeChangeSimulcastLayers is change-simulcast for several camera layers
-// (EXPERIMENT): 07 00 seq 1 count, then per layer rid w h fps bitrate.
-func encodeChangeSimulcastLayers(sequence int, layers [][5]any) []byte {
-	out := appendMPInt(nil, 7)
-	out = appendMPInt(out, 0)
-	out = appendMPInt(out, sequence)
-	out = appendMPInt(out, 1)
-	out = appendMPInt(out, len(layers))
-	for _, l := range layers {
-		rid, _ := l[0].(string)
-		out = append(out, 0xA0|byte(len(rid))) //nolint:gosec // wire-format bit assembly, truncation is the point
-		out = append(out, rid...)
-		for i, v := range l[1:] {
-			n, _ := v.(int)
-			if i == 3 { // bitrate: kbit/s on the wire (serializeChangeSimulcast)
-				n /= 1000
-			}
-			out = appendMPInt(out, n)
-		}
-	}
-	return out
-}
-
-// sdesWriter (EXPERIMENT) makes our RTCP look like a browser's: every
-// Sender Report goes out as a compound SR+SDES(cname) packet, and the
-// receiver's RR bursts are thinned to one per second.
-type sdesWriter struct {
-	interceptor.NoOp
-	cname  string
-	mu     sync.Mutex
-	lastRR time.Time
-}
-
-type sdesWriterFactory struct{ cname string }
-
-// expCName (EXPERIMENT) is the cname the shaper declares and SDES carries.
-var expCName = "pk" + hex.EncodeToString(func() []byte { //nolint:gochecknoglobals // a diagnostic override
-	b := make([]byte, 8)
-	_, _ = rand.Read(b)
-	return b
-}())
-
-func (f sdesWriterFactory) NewInterceptor(string) (interceptor.Interceptor, error) {
-	return &sdesWriter{cname: f.cname}, nil
-}
-
-func (w *sdesWriter) BindRTCPWriter(writer interceptor.RTCPWriter) interceptor.RTCPWriter {
-	return interceptor.RTCPWriterFunc(func(pkts []rtcp.Packet, attrs interceptor.Attributes) (int, error) {
-		out := make([]rtcp.Packet, 0, len(pkts)+1)
-		for _, p := range pkts {
-			switch v := p.(type) {
-			case *rtcp.SenderReport:
-				out = append(out, v, &rtcp.SourceDescription{Chunks: []rtcp.SourceDescriptionChunk{{
-					Source: v.SSRC,
-					Items:  []rtcp.SourceDescriptionItem{{Type: rtcp.SDESCNAME, Text: w.cname}},
-				}}})
-				if expOn("rrt") {
-					// Chrome sends its receiver reference time with every
-					// compound report (EXPERIMENT).
-					out = append(out, &rtcp.ExtendedReport{SenderSSRC: v.SSRC, Reports: []rtcp.ReportBlock{
-						&rtcp.ReceiverReferenceTimeReportBlock{NTPTimestamp: v.NTPTime},
-					}})
-				}
-			case *rtcp.ReceiverReport:
-				w.mu.Lock()
-				thin := time.Since(w.lastRR) < time.Second
-				if !thin {
-					w.lastRR = time.Now()
-				}
-				w.mu.Unlock()
-				if thin {
-					continue
-				}
-				out = append(out, v)
-			default:
-				out = append(out, p)
-			}
-		}
-		if len(out) == 0 {
-			return 0, nil
-		}
-		return writer.Write(out, attrs)
-	})
 }
 
 // KeyframeRequests (EXPERIMENT) delivers the SSRC of every FIR/PLI the SFU

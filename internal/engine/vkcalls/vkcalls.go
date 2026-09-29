@@ -7,8 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -52,8 +50,8 @@ func referenceCapabilities() map[string]any {
 		"consumerScreenDataChannelVersion": 1, "producerScreenDataChannelVersion": 1,
 		"asrDataChannelVersion": 1, "animojiDataChannelVersion": 2, "animojiBackendRender": true,
 		"onDemandTracks": true, "unifiedPlan": true, "singleSession": true, "videoTracksCount": 36,
-		"red": true, "audioShare": true, "fastScreenShare": true, "videoSuspend": expOn("suspcap"),
-		"simulcast": !expOn("nosim"), "simulcastNativeOrder": true, "consumerFastScreenShare": false,
+		"red": true, "audioShare": true, "fastScreenShare": true, "videoSuspend": false,
+		"simulcast": true, "simulcastNativeOrder": true, "consumerFastScreenShare": false,
 		"consumerFastScreenShareQualityOnDemand": false, "transparentAudio": false,
 	}
 }
@@ -88,7 +86,6 @@ type generation struct {
 	pc      *webrtc.PeerConnection
 	command *webrtc.DataChannel
 	notify  *webrtc.DataChannel
-	extraDC []*webrtc.DataChannel // EXPERIMENT: the SDK's other service channels
 	shape   *ShapeState
 
 	registryMu sync.Mutex
@@ -181,9 +178,9 @@ func (s *Session) Connect(ctx context.Context) error {
 	}
 	gen.sessionID = offerNote.SessionID
 	if _, err := signal.command(ctx, "change-media-settings", map[string]any{
-		"mediaSettings": map[string]any{"isAudioEnabled": expOn("audioon"), "isVideoEnabled": expOn("vidon"),
+		"mediaSettings": map[string]any{"isAudioEnabled": false, "isVideoEnabled": false,
 			"isScreenSharingEnabled": false, "isFastScreenSharingEnabled": false,
-			"isAudioSharingEnabled": false, "isAnimojiEnabled": !expOn("animoff")},
+			"isAudioSharingEnabled": false, "isAnimojiEnabled": true},
 	}); err != nil {
 		signal.close()
 		return err
@@ -252,7 +249,6 @@ func (s *Session) negotiate(ctx context.Context, gen *generation, offer string) 
 	for _, sender := range senders {
 		for _, enc := range sender.GetParameters().Encodings {
 			if enc.RID != "" {
-				ssrcRID.Store(uint32(enc.SSRC), enc.RID)
 				logger.Debugf("vkcalls: encoding rid=%s ssrc=%d", enc.RID, enc.SSRC)
 			}
 			s.mu.Lock()
@@ -282,13 +278,6 @@ func (s *Session) negotiate(ctx context.Context, gen *generation, offer string) 
 		}
 	})
 
-	if expOn("sixdc") {
-		ordered := true
-		if dc, err := pc.CreateDataChannel("consumerScreenShare", &webrtc.DataChannelInit{Ordered: &ordered}); err == nil {
-			dc.OnOpen(func() { logger.Debugf("vkcalls: service channel consumerScreenShare open") })
-			gen.extraDC = append(gen.extraDC, dc)
-		}
-	}
 	return s.acceptOffer(ctx, gen, offer)
 }
 
@@ -307,33 +296,9 @@ func (s *Session) openControlChannels(gen *generation, pc *webrtc.PeerConnection
 		return fmt.Errorf("vkcalls: producer command channel: %w", err)
 	}
 	gen.command = command
-	if expOn("sixdc") {
-		// EXPERIMENT: the SDK's full channel set in its order; the consumer
-		// screen share channel follows the tracks (see negotiate).
-		for _, label := range []string{"producerScreenShare", "asr", "animoji"} {
-			dc, err := pc.CreateDataChannel(label, &webrtc.DataChannelInit{Ordered: &ordered})
-			if err != nil {
-				return fmt.Errorf("vkcalls: %s channel: %w", label, err)
-			}
-			l := label
-			dc.OnOpen(func() { logger.Debugf("vkcalls: service channel %s open", l) })
-			dc.OnMessage(func(m webrtc.DataChannelMessage) { logger.Debugf("vkcalls: %s message %x", l, m.Data) })
-			gen.extraDC = append(gen.extraDC, dc)
-		}
-	}
 	// The participants known at connect, and a registry that arrived first,
 	// are subscribed as soon as the channel can carry the layout.
 	command.OnOpen(func() {
-		if expOn("vsusp") {
-			// EXPERIMENT: the web app's initVideoSuspend on CONNECTED in
-			// SERVER topology: enable-video-suspend(true) (AUTO mode).
-			gen.registryMu.Lock()
-			gen.commandSeq++
-			seq := gen.commandSeq
-			gen.registryMu.Unlock()
-			frame := append(appendMPInt(appendMPInt(appendMPInt(nil, 5), 0), seq), 0xC3)
-			logger.Debugf("vkcalls: enable-video-suspend %x: %v", frame, command.Send(frame))
-		}
 		// The SDK configures its encodings right after accept-producer
 		// (sync({force:true})): without this the SFU accepts the stream but
 		// never forwards it, and the command is fire-and-forget, so the
@@ -346,12 +311,6 @@ func (s *Session) openControlChannels(gen *generation, pc *webrtc.PeerConnection
 			gen.registryMu.Unlock()
 			w, h, fps, kbps := layerProfile()
 			frame := encodeChangeSimulcast(seq, "l", w, h, fps, kbps*1000)
-			if expOn("chsim3") {
-				// Chrome's rs(1280,720): three layers announced, h inactive.
-				layers := [][5]any{{"l", 320, 180, 20, 180000}, {"m", 640, 360, 20, 500000},
-					{"h", 1280, 720, 20, 1200000}}
-				frame = encodeChangeSimulcastLayers(seq, layers)
-			}
 			logger.Debugf("vkcalls: change-simulcast %x: %v", frame, command.Send(frame))
 		}
 		gen.subscribeAll()
@@ -380,7 +339,6 @@ func (s *Session) acceptOffer(ctx context.Context, gen *generation, offer string
 	if err != nil {
 		return err
 	}
-	dumpNegotiation(offer, native.SDP, shaped)
 	if _, err := gen.signal.command(ctx, "accept-producer", acceptPayload(offer, shaped, gen.sessionID)); err != nil {
 		return err
 	}
@@ -391,21 +349,6 @@ func (s *Session) acceptOffer(ctx context.Context, gen *generation, offer string
 		return ErrConnectTimeout
 	case <-ctx.Done():
 		return fmt.Errorf("vkcalls: connect wait: %w", ctx.Err())
-	}
-}
-
-// dumpNegotiation writes this exchange's three SDP documents to
-// VKCALLS_DUMP_DIR when the operator set it: the spike's diagnostic capture,
-// never on by default.
-func dumpNegotiation(offer, native, shaped string) {
-	dir := os.Getenv("VKCALLS_DUMP_DIR")
-	if dir == "" {
-		return
-	}
-	for name, body := range map[string]string{
-		"engine-offer.sdp": offer, "engine-native.sdp": native, "engine-shaped.sdp": shaped,
-	} {
-		_ = os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600) //nolint:gosec // diagnostic artifact
 	}
 }
 
@@ -503,7 +446,6 @@ func (s *Session) reanswer(gen *generation, offer string) error {
 	if err != nil {
 		return err
 	}
-	dumpNegotiation(offer, native.SDP, shaped)
 	_, err = gen.signal.command(context.Background(), "accept-producer",
 		acceptPayload(offer, shaped, gen.sessionID))
 	return err
