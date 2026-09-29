@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/openlibrecommunity/olcrtc/internal/engine"
 )
 
 // The server side of the test is one actor: gorilla allows a single
@@ -97,7 +99,7 @@ func TestSignalingCommandFlow(t *testing.T) {
 	defer client.close()
 	<-connected
 
-	connection, err := client.waitConnection(context.Background())
+	connection, err := client.awaitJoin(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,8 +323,12 @@ func TestSignalingWaitsForServerTopology(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	got := make(chan error, 1)
 	go func() {
-		_, err := client.waitConnection(ctx)
-		got <- err
+		note, err := client.awaitJoin(ctx)
+		if err != nil {
+			got <- err
+			return
+		}
+		got <- client.waitServerTopology(ctx, note)
 	}()
 
 	// Still waiting while the room is DIRECT.
@@ -350,7 +356,79 @@ func TestSignalingWaitsForServerTopology(t *testing.T) {
 	})
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel2()
-	if _, err := client.waitConnection(ctx2); !errors.Is(err, ErrSignalingNotServer) {
+	if _, err := func() (notification, error) {
+		note, err := client.awaitJoin(ctx2)
+		if err != nil {
+			return notification{}, err
+		}
+		return note, client.waitServerTopology(ctx2, note)
+	}(); !errors.Is(err, ErrSignalingNotServer) {
 		t.Fatalf("want ErrSignalingNotServer, got %v", err)
+	}
+}
+
+// TestRecruitFlipsFreshRoom models the measured fresh-room behaviour: the
+// first two connections stay DIRECT, and the third simultaneous participant
+// is what flips the SFU to SERVER - which it announces to everyone. The
+// session's wait, with its recruiter running, must end on that flip.
+func TestRecruitFlipsFreshRoom(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	var mu sync.Mutex
+	var conns []*websocket.Conn
+	flip := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		mu.Lock()
+		conns = append(conns, conn)
+		count := len(conns)
+		mu.Unlock()
+		write := func(frame any) { _ = conn.WriteJSON(frame) }
+		write(map[string]any{
+			"type": "notification", "notification": "connection",
+			"conversation": map[string]any{"topology": "DIRECT", "participants": []any{}},
+		})
+		if count == 3 {
+			close(flip)
+		}
+		go func() {
+			<-flip
+			write(map[string]any{"type": "notification", "notification": "topology-changed", "topology": "SERVER"})
+		}()
+	}))
+	defer server.Close()
+	endpoint := "ws" + server.URL[4:] + "?token=t&userId=42"
+
+	s := &Session{cfg: engine.Config{
+		URL: endpoint,
+		Refresh: func(context.Context) (engine.Credentials, error) {
+			return engine.Credentials{URL: endpoint}, nil
+		},
+	}}
+	signal, err := dialSignaling(context.Background(), endpoint, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer signal.close()
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.waitConnected(context.Background(), signal)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("the recruited third participant did not flip the room")
+	}
+	// The recruiter's guests leave with the wait.
+	mu.Lock()
+	defer mu.Unlock()
+	if len(conns) != 3 {
+		t.Fatalf("connections=%d, want the session plus two recruits", len(conns))
 	}
 }

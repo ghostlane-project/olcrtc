@@ -261,6 +261,9 @@ create the room on the service site and paste it into `room.id`; for `jitsi`
 specify the room URL; for `vkcalls` create the call in the VK app and paste
 its join link (`https://vk.ru/call/join/<id>`) — `room.id` takes it verbatim.
 
-A fresh VK room opens with a lone participant in DIRECT topology; the server
-keeps waiting and proceeds the moment a second participant — the client —
-makes the room switch to SERVER.
+A fresh VK room keeps its first participants in DIRECT topology: two alone
+never switch it, a third simultaneous participant does, and SERVER sticks
+for the room after that. The engine handles this itself: while it waits it
+recruits signaling-only guest joins (at most two, dropped the moment the
+switch arrives), so a server alone in a fresh room proceeds as soon as its
+recruits — or the client and one recruit — make the third participant.

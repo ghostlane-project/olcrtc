@@ -50,6 +50,7 @@ const (
 	fieldDescription = "description"
 	fieldPeerID      = "peerId"
 	noteConnection   = "connection"
+	noteTopology     = "topology-changed"
 	frameTypeError   = "error"
 	reasonHungup     = "HUNGUP"
 	topologyServer   = "SERVER"
@@ -337,22 +338,16 @@ func (c *signalingClient) close() {
 	c.shutdown()
 }
 
-// waitConnection waits for the connection notification, and then - when the
-// conversation did not open in SERVER topology - for the switch a second
-// participant triggers. A fresh VK room hands a lone guest DIRECT; the SFU
-// turns the room SERVER when anyone else joins and says so with a
-// topology-changed notification, which is the moment a lone server has to
-// keep waiting for instead of failing: its client IS that second
-// participant (spec section 5, the spike's topology-flip observations).
-func (c *signalingClient) waitConnection(ctx context.Context) (notification, error) {
+// awaitJoin waits for this socket's connection notification - the moment
+// the participant counts in the conversation - whatever its topology.
+func (c *signalingClient) awaitJoin(ctx context.Context) (notification, error) {
 	timer := time.NewTimer(connectionTimeout)
 	defer timer.Stop()
-	connection := notification{}
-	for connection.Notification == "" {
+	for {
 		select {
 		case note := <-c.notifications:
 			if note.Notification == noteConnection {
-				connection = note
+				return note, nil
 			}
 		case <-timer.C:
 			return notification{}, fmt.Errorf("%w: connection", ErrSignalingTimeout)
@@ -362,12 +357,25 @@ func (c *signalingClient) waitConnection(ctx context.Context) (notification, err
 			return notification{}, fmt.Errorf("vkcalls: connection wait: %w", ctx.Err())
 		}
 	}
-	return connection, c.waitServerTopology(ctx, connection)
+}
+
+// drainNotifications consumes the socket's notifications until they end, so
+// a signaling-only guest's queue never fills: its reader drops nothing and
+// the debug log stays quiet.
+func (c *signalingClient) drainNotifications() {
+	for {
+		select {
+		case <-c.notifications:
+		case <-c.closed:
+			return
+		}
+	}
 }
 
 // waitServerTopology ends when the conversation stands in SERVER topology -
 // immediately for a room that opened there, and on the topology-changed
-// notification a second participant triggers for a fresh room's DIRECT.
+// notification a third simultaneous participant triggers for a fresh room's
+// DIRECT (two alone never switch; see recruitGuests).
 func (c *signalingClient) waitServerTopology(ctx context.Context, connection notification) error {
 	waited := false
 	for connection.Conversation == nil || connection.Conversation.Topology != topologyServer {
@@ -379,7 +387,7 @@ func (c *signalingClient) waitServerTopology(ctx context.Context, connection not
 		select {
 		case note := <-c.notifications:
 			switch {
-			case note.Notification == "topology-changed" && note.Topology == topologyServer:
+			case note.Notification == noteTopology && note.Topology == topologyServer:
 				// The connection note's participant list is stale now; the
 				// run loop learns every join as its own notification.
 				return nil

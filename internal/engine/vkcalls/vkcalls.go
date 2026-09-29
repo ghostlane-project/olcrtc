@@ -147,7 +147,7 @@ func (s *Session) Connect(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	connection, err := signal.waitConnection(ctx)
+	connection, err := s.waitConnected(ctx, signal)
 	if err != nil {
 		signal.close()
 		return err
@@ -196,6 +196,29 @@ func (s *Session) Connect(ctx context.Context) error {
 	go gen.perfStatLoop()
 	go s.run(gen, connection) //nolint:contextcheck // the session owns its post-connect lifetime
 	return nil
+}
+
+// waitConnected waits for the connection notification and, when the room
+// opened outside SERVER topology, keeps waiting while recruiting the
+// signaling-only guests that flip a fresh room - two participants alone
+// never switch it, a third simultaneous one does, and SERVER sticks after
+// that (see recruitGuests).
+func (s *Session) waitConnected(ctx context.Context, signal *signalingClient) (notification, error) {
+	connection, err := signal.awaitJoin(ctx)
+	if err != nil {
+		return notification{}, err
+	}
+	direct := connection.Conversation == nil || connection.Conversation.Topology != topologyServer
+	if !direct {
+		return connection, nil
+	}
+	flipDone := make(chan struct{})
+	go s.recruitGuests(ctx, flipDone)
+	defer close(flipDone)
+	if err := signal.waitServerTopology(ctx, connection); err != nil {
+		return notification{}, err
+	}
+	return connection, nil
 }
 
 // negotiate answers one producer offer: the bundled peer connection mirrors
