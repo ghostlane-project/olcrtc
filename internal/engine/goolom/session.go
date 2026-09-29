@@ -95,6 +95,7 @@ type TrafficShape struct {
 
 // Session is the Goolom engine handle.
 type Session struct {
+	dtlsProfile engine.DTLSProfile
 	engine.Reconnector
 	engine.VideoTrackState
 
@@ -276,6 +277,9 @@ func (s *Session) subscriberConnCh() <-chan struct{} {
 // optional roomURL / telemetryReferer string the engine uses verbatim as the
 // Referer header for telemetry posts.
 func New(_ context.Context, cfg engine.Config) (engine.Session, error) {
+	if err := engine.ValidateDTLSProfile(cfg.DTLSProfile); err != nil {
+		return nil, fmt.Errorf("goolom: %w", err)
+	}
 	if cfg.URL == "" {
 		return nil, ErrURLRequired
 	}
@@ -310,6 +314,7 @@ func New(_ context.Context, cfg engine.Config) (engine.Session, error) {
 		telemetryReferer: telemetryReferer,
 		refresh:          cfg.Refresh,
 		resolver:         cfg.Resolver,
+		dtlsProfile:      cfg.DTLSProfile,
 		onData:           cfg.OnData,
 		closeCh:          make(chan struct{}),
 		keepAliveCh:      make(chan struct{}),

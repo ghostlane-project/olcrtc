@@ -143,6 +143,7 @@ type Config struct {
 	SOCKSUser             string
 	SOCKSPass             string
 	DNSServer             string
+	DTLSProfile           string
 	Resolver              protect.Lookup
 	SOCKSProxyAddr        string
 	SOCKSProxyPort        int

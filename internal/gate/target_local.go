@@ -56,6 +56,7 @@ const (
 const (
 	providerJitsi      = "jitsi"
 	providerTelemost   = "telemost"
+	providerVKCalls    = "vkcalls"
 	providerWBStream   = "wbstream"
 	providerSaluteJazz = "salutejazz"
 
@@ -94,7 +95,7 @@ const (
 // localProviders is every provider the local target carries, in the order a
 // default run walks them (-olcrtc.gate-providers).
 func localProviders() []string {
-	return []string{providerJitsi, providerTelemost, providerWBStream, providerSaluteJazz}
+	return []string{providerJitsi, providerTelemost, providerWBStream, providerSaluteJazz, providerVKCalls}
 }
 
 // transportsOf is which transports a provider carries (amendment A1, the
@@ -111,6 +112,11 @@ func transportsOf(provider string) []string {
 		return []string{transportVP8, transportVideo}
 	case providerWBStream:
 		return []string{transportVP8, transportVideo, transportSEI}
+	case providerVKCalls:
+		// The SFU re-stamps forwarded RTP (red-wrapped VP8 observed in the
+		// spike), so the codec-agnostic videochannel is the proven lane;
+		// vp8channel rides the same publish slot.
+		return []string{transportVP8, transportVideo}
 	case providerSaluteJazz:
 		return []string{transportData}
 	default:
@@ -128,6 +134,7 @@ type LocalOptions struct {
 	JitsiHosts    []string // used instead of Instances when it names a host
 	TelemostRooms []string // pool: bare ids or room URLs
 	WBStreamRooms []string // pool: bare ids or room URLs
+	VKCallsRooms  []string // pool: VK Calls join links
 	// WBStreamToken is the WB account token the server joins with; the
 	// client stays a guest, as the app is. From EnvWBStreamToken.
 	WBStreamToken string
@@ -135,7 +142,10 @@ type LocalOptions struct {
 	Providers     []string
 	Transports    []string
 	DNS           string // default 8.8.8.8:53
-	Origin        *Origin
+	// DTLSProfile is the dtls.profile every server and client of the run
+	// handshakes with; empty (or off) is the stock handshake.
+	DTLSProfile string
+	Origin      *Origin
 }
 
 // LocalTarget builds cmd/olcrtc once and runs it as mode: srv per pair.
@@ -168,6 +178,9 @@ func NewLocalTarget(opts LocalOptions) (*LocalTarget, error) {
 	opts.WorkDir = work
 	if opts.DNS == "" {
 		opts.DNS = defaultDNS
+	}
+	if opts.DTLSProfile, err = DTLSProfile(opts.DTLSProfile); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrLocalOptions, err)
 	}
 	pairs, err := planPairs(opts.Providers, opts.Transports)
 	if err != nil {
@@ -323,7 +336,7 @@ func (t *LocalTarget) endpoint(ctx context.Context, p Pair) (Endpoint, error) {
 	}
 	// VP8FPS and VP8Batch are the app's vp8channel numbers.
 	return Endpoint{Provider: p.Provider, Transport: p.Transport, Room: room, Key: key, Channel: channel,
-		DNS: t.opts.DNS, VP8FPS: 60, VP8Batch: 64}, nil
+		DNS: t.opts.DNS, VP8FPS: 60, VP8Batch: 64, DTLSProfile: t.opts.DTLSProfile}, nil
 }
 
 // room is where the pair's server goes: a fresh room on a Jitsi host that
@@ -358,6 +371,14 @@ func (t *LocalTarget) room(ctx context.Context, provider string) (string, error)
 			return "", fmt.Errorf("wbstream: %w: the entry names no room id", ErrPoolRoom)
 		}
 		return id, nil
+	case providerVKCalls:
+		// The pool entries are the join links the provider validates
+		// (vk.ru/vk.com /call/join/<id>), taken verbatim.
+		link, err := PoolRoom(t.opts.VKCallsRooms, t.opts.RunNumber)
+		if err != nil {
+			return "", fmt.Errorf("vkcalls: %w", err)
+		}
+		return link, nil
 	default:
 		return "", fmt.Errorf("%w: provider %s", ErrPairNotCarried, provider)
 	}
@@ -406,6 +427,9 @@ func RenderServerConfig(ep Endpoint, token string) string {
 		lines = append(lines, fmt.Sprintf("vp8: { fps: %d, batch_size: %d }", cmp.Or(ep.VP8FPS, 60), cmp.Or(ep.VP8Batch, 64)))
 	case transportSEI:
 		lines = append(lines, "sei: { fps: 60, batch_size: 64, fragment_size: 900, ack_timeout_ms: 2000 }")
+	}
+	if ep.DTLSProfile != "" {
+		lines = append(lines, "dtls: { profile: "+strconv.Quote(ep.DTLSProfile)+" }")
 	}
 	return strings.Join(append(lines, "debug: true"), "\n") + "\n"
 }

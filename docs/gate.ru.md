@@ -49,6 +49,7 @@ go test -count=1 -tags olcrtc_lean -timeout 45m ./internal/gate -run '^TestGate$
 | `-olcrtc.gate-transports` | `datachannel,seichannel,vp8channel` | транспорты локальной цели, см. [Пары](#пары); `videochannel` запускается, только если его назвать |
 | `-olcrtc.gate-clients` | свой для сборки | `cli` в обычной сборке, `mobile` в сборке `olcrtc_lean`, один вариант на процесс |
 | `-olcrtc.gate-telemost-rooms` | пусто | пул Telemost; иначе `OLCRTC_GATE_TELEMOST_ROOMS` |
+| `-olcrtc.gate-vkcalls-rooms` | пусто | пул VK Calls, ссылки на комнаты; иначе `OLCRTC_GATE_VKCALLS_ROOMS` |
 | `-olcrtc.gate-wbstream-rooms` | пусто | пул WB Stream; иначе `OLCRTC_GATE_WBSTREAM_ROOMS` |
 | `-olcrtc.gate-jitsi-hosts` | пусто | хосты Jitsi вместо списка инстансов; иначе `OLCRTC_GATE_JITSI_HOSTS` |
 | `-olcrtc.gate-jitsi-instances` | `docs/jitsi.instances.yaml` | список инстансов Jitsi; относительный путь считается от корня модуля |
@@ -59,6 +60,7 @@ go test -count=1 -tags olcrtc_lean -timeout 45m ./internal/gate -run '^TestGate$
 | `-olcrtc.gate-link-big` | `https://proofkit.org/gate/10mb.bin` | ресурс на `-olcrtc.gate-big-mb` MiB, доступный ноде |
 | `-olcrtc.gate-link-sink` | `https://speed.cloudflare.com/__up` | приёмник выгрузки, доступный ноде |
 | `-olcrtc.gate-dry` | выключен | напечатать план и ничего не запускать |
+| `-olcrtc.gate-dtls-profile` | пусто | `dtls.profile` движка, с которым проходят handshake каждый локальный сервер и клиент (у цели link - только клиент, нода остаётся при своём); пусто или `off` - штатный handshake Pion, неизвестное имя роняет прогон до запуска чего-либо. Профиль попадает в `dtls_profile` отчёта и в заголовок сводки, id ячеек не меняются, поэтому прогон с профилем пишет свой отчёт |
 
 Окружение:
 
@@ -104,6 +106,7 @@ go test -count=1 -tags olcrtc_lean -timeout 45m ./internal/gate -run '^TestGate$
 | `GATE_WBSTREAM_ROOMS` | да | `OLCRTC_GATE_WBSTREAM_ROOMS` | пул WB Stream: id или URL комнат |
 | `GATE_WBSTREAM_TOKEN` | да | `OLCRTC_GATE_WBSTREAM_TOKEN` | access token аккаунта WB Stream |
 | `GATE_JITSI_HOSTS` | нет | `OLCRTC_GATE_JITSI_HOSTS` | хосты Jitsi; пусто - список инстансов |
+| `GATE_VKCALLS_ROOMS` | нет | `OLCRTC_GATE_VKCALLS_ROOMS` | Пул VK Calls: ссылки на комнаты (https://vk.ru/call/join/<id>). Читается, когда провайдер `vkcalls` назван в `-olcrtc.gate-providers`; в дефолтном обходе с 28.09.2026, после live-валидации движка (19 Мбит/с в обе стороны, S0-S7) |
 
 Первый шаг джобы маскирует каждую запись, id комнаты, которым заканчивается URL записи, каждый хост Jitsi как есть и голым, и токен; затем называет каждый обязательный секрет, который не задан. Ячейки, которым нужен отсутствующий секрет, проваливаются в отчёте с той же причиной, поэтому джоба падает, а остальные провайдеры всё равно прогоняются. Секреты доходят до `go test` только через `env` шага, никогда через argv или текст скрипта. Задавайте секрет со стандартного ввода (`gh secret set GATE_WBSTREAM_TOKEN`), а не в командной строке, и никогда не коммитьте комнату, ссылку, ключ или токен.
 
@@ -215,4 +218,4 @@ go run ./cmd/gate-report compare -severity fail previous.json current.json
 Джоба `Test` гоняет unit-тесты трёх сборок: обычной, `olcrtc_lean` и `olcrtc_testhooks`, с которой собирается сервер локальной цели, так что хук, на который опирается S6, проверяется на каждом событии, включая pull request из форка. Гейт гоняют ещё две джобы в `.github/workflows/ci.yml`:
 
 - `gate-plan` делает dry run обеих сборок, секреты ей не нужны, поэтому она идёт и для pull request из форка, и кладёт оба плана в summary джобы. Проваливается, если сборка не запланировала ни одной ячейки или запланировала ячейку другого варианта.
-- `gate-local` ждёт `gate-plan` и гоняет гейт на локальной цели: вариант `cli` (`-timeout 25m`), затем вариант `mobile` (`-tags olcrtc_lean`, `-timeout 45m`) при любом исходе первого. Рендерит оба отчёта в summary джобы и выгружает артефакт `gate-local`: отчёты, очищенные логи, сэмплы и профили heap. Один прогон за раз на весь репозиторий (`concurrency: gate-rooms`, в очередь, без отмены), потому что каждый прогон берёт одни и те же комнаты пула. Pull request из форка не получает секретов, поэтому для него джоба не запускается; гейт прогонит push, который его вмёржит.
+- `gate-local` ждёт `gate-plan` и гоняет гейт на локальной цели: вариант `cli` (`-timeout 25m`), затем вариант `mobile` (`-tags olcrtc_lean`, `-timeout 45m`) при любом исходе первого, затем ячейки `cli` ещё раз с `-olcrtc.gate-dtls-profile=chrome-linux-138-compat-v1` (`-timeout 15m`, отчёт в `gate-artifacts/cli-dtls`; профиль выпускается выключенным, поэтому этот шаг показывает свои строки, не роняя джобу). Рендерит отчёты в summary джобы и выгружает артефакт `gate-local`: отчёты, очищенные логи, сэмплы и профили heap. Один прогон за раз на весь репозиторий (`concurrency: gate-rooms`, в очередь, без отмены), потому что каждый прогон берёт одни и те же комнаты пула. Pull request из форка не получает секретов, поэтому для него джоба не запускается; гейт прогонит push, который его вмёржит.

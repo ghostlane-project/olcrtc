@@ -40,6 +40,7 @@ type Config struct {
 	Token         string
 	Name          string
 	DNSServer     string
+	DTLSProfile   engine.DTLSProfile
 	Resolver      protect.Lookup
 	ProxyAddr     string
 	ProxyPort     int
@@ -134,7 +135,8 @@ func newSession(
 	inner, err := engine.New(ctx, engineName, engine.Config{
 		URL: creds.URL, Token: creds.Token, Extra: creds.Extra, Name: cfg.Name,
 		OnData: func(data []byte) { _, _ = pw.Write(data) }, DNSServer: cfg.DNSServer,
-		Resolver: cfg.Resolver, ProxyAddr: cfg.ProxyAddr, ProxyPort: cfg.ProxyPort,
+		DTLSProfile: cfg.DTLSProfile,
+		Resolver:    cfg.Resolver, ProxyAddr: cfg.ProxyAddr, ProxyPort: cfg.ProxyPort,
 		Refresh: refresh,
 	})
 	if err != nil {

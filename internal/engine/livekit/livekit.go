@@ -311,6 +311,7 @@ func New(_ context.Context, cfg engine.Config) (engine.Session, error) {
 	applySettings, err := engine.NewPionSettings(engine.PionSettingsOptions{
 		Resolver:    cfg.Resolver,
 		ProxyDialer: true,
+		DTLSProfile: cfg.DTLSProfile,
 	})
 	if err != nil {
 		return nil, err //nolint:wrapcheck // shared builder already adds protected-net context

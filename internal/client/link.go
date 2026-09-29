@@ -54,7 +54,7 @@ func (c *Client) bringUpLink(ctx context.Context, cfg Config, cancel context.Can
 	linkCfg := tunnelcore.BuildTransportConfig(tunnelcore.LinkConfig{
 		Provider: cfg.Provider, RoomURL: cfg.RoomURL, Engine: cfg.Engine,
 		URL: cfg.URL, Token: cfg.Token, ProviderToken: cfg.ProviderToken,
-		ChannelID: cfg.ChannelID, DNSServer: cfg.DNSServer,
+		ChannelID: cfg.ChannelID, DNSServer: cfg.DNSServer, DTLSProfile: cfg.DTLSProfile,
 		Options: cfg.TransportOptions, Traffic: cfg.Traffic,
 	}, tunnelcore.LinkRoleConfig{
 		DeviceID: c.deviceID, OnData: c.onData, OnDatagram: c.onDatagram, Resolver: cfg.Resolver,

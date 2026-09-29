@@ -34,6 +34,7 @@ const (
 	envLink          = "OLCRTC_GATE_LINK"
 	envTelemostRooms = "OLCRTC_GATE_TELEMOST_ROOMS"
 	envWBStreamRooms = "OLCRTC_GATE_WBSTREAM_ROOMS"
+	envVKCallsRooms  = "OLCRTC_GATE_VKCALLS_ROOMS"
 	envJitsiHosts    = "OLCRTC_GATE_JITSI_HOSTS"
 	envEngineCommit  = "OLCRTC_GATE_ENGINE_COMMIT"
 	envEngineRef     = "OLCRTC_GATE_ENGINE_REF"
@@ -88,6 +89,8 @@ var (
 		"Telemost room pool, comma-separated ids or URLs; else "+envTelemostRooms)
 	gateWBStream = flag.String("olcrtc.gate-wbstream-rooms", "",
 		"WB Stream room pool, comma-separated ids or URLs; else "+envWBStreamRooms)
+	gateVKCalls = flag.String("olcrtc.gate-vkcalls-rooms", "",
+		"VK Calls room pool, comma-separated join links; else "+envVKCallsRooms)
 	gateJitsiHosts = flag.String("olcrtc.gate-jitsi-hosts", "",
 		"comma-separated Jitsi hosts to use instead of the instance list; else "+envJitsiHosts)
 	gateInstances = flag.String("olcrtc.gate-jitsi-instances", instancesFile,
@@ -101,7 +104,10 @@ var (
 		"resource of -olcrtc.gate-big-mb MiB the fleet reaches")
 	gateLinkSink = flag.String("olcrtc.gate-link-sink", "https://speed.cloudflare.com/__up",
 		"upload sink the fleet reaches")
-	gateDry = flag.Bool("olcrtc.gate-dry", false, "print the plan and run nothing")
+	gateDry  = flag.Bool("olcrtc.gate-dry", false, "print the plan and run nothing")
+	gateDTLS = flag.String("olcrtc.gate-dtls-profile", "",
+		"dtls.profile the local servers and the client handshake with (the link target: the client alone); "+
+			"empty or off is the stock handshake")
 )
 
 // gateRun is what TestMain writes on the way out: the recorder of a run that
@@ -140,7 +146,11 @@ func TestGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	target, thresholds, secrets := gateTarget(t, root, *gateDry)
+	dtlsProfile, err := DTLSProfile(*gateDTLS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, thresholds, secrets := gateTarget(t, root, dtlsProfile, *gateDry)
 	if *gateDry {
 		for _, c := range PlanCells(target, []string{flavour}) {
 			_, _ = fmt.Fprintln(os.Stdout, c.ID)
@@ -161,6 +171,7 @@ func TestGate(t *testing.T) {
 	rec := NewRecorder(Report{
 		EngineCommit: engineCommit(t, root), EngineRef: os.Getenv(envEngineRef),
 		AppVersion: os.Getenv(envAppVersion), Target: target.Name(), Runner: runnerName(),
+		DTLSProfile: dtlsProfile,
 	})
 	gateRun.rec, gateRun.path = rec, filepath.Join(dir, reportName)
 	capture := StartCapture()
@@ -313,15 +324,15 @@ func flagGiven(name string) bool {
 // gateTarget builds the target -olcrtc.gate-target names, with the
 // thresholds it is judged by and the secrets it brings. A dry run starts no
 // origin: it only plans.
-func gateTarget(t *testing.T, root string, dry bool) (Target, Thresholds, []string) {
+func gateTarget(t *testing.T, root, dtlsProfile string, dry bool) (Target, Thresholds, []string) {
 	t.Helper()
 	switch *gateTargetName {
 	case targetLocal:
-		lt, secrets := localTarget(t, root, dry)
+		lt, secrets := localTarget(t, root, dtlsProfile, dry)
 		return lt, Local, secrets
 	case targetLink:
 		lk, secrets := linkTarget(t)
-		return lk, Link, secrets
+		return lk.WithDTLSProfile(dtlsProfile), Link, secrets
 	}
 	t.Fatalf("unknown target %q: local or link", *gateTargetName)
 	return nil, Thresholds{}, nil
@@ -330,7 +341,7 @@ func gateTarget(t *testing.T, root string, dry bool) (Target, Thresholds, []stri
 // localTarget is a child server per pair. Its private directory, the server
 // binary and each server's YAML and raw log, is a temporary one that no
 // artifact upload reaches (amendment A9).
-func localTarget(t *testing.T, root string, dry bool) (*LocalTarget, []string) {
+func localTarget(t *testing.T, root, dtlsProfile string, dry bool) (*LocalTarget, []string) {
 	t.Helper()
 	providers := splitList(*gateProviders)
 	transports, err := pickTransports(splitList(*gateTransports), flagGiven(flagTransports), providers,
@@ -344,11 +355,13 @@ func localTarget(t *testing.T, root string, dry bool) (*LocalTarget, []string) {
 		JitsiHosts:    listOf(*gateJitsiHosts, os.Getenv(envJitsiHosts)),
 		TelemostRooms: listOf(*gateTelemost, os.Getenv(envTelemostRooms)),
 		WBStreamRooms: listOf(*gateWBStream, os.Getenv(envWBStreamRooms)),
+		VKCallsRooms:  listOf(*gateVKCalls, os.Getenv(envVKCallsRooms)),
 		// ai-generated: trimmed, as the CI's require step reads it: a line
 		// break stored after the token would reach the server's YAML.
 		WBStreamToken: strings.TrimSpace(os.Getenv(EnvWBStreamToken)),
 		RunNumber:     runNumber(*gateRunNumber, os.Getenv(envRunNumber)),
 		Providers:     providers, Transports: transports, DNS: defaultDNS,
+		DTLSProfile: dtlsProfile,
 	}
 	if !dry {
 		opts.Origin = startOrigin(t)
@@ -753,7 +766,7 @@ func TestLocalTargetReadsItsSecretsAsTheCIStepDoes(t *testing.T) {
 	t.Setenv(envTelemostRooms, "fake-telemost-1\r\nfake-telemost-2\n")
 	t.Setenv(envWBStreamRooms, "")
 	t.Setenv(envJitsiHosts, "")
-	lt, secrets := localTarget(t, moduleRoot(t), true)
+	lt, secrets := localTarget(t, moduleRoot(t), "", true)
 	if lt.opts.WBStreamToken != fakeToken {
 		t.Errorf("token %q, want %q", lt.opts.WBStreamToken, fakeToken)
 	}

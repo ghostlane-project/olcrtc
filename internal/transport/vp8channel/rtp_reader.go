@@ -1,6 +1,7 @@
 package vp8channel
 
 import (
+	"strings"
 	"time"
 
 	"github.com/pion/rtp"
@@ -8,6 +9,7 @@ import (
 	"github.com/pion/webrtc/v4"
 
 	"github.com/openlibrecommunity/olcrtc/internal/logger"
+	"github.com/openlibrecommunity/olcrtc/internal/transport/common"
 )
 
 // reorderWindow bounds how many out-of-order RTP packets the reorder buffer
@@ -231,7 +233,13 @@ func (s *vp8FrameState) processRTPPacket(pkt *rtp.Packet) []byte {
 }
 
 func (p *streamTransport) handleRemoteTrack(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
-	if track.Codec().MimeType != webrtc.MimeTypeVP8 {
+	switch {
+	case track.Codec().MimeType == webrtc.MimeTypeVP8:
+	case strings.EqualFold(track.Codec().MimeType, mimeTypeRED):
+		// A VK Calls SFU forwards camera video wrapped in RFC 2198 RED even
+		// when the publisher sent no redundancy; the primary block is the
+		// VP8 packet this transport assembles.
+	default:
 		go p.drainTrack(track)
 		return
 	}
@@ -251,7 +259,12 @@ func (p *streamTransport) drainTrack(track *webrtc.TrackRemote) {
 	}
 }
 
+// mimeTypeRED is the RFC 2198 wrapper a track can arrive in; see
+// common.REDPrimary.
+const mimeTypeRED = "video/red"
+
 func (p *streamTransport) readVP8Track(track *webrtc.TrackRemote) {
+	red := strings.EqualFold(track.Codec().MimeType, mimeTypeRED)
 	var state vp8FrameState
 	reorder := newReorderBuffer()
 	buf := make([]byte, rtpBufSize)
@@ -269,6 +282,14 @@ func (p *streamTransport) readVP8Track(track *webrtc.TrackRemote) {
 		pkt := &rtp.Packet{}
 		if pkt.Unmarshal(buf[:n]) != nil {
 			continue
+		}
+		if red {
+			payloadType, data, unwrapErr := common.REDPrimary(pkt.Payload)
+			if unwrapErr != nil {
+				continue
+			}
+			pkt.PayloadType = payloadType
+			pkt.Payload = data
 		}
 
 		// Restore sequence order before assembly so SFU reordering is not

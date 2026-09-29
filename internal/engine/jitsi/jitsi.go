@@ -62,11 +62,12 @@ type Session struct {
 	engine.Reconnector
 	engine.VideoTrackState
 
-	host       string
-	room       string
-	name       string
-	resolver   protect.Lookup
-	httpClient *http.Client
+	host        string
+	room        string
+	name        string
+	resolver    protect.Lookup
+	dtlsProfile engine.DTLSProfile
+	httpClient  *http.Client
 	// configJSLimits times config.js discovery; its zero fields take the
 	// constants. Tests shorten them.
 	//
@@ -187,6 +188,7 @@ func New(_ context.Context, cfg engine.Config) (engine.Session, error) {
 		room:                room,
 		name:                name,
 		resolver:            cfg.Resolver,
+		dtlsProfile:         cfg.DTLSProfile,
 		httpClient:          protect.NewHTTPClient(cfg.Resolver),
 		onData:              cfg.OnData,
 		onPeerData:          cfg.OnPeerData,

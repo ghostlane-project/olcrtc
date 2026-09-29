@@ -8,6 +8,8 @@ package client_test
 // this list is the full one, and it stays that way: a lean bind that dropped
 // livekit is what olcbox#22 was, and the wbstream provider it serves stopped
 // working.
-func expectedEngines() []string { return []string{"goolom", "jitsi", "livekit", "salutejazz"} }
+func expectedEngines() []string {
+	return []string{"goolom", "jitsi", "livekit", "salutejazz", "vkcalls"}
+}
 
 func expectedTransports() []string { return []string{"datachannel", "seichannel", "vp8channel"} }

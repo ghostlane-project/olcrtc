@@ -56,20 +56,23 @@ type Cell struct {
 // later and only add to it: a reader that knows neither still reads every
 // failure as one.
 type Report struct {
-	Schema       int     `json:"schema"`
-	EngineCommit string  `json:"engine_commit"`
-	EngineRef    string  `json:"engine_ref"`
-	AppVersion   string  `json:"app_version"`
-	Target       string  `json:"target"`
-	Runner       string  `json:"runner"`
-	StartedAt    string  `json:"started_at"`
-	DurationS    float64 `json:"duration_s"`
-	Planned      int     `json:"planned"`
-	Executed     int     `json:"executed"`
-	Passed       int     `json:"passed"`
-	Failed       int     `json:"failed"`
-	FailedKnown  int     `json:"failed_known"` // the failed cells that carry an issue; Failed counts them too
-	Cells        []Cell  `json:"cells"`
+	Schema       int    `json:"schema"`
+	EngineCommit string `json:"engine_commit"`
+	EngineRef    string `json:"engine_ref"`
+	AppVersion   string `json:"app_version"`
+	Target       string `json:"target"`
+	Runner       string `json:"runner"`
+	// DTLSProfile is the dtls.profile the run's servers and clients
+	// handshook with; empty is the stock handshake.
+	DTLSProfile string  `json:"dtls_profile,omitempty"`
+	StartedAt   string  `json:"started_at"`
+	DurationS   float64 `json:"duration_s"`
+	Planned     int     `json:"planned"`
+	Executed    int     `json:"executed"`
+	Passed      int     `json:"passed"`
+	Failed      int     `json:"failed"`
+	FailedKnown int     `json:"failed_known"` // the failed cells that carry an issue; Failed counts them too
+	Cells       []Cell  `json:"cells"`
 }
 
 // Recorder holds every planned cell to an outcome. It is safe for concurrent

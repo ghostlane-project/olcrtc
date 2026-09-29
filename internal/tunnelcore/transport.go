@@ -1,6 +1,7 @@
 package tunnelcore
 
 import (
+	"github.com/openlibrecommunity/olcrtc/internal/engine"
 	"github.com/openlibrecommunity/olcrtc/internal/names"
 	"github.com/openlibrecommunity/olcrtc/internal/protect"
 	"github.com/openlibrecommunity/olcrtc/internal/transport"
@@ -16,6 +17,7 @@ type LinkConfig struct {
 	ProviderToken string
 	ChannelID     string
 	DNSServer     string
+	DTLSProfile   engine.DTLSProfile
 	Options       transport.Options
 	Traffic       transport.TrafficConfig
 }
@@ -50,6 +52,7 @@ func BuildTransportConfig(base LinkConfig, role LinkRoleConfig) transport.Config
 		OnDatagram:          role.OnDatagram,
 		OnPeerDatagram:      role.OnPeerDatagram,
 		DNSServer:           base.DNSServer,
+		DTLSProfile:         base.DTLSProfile,
 		Resolver:            Resolver(role.Resolver, base.DNSServer),
 		ProxyAddr:           role.ProxyAddr,
 		ProxyPort:           role.ProxyPort,

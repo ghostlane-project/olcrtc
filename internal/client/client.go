@@ -18,6 +18,7 @@ import (
 
 	"github.com/openlibrecommunity/olcrtc/internal/control"
 	"github.com/openlibrecommunity/olcrtc/internal/crypto"
+	"github.com/openlibrecommunity/olcrtc/internal/engine"
 	"github.com/openlibrecommunity/olcrtc/internal/logger"
 	"github.com/openlibrecommunity/olcrtc/internal/muxconn"
 	"github.com/openlibrecommunity/olcrtc/internal/protect"
@@ -231,6 +232,7 @@ type Config struct {
 	KeyHex           string
 	LocalAddr        string
 	DNSServer        string
+	DTLSProfile      engine.DTLSProfile
 	Resolver         protect.Lookup
 	SOCKSUser        string
 	SOCKSPass        string

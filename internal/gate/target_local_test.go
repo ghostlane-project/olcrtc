@@ -48,6 +48,16 @@ debug: true
 		!strings.Contains(wb, "vp8: { fps: 60, batch_size: 64 }") {
 		t.Fatalf("wbstream config:\n%s", wb)
 	}
+	// A DTLS profile reaches the server as the engine's dtls block, before
+	// debug; none renders no block, which the engine reads as off.
+	dtls := RenderServerConfig(Endpoint{Provider: "jitsi", Transport: "datachannel", Room: "r", Key: key,
+		DNS: "8.8.8.8:53", DTLSProfile: "chrome-linux-138-compat-v1"}, "")
+	if !strings.HasSuffix(dtls, "udp: { enabled: true }\ndtls: { profile: \"chrome-linux-138-compat-v1\" }\ndebug: true\n") {
+		t.Fatalf("dtls config:\n%s", dtls)
+	}
+	if strings.Contains(sei, "dtls:") {
+		t.Fatalf("a config with no profile names one:\n%s", sei)
+	}
 	// ai-generated: a SaluteJazz room reference is one quoted scalar, colon
 	// and all, and the server joins it anonymously: no token.
 	sj := RenderServerConfig(Endpoint{Provider: "salutejazz", Transport: "datachannel", Room: "fakecode1:fakepass1",
@@ -178,6 +188,8 @@ func TestLocalTargetRefusesAPlanItCannotRun(t *testing.T) {
 		"no transport":                {Providers: []string{"jitsi"}},
 		"no jitsi host":               {Providers: []string{"jitsi"}, Transports: []string{"datachannel"}, JitsiHosts: []string{" "}},
 		"no work directory":           {Providers: []string{"telemost"}, Transports: []string{"vp8channel"}},
+		"an unknown dtls profile": {Providers: []string{"telemost"}, Transports: []string{"vp8channel"},
+			DTLSProfile: "chrome-linux-999"},
 	} {
 		if name != "no work directory" {
 			opts.WorkDir = t.TempDir()

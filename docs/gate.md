@@ -49,6 +49,7 @@ go test -count=1 -tags olcrtc_lean -timeout 45m ./internal/gate -run '^TestGate$
 | `-olcrtc.gate-transports` | `datachannel,seichannel,vp8channel` | transports of the local target, see [Pairs](#pairs); `videochannel` runs only when named |
 | `-olcrtc.gate-clients` | the build's own | `cli` in a default build, `mobile` in an `olcrtc_lean` one, one flavour per process |
 | `-olcrtc.gate-telemost-rooms` | empty | Telemost pool; else `OLCRTC_GATE_TELEMOST_ROOMS` |
+| `-olcrtc.gate-vkcalls-rooms` | empty | VK Calls pool, join links; else `OLCRTC_GATE_VKCALLS_ROOMS` |
 | `-olcrtc.gate-wbstream-rooms` | empty | WB Stream pool; else `OLCRTC_GATE_WBSTREAM_ROOMS` |
 | `-olcrtc.gate-jitsi-hosts` | empty | Jitsi hosts used instead of the instance list; else `OLCRTC_GATE_JITSI_HOSTS` |
 | `-olcrtc.gate-jitsi-instances` | `docs/jitsi.instances.yaml` | the Jitsi instance list; a relative path is taken from the module root |
@@ -59,6 +60,7 @@ go test -count=1 -tags olcrtc_lean -timeout 45m ./internal/gate -run '^TestGate$
 | `-olcrtc.gate-link-big` | `https://proofkit.org/gate/10mb.bin` | resource of `-olcrtc.gate-big-mb` MiB the node reaches |
 | `-olcrtc.gate-link-sink` | `https://speed.cloudflare.com/__up` | upload sink the node reaches |
 | `-olcrtc.gate-dry` | off | print the plan and run nothing |
+| `-olcrtc.gate-dtls-profile` | empty | the engine's `dtls.profile` every local server and the client handshake with (the link target: the client alone, the node keeps its own); empty or `off` is the stock Pion handshake, an unknown name fails the run before anything starts. The report names a profile in `dtls_profile` and the summary heading, and cell ids stay as they are, so a profile run goes to a report of its own |
 
 The environment:
 
@@ -104,6 +106,7 @@ Secrets of the engine repository (Settings > Secrets and variables > Actions) fo
 | `GATE_WBSTREAM_ROOMS` | yes | `OLCRTC_GATE_WBSTREAM_ROOMS` | WB Stream pool: ids or room URLs |
 | `GATE_WBSTREAM_TOKEN` | yes | `OLCRTC_GATE_WBSTREAM_TOKEN` | WB Stream account access token |
 | `GATE_JITSI_HOSTS` | no | `OLCRTC_GATE_JITSI_HOSTS` | Jitsi hosts; empty means the instance list |
+| `GATE_VKCALLS_ROOMS` | no | `OLCRTC_GATE_VKCALLS_ROOMS` | VK Calls pool: room URLs (https://vk.ru/call/join/<id>). Read when the `vkcalls` provider is named in `-olcrtc.gate-providers`; it is in the default walk since 2026-09-28, after the engine's live validation (19 Mbit/s both ways, S0-S7) |
 
 The job's first step masks every entry, the room id an entry's URL ends in, each Jitsi host as given and bare, and the token; then it names each required secret that is not set. The cells that need a missing secret fail in the report with the same reason, so the job fails, while the other providers still run. The secrets reach `go test` through step `env` only, never argv or script text. Set a secret from standard input (`gh secret set GATE_WBSTREAM_TOKEN`), never on the command line, and never commit a room, a link, a key or a token.
 
@@ -215,4 +218,4 @@ go run ./cmd/gate-report compare -severity fail previous.json current.json
 The `Test` job runs the unit tests of three builds: the default one, `olcrtc_lean` and `olcrtc_testhooks`, the one the local target's server is built with, so the hook S6 relies on is tested on every event, a fork's pull request included. Two more jobs in `.github/workflows/ci.yml` run the gate:
 
 - `gate-plan` runs the dry run of both builds, needs no secret and so runs for a pull request from a fork too, and puts both plans in the job summary. It fails when a build plans no cell or a cell of the other flavour.
-- `gate-local` needs `gate-plan` and runs the gate on the local target: the `cli` flavour (`-timeout 25m`), then the `mobile` flavour (`-tags olcrtc_lean`, `-timeout 45m`) whatever the first run did. It renders both reports into the job summary and uploads the `gate-local` artifact: the reports, the scrubbed logs, the samples and the heap profiles. One run at a time across the repository (`concurrency: gate-rooms`, queued, never cancelled), because every run takes the same pool rooms. A pull request from a fork gets no secrets, so the job does not run for it; the push that merges it runs the gate.
+- `gate-local` needs `gate-plan` and runs the gate on the local target: the `cli` flavour (`-timeout 25m`), then the `mobile` flavour (`-tags olcrtc_lean`, `-timeout 45m`) whatever the first run did, then the `cli` cells once more with `-olcrtc.gate-dtls-profile=chrome-linux-138-compat-v1` (`-timeout 15m`, report in `gate-artifacts/cli-dtls`; the profile ships off, so this step shows its rows without failing the job). It renders the reports into the job summary and uploads the `gate-local` artifact: the reports, the scrubbed logs, the samples and the heap profiles. One run at a time across the repository (`concurrency: gate-rooms`, queued, never cancelled), because every run takes the same pool rooms. A pull request from a fork gets no secrets, so the job does not run for it; the push that merges it runs the gate.

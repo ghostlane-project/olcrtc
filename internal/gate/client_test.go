@@ -61,6 +61,13 @@ func TestCLIConfigMirrorsTheEndpoint(t *testing.T) {
 	if opts, ok := cfg.TransportOptions.(client.VP8Options); !ok || opts != (client.VP8Options{FPS: 30, BatchSize: 16}) {
 		t.Fatalf("vp8 options = %#v, want the endpoint's", cfg.TransportOptions)
 	}
+	if cfg.DTLSProfile != "" {
+		t.Fatalf("an endpoint with no profile asks for %q", cfg.DTLSProfile)
+	}
+	ep.DTLSProfile = "chrome-linux-138-compat-v1"
+	if got := string(cliConfig(ep).DTLSProfile); got != ep.DTLSProfile {
+		t.Fatalf("dtls profile = %q, want the endpoint's %q", got, ep.DTLSProfile)
+	}
 	unset := cliConfig(Endpoint{Provider: ep.Provider, Transport: ep.Transport})
 	if opts, ok := unset.TransportOptions.(client.VP8Options); !ok || opts != (client.VP8Options{FPS: 60, BatchSize: 64}) {
 		t.Fatalf("vp8 options of an endpoint without them = %#v, want the app's 60/64", unset.TransportOptions)

@@ -58,7 +58,7 @@ func TestTheUfragIsReadOffTheLocalDescription(t *testing.T) {
 	if got := localICEUfrag(nil); got != "" {
 		t.Fatalf("localICEUfrag(nil) = %q, want empty", got)
 	}
-	api, err := newWebRTCAPI(nil)
+	api, err := newWebRTCAPI(nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}

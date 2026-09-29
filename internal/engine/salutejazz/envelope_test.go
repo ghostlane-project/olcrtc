@@ -466,7 +466,7 @@ func TestCloseDuringTheDialLeavesNoSocket(t *testing.T) {
 // alive. A torn-down generation refuses it and closes it.
 func TestPeerConnectionIsNotPublishedAfterTeardown(t *testing.T) {
 	sess := newIdleSession(t)
-	api, err := newWebRTCAPI(nil)
+	api, err := newWebRTCAPI(nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -493,7 +493,7 @@ func TestPeerConnectionIsNotPublishedAfterTeardown(t *testing.T) {
 // nothing and the peer connection ends up closed.
 func TestTeardownLeavesNoPeerConnectionBehind(t *testing.T) {
 	sess := newIdleSession(t)
-	api, err := newWebRTCAPI(nil)
+	api, err := newWebRTCAPI(nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}

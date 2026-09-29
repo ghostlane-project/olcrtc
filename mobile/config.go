@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/openlibrecommunity/olcrtc/internal/engine"
 	"github.com/openlibrecommunity/olcrtc/internal/logger"
 	"github.com/openlibrecommunity/olcrtc/internal/protect"
 	"github.com/openlibrecommunity/olcrtc/internal/route"
@@ -83,15 +84,19 @@ type runtimeConfig struct {
 	udpDisabled bool
 	// directRules is the text SetDirectRules validated; empty tunnels everything.
 	directRules string
+	// dtlsProfile selects the engine handshake's ClientHello profile; empty
+	// keeps the stock Pion handshake.
+	dtlsProfile engine.DTLSProfile
 }
 
 func defaultRuntimeConfig() runtimeConfig {
 	return runtimeConfig{
-		transport: defaultTransport,
-		dnsServer: defaultDNSServer,
-		dns:       protect.NewResolver(defaultDNSServer),
-		socksHost: defaultSOCKSHost,
-		socksPort: defaultSOCKSPort,
+		transport:   defaultTransport,
+		dnsServer:   defaultDNSServer,
+		dtlsProfile: engine.DTLSProfileOff,
+		dns:         protect.NewResolver(defaultDNSServer),
+		socksHost:   defaultSOCKSHost,
+		socksPort:   defaultSOCKSPort,
 		liveness: client.LivenessConfig{
 			Interval: defaultLivenessInterval,
 			Timeout:  defaultLivenessTimeout,
@@ -232,6 +237,20 @@ func (r *Runtime) SetResolver(resolver protect.Lookup) {
 	r.mu.Lock()
 	r.defaults.resolver = resolver
 	r.mu.Unlock()
+}
+
+// SetDTLSProfile selects the ClientHello profile for future runs. Empty or
+// "off" keeps the stock Pion handshake; unknown ids are rejected before any
+// run starts. A running generation keeps its profile until it reconnects.
+func (r *Runtime) SetDTLSProfile(profile string) error {
+	p := engine.DTLSProfile(profile)
+	if err := engine.ValidateDTLSProfile(p); err != nil {
+		return fmt.Errorf("dtls profile %q: %w", profile, err)
+	}
+	r.mu.Lock()
+	r.defaults.dtlsProfile = p
+	r.mu.Unlock()
+	return nil
 }
 
 // SetSocksListenHost sets the local SOCKS5 bind host.
@@ -422,7 +441,7 @@ func (cfg runtimeConfig) clientConfig() client.Config {
 		ProviderToken: cfg.providerToken, KeyHex: cfg.keyHex,
 		LocalAddr: net.JoinHostPort(cfg.socksHost, strconv.Itoa(cfg.socksPort)),
 		SOCKSUser: cfg.socksUser, SOCKSPass: cfg.socksPass,
-		DNSServer: cfg.dnsServer, Resolver: cfg.lookup(),
+		DNSServer: cfg.dnsServer, DTLSProfile: cfg.dtlsProfile, Resolver: cfg.lookup(),
 		TransportOptions: cfg.transportOptions(), Liveness: cfg.liveness, Traffic: cfg.traffic,
 		DeviceID: cfg.deviceID, DeviceIDPath: cfg.deviceIDPath,
 		UDPDisabled: cfg.udpDisabled, DirectRules: cfg.directRules,
@@ -549,7 +568,7 @@ func validateDNSEntry(entry string) error {
 // here cannot be selected at all.
 func supportedProvider(provider string) bool {
 	switch provider {
-	case "jitsi", "telemost", "wbstream", "salutejazz", providerNone:
+	case "jitsi", "telemost", "wbstream", "salutejazz", "vkcalls", providerNone:
 		return true
 	default:
 		return false

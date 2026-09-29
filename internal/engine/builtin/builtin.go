@@ -16,11 +16,13 @@ import (
 	authJitsi "github.com/openlibrecommunity/olcrtc/internal/auth/jitsi"
 	authSaluteJazz "github.com/openlibrecommunity/olcrtc/internal/auth/salutejazz"
 	authTelemost "github.com/openlibrecommunity/olcrtc/internal/auth/telemost"
+	authVKCalls "github.com/openlibrecommunity/olcrtc/internal/auth/vkcalls"
 	authWBStream "github.com/openlibrecommunity/olcrtc/internal/auth/wbstream"
 	"github.com/openlibrecommunity/olcrtc/internal/engine"
 	"github.com/openlibrecommunity/olcrtc/internal/engine/goolom"
 	engineJitsi "github.com/openlibrecommunity/olcrtc/internal/engine/jitsi"
 	engineSaluteJazz "github.com/openlibrecommunity/olcrtc/internal/engine/salutejazz"
+	engineVKCalls "github.com/openlibrecommunity/olcrtc/internal/engine/vkcalls"
 	"github.com/openlibrecommunity/olcrtc/internal/protect"
 )
 
@@ -46,6 +48,7 @@ type Config struct {
 	OnPeerDatagram      func(peerID string, data []byte)
 	DNSServer           string
 	Resolver            protect.Lookup
+	DTLSProfile         engine.DTLSProfile
 	ProxyAddr           string
 	ProxyPort           int
 	RequireTargetedPeer bool
@@ -106,16 +109,18 @@ func Available() []string {
 }
 
 // RegisterDefaults wires the built-in providers: jitsi, telemost, wbstream,
-// salutejazz and "none" (direct engine access).
+// salutejazz, vkcalls and "none" (direct engine access).
 func RegisterDefaults() {
 	registerLivekitEngine()
 	engine.Register("goolom", goolom.New)
 	engine.Register("jitsi", engineJitsi.New)
 	engine.Register("salutejazz", engineSaluteJazz.New)
+	engine.Register("vkcalls", engineVKCalls.New)
 	register("wbstream", authWBStream.Provider{})
 	register("telemost", authTelemost.Provider{})
 	register("jitsi", authJitsi.Provider{})
 	register("salutejazz", authSaluteJazz.New())
+	register("vkcalls", authVKCalls.New())
 	register("none", nil)
 }
 
@@ -142,6 +147,7 @@ func register(name string, provider auth.Provider) {
 			OnPeerDatagram:      cfg.OnPeerDatagram,
 			DNSServer:           cfg.DNSServer,
 			Resolver:            cfg.Resolver,
+			DTLSProfile:         cfg.DTLSProfile,
 			ProxyAddr:           cfg.ProxyAddr,
 			ProxyPort:           cfg.ProxyPort,
 			RequireTargetedPeer: cfg.RequireTargetedPeer,

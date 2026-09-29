@@ -86,7 +86,7 @@ func TestAnEndedSessionEndsTheReconnectWatch(t *testing.T) {
 // that replaced it.
 func TestAnAttemptThatIsGoneAsksForNoReconnect(t *testing.T) {
 	sess := newIdleSession(t)
-	api, err := newWebRTCAPI(nil)
+	api, err := newWebRTCAPI(nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}

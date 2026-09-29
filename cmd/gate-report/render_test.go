@@ -117,6 +117,10 @@ func TestRenderHeadingAndSummary(t *testing.T) {
 		// leaves no gap in either line.
 		{"a report with no cells and no metadata", empty,
 			"### Gate: local target, engine unknown\n\nno cells were planned · 0 s\n\n", "passed"},
+		// A run with a DTLS profile says so in its heading: its table is not
+		// the stock handshake's.
+		{"a run with a dtls profile", gate.Report{Schema: 1, Target: "local", DTLSProfile: "chrome-linux-138-compat-v1"},
+			"### Gate: local target, engine unknown, DTLS chrome-linux-138-compat-v1\n\n", "DTLS off"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			md := Render(tc.r)
