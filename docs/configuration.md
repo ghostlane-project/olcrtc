@@ -52,7 +52,7 @@ Ready-made examples:
 | YAML path | Meaning |
 |---|---|
 | `mode` | `srv`, `cnc` or `gen` |
-| `auth.provider` | `jitsi`, `telemost`, `wbstream`, `salutejazz`, `none` |
+| `auth.provider` | `jitsi`, `telemost`, `wbstream`, `salutejazz`, `vkcalls`, `none` |
 | `auth.token` | optional pre-issued provider account token |
 | `room.id` | room ID/URL for the chosen provider |
 | `room.channel` | optional channel ID for peer-routing scenarios |
@@ -60,6 +60,7 @@ Ready-made examples:
 | `crypto.keys` / `crypto.keys_file` | server only: a list of keys, each 64 hex chars, inline or one per line in a file; the key a client's first record authenticates under is pinned for that client |
 | `net.transport` | `datachannel`, `vp8channel`, `seichannel`, `videochannel` |
 | `net.dns` | DNS resolver in `host:port` form |
+| `dtls.profile` | fixed DTLS ClientHello profile of the engine handshake: empty or `off` keeps the stock handshake; the one shipped id is `chrome-linux-138-compat-v1` (Chrome 138's cipher list minus what Pion cannot speak); an unknown name is rejected before dialing; a failover profile may override it, and an explicit `off` overrides an inherited profile |
 | `socks.host` / `socks.port` | local SOCKS5 listener in `mode: cnc` |
 | `socks.user` / `socks.pass` | optional auth for incoming SOCKS5 connections |
 | `socks.proxy_addr` / `socks.proxy_port` | outbound SOCKS5 proxy on the server side |
@@ -257,4 +258,12 @@ with a single anonymous POST and prints it as `<code>:<password>`, which is what
 
 The others do not create rooms through `olcrtc`: for `telemost` and `wbstream`
 create the room on the service site and paste it into `room.id`; for `jitsi`
-specify the room URL.
+specify the room URL; for `vkcalls` create the call in the VK app and paste
+its join link (`https://vk.ru/call/join/<id>`) — `room.id` takes it verbatim.
+
+A fresh VK room keeps its first participants in DIRECT topology: two alone
+never switch it, a third simultaneous participant does, and SERVER sticks
+for the room after that. The engine handles this itself: while it waits it
+recruits signaling-only guest joins (at most two, dropped the moment the
+switch arrives), so a server alone in a fresh room proceeds as soon as its
+recruits — or the client and one recruit — make the third participant.

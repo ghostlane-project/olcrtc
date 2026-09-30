@@ -48,6 +48,9 @@ const (
 	// Wire field names and values used more than once.
 	fieldSequence    = "sequence"
 	fieldDescription = "description"
+	fieldPeerID      = "peerId"
+	noteConnection   = "connection"
+	noteTopology     = "topology-changed"
 	frameTypeError   = "error"
 	reasonHungup     = "HUNGUP"
 	topologyServer   = "SERVER"
@@ -70,8 +73,11 @@ type notification struct {
 	PeerID       *struct {
 		ID int64 `json:"id"`
 	} `json:"peerId"` //nolint:tagliatelle // connector wire is camelCase
-	SessionID    string `json:"sessionId"` //nolint:tagliatelle // connector wire is camelCase
-	Description  string `json:"description"`
+	SessionID   string `json:"sessionId"` //nolint:tagliatelle // connector wire is camelCase
+	Description string `json:"description"`
+	// Topology is the topology-changed notification's value; the
+	// connection notification carries it inside Conversation instead.
+	Topology     string `json:"topology"`
 	Conversation *struct {
 		Topology     string `json:"topology"`
 		Participants []struct {
@@ -100,8 +106,8 @@ type signalingClient struct {
 
 // dialSignaling opens the signaling socket. The endpoint comes from the auth
 // provider's join response and already carries the token and userId query.
-func dialSignaling(ctx context.Context, endpoint, peerID string, resolver protect.Lookup) (*signalingClient, error) {
-	target, err := signalingURL(endpoint, peerID)
+func dialSignaling(ctx context.Context, endpoint string, resolver protect.Lookup) (*signalingClient, error) {
+	target, err := signalingURL(endpoint)
 	if err != nil {
 		return nil, err
 	}
@@ -109,7 +115,7 @@ func dialSignaling(ctx context.Context, endpoint, peerID string, resolver protec
 	dialer.WriteBufferSize = signalingWriteBuffer
 	if parsed, parseErr := url.Parse(target); parseErr == nil {
 		q := parsed.Query()
-		for _, k := range []string{"token", "userId", "conversationId", "peerId"} {
+		for _, k := range []string{"token", "userId", "conversationId", fieldPeerID} {
 			if q.Has(k) {
 				q.Set(k, "<r>")
 			}
@@ -139,7 +145,7 @@ func dialSignaling(ctx context.Context, endpoint, peerID string, resolver protec
 // signalingURL extends the join endpoint with the client parameters the SDK
 // sends on a fresh join. A peer id belongs to a retry join only; carrying it
 // on a fresh join makes the SFU answer the session differently.
-func signalingURL(endpoint, peerID string) (string, error) {
+func signalingURL(endpoint string) (string, error) {
 	u, err := url.Parse(endpoint)
 	// ws:// is the local-test transport; production endpoints arrive from the
 	// auth provider, which accepts only wss.
@@ -154,9 +160,6 @@ func signalingURL(endpoint, peerID string) (string, error) {
 	q.Set("capabilities", capabilitiesBitmask)
 	q.Set("clientType", "VK")
 	q.Set("tgt", "join")
-	if peerID != "" {
-		q.Set("peerId", peerID)
-	}
 	u.RawQuery = q.Encode()
 	return u.String(), nil
 }
@@ -335,18 +338,15 @@ func (c *signalingClient) close() {
 	c.shutdown()
 }
 
-// waitConnection waits for the connection notification carrying the topology
-// and the participant list.
-func (c *signalingClient) waitConnection(ctx context.Context) (notification, error) {
+// awaitJoin waits for this socket's connection notification - the moment
+// the participant counts in the conversation - whatever its topology.
+func (c *signalingClient) awaitJoin(ctx context.Context) (notification, error) {
 	timer := time.NewTimer(connectionTimeout)
 	defer timer.Stop()
 	for {
 		select {
 		case note := <-c.notifications:
-			if note.Notification == "connection" {
-				if note.Conversation == nil || note.Conversation.Topology != topologyServer {
-					return note, ErrSignalingNotServer
-				}
+			if note.Notification == noteConnection {
 				return note, nil
 			}
 		case <-timer.C:
@@ -357,6 +357,50 @@ func (c *signalingClient) waitConnection(ctx context.Context) (notification, err
 			return notification{}, fmt.Errorf("vkcalls: connection wait: %w", ctx.Err())
 		}
 	}
+}
+
+// drainNotifications consumes the socket's notifications until they end, so
+// a signaling-only guest's queue never fills: its reader drops nothing and
+// the debug log stays quiet.
+func (c *signalingClient) drainNotifications() {
+	for {
+		select {
+		case <-c.notifications:
+		case <-c.closed:
+			return
+		}
+	}
+}
+
+// waitServerTopology ends when the conversation stands in SERVER topology -
+// immediately for a room that opened there, and on the topology-changed
+// notification a third simultaneous participant triggers for a fresh room's
+// DIRECT (two alone never switch; see recruitGuests).
+func (c *signalingClient) waitServerTopology(ctx context.Context, connection notification) error {
+	waited := false
+	for connection.Conversation == nil || connection.Conversation.Topology != topologyServer {
+		if !waited {
+			waited = true
+			logger.Debugf("vkcalls: conversation opened outside SERVER topology; " +
+				"waiting for the switch a second participant triggers")
+		}
+		select {
+		case note := <-c.notifications:
+			switch {
+			case note.Notification == noteTopology && note.Topology == topologyServer:
+				// The connection note's participant list is stale now; the
+				// run loop learns every join as its own notification.
+				return nil
+			case note.Notification == noteConnection:
+				connection = note
+			}
+		case <-c.closed:
+			return fmt.Errorf("%w: waiting for SERVER topology", ErrSignalingClosed)
+		case <-ctx.Done():
+			return fmt.Errorf("%w: %w", ErrSignalingNotServer, ctx.Err())
+		}
+	}
+	return nil
 }
 
 // participantIDs returns the numeric ids of participants that are still in

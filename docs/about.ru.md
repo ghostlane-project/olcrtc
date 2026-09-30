@@ -78,6 +78,7 @@ olcrtc client.yaml
 | `telemost` | `goolom` | credentials через Yandex Telemost API, с отдельной регистрацией |
 | `wbstream` | `livekit` | credentials через WbBStream API, с отдельной регистрацией |
 | `salutejazz` | `salutejazz` | ссылка на комнату `<code>:<password>`; вход анонимным гостем, без регистрации; комната - один анонимный вызов создания; только data-каналы, и каждый байт идёт через TURN-ретранслятор Сбера |
+| `vkcalls` | `vkcalls` | ссылка на вход в VK Calls `https://vk.ru/call/join/<id>`; вход анонимным гостем, без регистрации; только видеотреки — SFU не мостит произвольные data-каналы |
 | `none` | задаётся в `engine.name` | прямой engine-режим с `engine.url` и `engine.token`, с отдельной регистрацией |
 
 Во всех Go-конфигах, логах, флагах и тестах используется одно имя: `Provider` в Go и `auth.provider` в YAML.
@@ -92,6 +93,7 @@ olcrtc client.yaml
 | `goolom` | `internal/engine/goolom` | Telemost/Goolom signaling, publisher/subscriber PeerConnection |
 | `jitsi` | `internal/engine/jitsi` | Jitsi MUC/Jingle/colibri-ws, datachannel/best-effort video |
 | `salutejazz` | `internal/engine/salutejazz` | JSON-коннектор Сбера (LiveKit-as-JSON поверх pion), данные через publisher PeerConnection |
+| `vkcalls` | `internal/engine/vkcalls` | SERVER-топология VK Calls: сигнальный WebSocket, один собранный PeerConnection с браузерной формой answer, медиа через единственный видеослой |
 
 `internal/engine/builtin` связывает `auth.provider` с нужным engine. Отдельного пакета `internal/provider` в текущем проекте нет.
 

@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/openlibrecommunity/olcrtc/internal/engine"
 )
 
 // The server side of the test is one actor: gorilla allows a single
@@ -90,14 +92,14 @@ func TestSignalingCommandFlow(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := dialSignaling(context.Background(), "ws"+server.URL[4:]+"?token=t&userId=42", "", nil)
+	client, err := dialSignaling(context.Background(), "ws"+server.URL[4:]+"?token=t&userId=42", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer client.close()
 	<-connected
 
-	connection, err := client.waitConnection(context.Background())
+	connection, err := client.awaitJoin(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,16 +166,16 @@ func TestSignalingCommandFlow(t *testing.T) {
 }
 
 func TestSignalingURL(t *testing.T) {
-	got, err := signalingURL("wss://calls.example.okcdn.ru/fb?token=t&userId=1", "peer1")
+	got, err := signalingURL("wss://calls.example.okcdn.ru/fb?token=t&userId=1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"platform=WEB", "appVersion=1.1", "version=5", "capabilities=2F7F", "tgt=join", "peerId=peer1"} {
+	for _, want := range []string{"platform=WEB", "appVersion=1.1", "version=5", "capabilities=2F7F", "tgt=join"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("url %q missing %q", got, want)
 		}
 	}
-	if _, err := signalingURL("https://calls.example/", ""); err == nil {
+	if _, err := signalingURL("https://calls.example/"); err == nil {
 		t.Fatal("expected endpoint error")
 	}
 }
@@ -238,7 +240,7 @@ func TestSignalingLargeCommandIsOneFrame(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := dialSignaling(context.Background(), "ws"+server.URL[4:]+"?token=t&userId=42", "", nil)
+	client, err := dialSignaling(context.Background(), "ws"+server.URL[4:]+"?token=t&userId=42", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,5 +285,150 @@ func TestOrderedCommandFrameIsJSON(t *testing.T) {
 	}
 	if _, err := orderedCommandFrame("x", 2, []int{1}); !errors.Is(err, ErrSignalingPayload) {
 		t.Fatalf("array payload: got %v, want ErrSignalingPayload", err)
+	}
+}
+
+// TestSignalingWaitsForServerTopology pins the fresh-room path: a lone guest
+// is handed DIRECT, and the wait ends only on the topology-changed
+// notification a second participant triggers - or with the caller's context,
+// naming the topology as the reason.
+func TestSignalingWaitsForServerTopology(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	fsfu := &fakeSFU{}
+	connected := make(chan struct{})
+	var once sync.Once
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		fsfu.conn = conn
+		once.Do(func() { close(connected) })
+		go fsfu.serve()
+		fsfu.write(map[string]any{
+			"type": "notification", "notification": "connection",
+			"peerId":       map[string]any{"id": 111},
+			"conversation": map[string]any{"topology": "DIRECT", "participants": []any{}},
+		})
+	}))
+	defer server.Close()
+
+	client, err := dialSignaling(context.Background(), "ws"+server.URL[4:]+"?token=t&userId=42", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.close()
+	<-connected
+
+	ctx, cancel := context.WithCancel(context.Background())
+	got := make(chan error, 1)
+	go func() {
+		note, err := client.awaitJoin(ctx)
+		if err != nil {
+			got <- err
+			return
+		}
+		got <- client.waitServerTopology(ctx, note)
+	}()
+
+	// Still waiting while the room is DIRECT.
+	select {
+	case err := <-got:
+		t.Fatalf("wait ended early: %v", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+	fsfu.write(map[string]any{"type": "notification", "notification": "topology-changed", "topology": "SERVER"})
+	select {
+	case err := <-got:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the switch to SERVER did not end the wait")
+	}
+	cancel()
+
+	// A context that ends in DIRECT names the topology. The first wait
+	// consumed the connection notification, so the fake sends it again.
+	fsfu.write(map[string]any{
+		"type": "notification", "notification": "connection",
+		"conversation": map[string]any{"topology": "DIRECT", "participants": []any{}},
+	})
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel2()
+	if _, err := func() (notification, error) {
+		note, err := client.awaitJoin(ctx2)
+		if err != nil {
+			return notification{}, err
+		}
+		return note, client.waitServerTopology(ctx2, note)
+	}(); !errors.Is(err, ErrSignalingNotServer) {
+		t.Fatalf("want ErrSignalingNotServer, got %v", err)
+	}
+}
+
+// TestRecruitFlipsFreshRoom models the measured fresh-room behaviour: the
+// first two connections stay DIRECT, and the third simultaneous participant
+// is what flips the SFU to SERVER - which it announces to everyone. The
+// session's wait, with its recruiter running, must end on that flip.
+func TestRecruitFlipsFreshRoom(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	var mu sync.Mutex
+	var conns []*websocket.Conn
+	flip := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		mu.Lock()
+		conns = append(conns, conn)
+		count := len(conns)
+		mu.Unlock()
+		write := func(frame any) { _ = conn.WriteJSON(frame) }
+		write(map[string]any{
+			"type": "notification", "notification": "connection",
+			"conversation": map[string]any{"topology": "DIRECT", "participants": []any{}},
+		})
+		if count == 3 {
+			close(flip)
+		}
+		go func() {
+			<-flip
+			write(map[string]any{"type": "notification", "notification": "topology-changed", "topology": "SERVER"})
+		}()
+	}))
+	defer server.Close()
+	endpoint := "ws" + server.URL[4:] + "?token=t&userId=42"
+
+	s := &Session{cfg: engine.Config{
+		URL: endpoint,
+		Refresh: func(context.Context) (engine.Credentials, error) {
+			return engine.Credentials{URL: endpoint}, nil
+		},
+	}}
+	signal, err := dialSignaling(context.Background(), endpoint, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer signal.close()
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.waitConnected(context.Background(), signal)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("the recruited third participant did not flip the room")
+	}
+	// The recruiter's guests leave with the wait.
+	mu.Lock()
+	defer mu.Unlock()
+	if len(conns) != 3 {
+		t.Fatalf("connections=%d, want the session plus two recruits", len(conns))
 	}
 }

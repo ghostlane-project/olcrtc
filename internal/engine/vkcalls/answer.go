@@ -16,7 +16,6 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
-	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -329,16 +328,6 @@ func videoPublishOf(native string) (uint32, string, string, string, error) {
 		}
 	}
 	return 0, "", "", "", ErrShapeNoPublish
-}
-
-// EXPERIMENT (temporary): VKCALLS_EXP switches, removed before commit.
-func expOn(name string) bool {
-	for _, v := range strings.Split(os.Getenv("VKCALLS_EXP"), ",") {
-		if strings.TrimSpace(v) == name {
-			return true
-		}
-	}
-	return false
 }
 
 // vp8Only restricts a publish section to the offer's VP8 payload type and

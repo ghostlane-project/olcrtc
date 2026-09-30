@@ -16,15 +16,19 @@
 
 ## Compatibility matrix
 
-| Transport | telemost | wbstream | jitsi | salutejazz |
-|-----------|:--------:|:--------:|:-----:|:----------:|
-| datachannel | - | ~ | + | + |
-| vp8channel | + | + | + | - |
-| seichannel | - | + | + | - |
-| videochannel | + | + | + | - |
+| Transport | telemost | wbstream | jitsi | salutejazz | vkcalls |
+|-----------|:--------:|:--------:|:-----:|:----------:|:-------:|
+| datachannel | - | ~ | + | + | - |
+| vp8channel | + | + | + | - | + |
+| seichannel | - | + | + | - | - |
+| videochannel | + | + | + | - | - |
 
 `salutejazz` carries bytes on the room's data channels only: it exchanges no
-video tracks, so the three video transports refuse it.
+video tracks, so the three video transports refuse it. `vkcalls` is the
+mirror case: VK's SFU bridges no arbitrary data channel, so bytes ride its
+single published video layer - vp8channel, at the release gate's measured
+13-19 Mbit/s both ways; the SFU wraps forwarded video in RED (RFC 2198),
+which the transport unwraps on arrival.
 
 **Legend:**
 - `+` - works (passes E2E tests)
