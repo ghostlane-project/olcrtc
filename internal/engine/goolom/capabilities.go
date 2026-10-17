@@ -51,11 +51,28 @@ func goolomCapabilitiesOffer() map[string]any {
 			"SET_ACTIVE_CODECS_MODE_DISABLED",
 			"SET_ACTIVE_CODECS_MODE_VIDEO_ONLY",
 		},
+		// The web SDK offers the passive mode beside disabled on the
+		// browsers whose subscriber takes one (its builder: a platform check
+		// or a version over 148); offering disabled alone is an older SDK's
+		// shape. Mirrored with both since 2026-10-17 (#58).
 		"subscriberDtlsPassiveMode": []string{
 			"SUBSCRIBER_DTLS_PASSIVE_MODE_DISABLED",
+			"SUBSCRIBER_DTLS_PASSIVE_MODE_ENABLED",
 		},
 		"publisherOpusDred": []string{
 			"PUBLISHER_OPUS_DRED_DISABLED",
+		},
+		"publisherOpusDredAndroid": []string{
+			"PUBLISHER_OPUS_DRED_ANDROID_DISABLED",
+		},
+		"publisherOpusDredIos": []string{
+			"PUBLISHER_OPUS_DRED_IOS_DISABLED",
+		},
+		"subscriberOpusDredAndroid": []string{
+			"SUBSCRIBER_OPUS_DRED_ANDROID_DISABLED",
+		},
+		"subscriberOpusDredIos": []string{
+			"SUBSCRIBER_OPUS_DRED_IOS_DISABLED",
 		},
 		"publisherOpusLowBitrate": []string{
 			"PUBLISHER_OPUS_LOW_BITRATE_DISABLED",
