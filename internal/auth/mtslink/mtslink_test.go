@@ -391,7 +391,7 @@ func TestLeaveTakesTheConferenceBack(t *testing.T) {
 }
 
 // ai-generated: the room link's ICE hint reaches the engine and nothing else
-//.
+// .
 func TestIssuePassesTheLinksICEHintToTheEngine(t *testing.T) {
 	_, srv := newGateway(t)
 	creds, err := issue(t, srv, testLink+"?ice=tcp", "a")
