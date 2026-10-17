@@ -9,6 +9,7 @@ import (
 
 	"github.com/openlibrecommunity/olcrtc/internal/auth"
 	"github.com/openlibrecommunity/olcrtc/internal/protect"
+	"github.com/openlibrecommunity/olcrtc/internal/roomhint"
 )
 
 // defaultNickname is what a guest is called when the caller names none; the
@@ -54,7 +55,8 @@ func (Provider) newClient(cfg auth.Config) *http.Client {
 // new guest: the cookies of one are of no use to the next process, and a
 // guest that is gone leaves nothing behind in the room.
 func (p Provider) Issue(ctx context.Context, cfg auth.Config) (auth.Credentials, error) {
-	event, session, err := parseEventLink(cfg.RoomURL)
+	room, ice := roomhint.Split(cfg.RoomURL)
+	event, session, err := parseEventLink(room)
 	if err != nil {
 		return auth.Credentials{}, err
 	}
@@ -94,12 +96,17 @@ func (p Provider) Issue(ctx context.Context, cfg auth.Config) (auth.Credentials,
 		return auth.Credentials{}, err
 	}
 
+	extra := map[string]string{
+		"gateway": gateway, "sessionId": session, "userId": g.userID, "conferenceId": conf.id,
+	}
+	if ice != roomhint.ICEDefault {
+		// ai-generated: the link's ICE hint, for the engine (roomhint).
+		extra["ice"] = ice
+	}
 	return auth.Credentials{
 		URL:   roomJoinURL(server, session, g.userID, nickname, token, conf.publishToken),
 		Token: g.cookies,
-		Extra: map[string]string{
-			"gateway": gateway, "sessionId": session, "userId": g.userID, "conferenceId": conf.id,
-		},
+		Extra: extra,
 	}, nil
 }
 
