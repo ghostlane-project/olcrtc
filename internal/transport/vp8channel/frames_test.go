@@ -184,7 +184,8 @@ func TestFrameCapShrinksOnLossAndGrowsBackWhenClean(t *testing.T) {
 			}
 		}
 		track.count(ts+deliveryBucketMs, 0, 1, 0)
-		return f.judge(&track, 64)
+		share, verdict := f.judge(&track, 64)
+		return share, verdict == verdictFrames
 	}
 	if _, changed := judged(1); changed || f.limit != 0 {
 		t.Fatalf("limit = %d after a dark bucket, want the cap left to the dark spells", f.limit)
@@ -241,6 +242,124 @@ func TestShrunkAimsAtTheShareAndStaysInItsBounds(t *testing.T) {
 	}
 }
 
+// judgedShare drives a frame cap with readings of a fixed answered share, as
+// a policer answers whatever the lane writes: a tbf or shaper drops by rate,
+// and a frame half the size is answered at the same share. It returns the
+// verdicts, in the order the readings produced them.
+func judgedShare(readings, answered int) []capVerdict {
+	var (
+		f     frameCap
+		track deliveryTrack
+		ts    uint32 = 10_000
+	)
+	verdicts := make([]capVerdict, 0, readings)
+	for range readings {
+		ts += (frameGrowBuckets + 1) * deliveryBucketMs
+		for i := range 100 {
+			f.pushed(&track, ts)
+			if i%4 == 3 {
+				f.wrote(&track, ts)
+			}
+			if i < answered {
+				track.count(ts, 0, 1, 0)
+			}
+		}
+		track.count(ts+deliveryBucketMs, 0, 1, 0)
+		_, verdict := f.judge(&track, 64)
+		verdicts = append(verdicts, verdict)
+	}
+	return verdicts
+}
+
+// A path whose loss follows the lane's rate, not chance: shrinking the
+// frames lifts the answered share nowhere, and after two such shrinks the
+// rate is handed to pace (the frames run full again) instead of shrinking
+// on to the floor. Once it holds the rate, a share that keeps falling under
+// the cut line is cut again, and a healthy one leaves it alone.
+func TestFrameCapHandsTheRateToPaceWhenShrinksBuyNothing(t *testing.T) {
+	verdicts := judgedShare(7, 20)
+	rate := 0
+	for i, v := range verdicts {
+		if v == verdictRate {
+			rate = i
+		}
+	}
+	if rate == 0 {
+		t.Fatalf("no reading handed the rate to pace: %v", verdicts)
+	}
+	if verdicts[len(verdicts)-1] != verdictRateCut {
+		t.Fatalf("the share kept under the cut line after the handover, want a cut: %v", verdicts)
+	}
+
+	// Once the share is healthy the judgements say nothing: pace grows back
+	// on its own and the frames stay full.
+	var (
+		f     frameCap
+		track deliveryTrack
+		ts    uint32 = 10_000
+	)
+	healthy := func(answered int) capVerdict {
+		ts += (frameGrowBuckets + 1) * deliveryBucketMs
+		for i := range 100 {
+			f.pushed(&track, ts)
+			if i%4 == 3 {
+				f.wrote(&track, ts)
+			}
+			if i < answered {
+				track.count(ts, 0, 1, 0)
+			}
+		}
+		track.count(ts+deliveryBucketMs, 0, 1, 0)
+		_, verdict := f.judge(&track, 64)
+		return verdict
+	}
+	f.handRateToPace()
+	for range 4 {
+		if v := healthy(90); v != verdictNone {
+			t.Fatalf("a healthy share under pace produced %v, want no verdict", v)
+		}
+	}
+	if f.limit != 0 {
+		t.Fatalf("limit = %d under pace, want full frames", f.limit)
+	}
+	f.handBackToFrames()
+	if healthy(20) == verdictRateCut || !f.lossy {
+		t.Fatalf("after the hand back a lossy reading must shrink frames again, not cut rate")
+	}
+}
+
+// A chancy path, where a shrink lifts the answered share as the model
+// predicts, never hands the rate to pace however long it runs.
+func TestFrameCapKeepsItsFramesOnAChancyPath(t *testing.T) {
+	var (
+		f     frameCap
+		track deliveryTrack
+		ts    uint32 = 10_000
+		share        = 0.2
+	)
+	for range 12 {
+		ts += (frameGrowBuckets + 1) * deliveryBucketMs
+		answered := int(share*100 + 0.5)
+		for i := range 100 {
+			f.pushed(&track, ts)
+			if i%4 == 3 {
+				f.wrote(&track, ts)
+			}
+			if i < answered {
+				track.count(ts, 0, 1, 0)
+			}
+		}
+		track.count(ts+deliveryBucketMs, 0, 1, 0)
+		read, verdict := f.judge(&track, 64)
+		if verdict == verdictRate || f.rateKept {
+			t.Fatalf("a chancy path handed its rate to pace at share %.2f", read)
+		}
+		// The next reading answers what the model promises for the frames
+		// now in force, or better.
+		share = min(math.Pow(share, float64(max(f.limit, 1))/64), 0.9)
+	}
+}
+
 // kcpSegmentAt is one KCP segment of a command, a timestamp and a body.
 func kcpSegmentAt(cmd byte, ts uint32, body string) []byte {
 	seg := make([]byte, kcp.IKCP_OVERHEAD+len(body))
@@ -291,7 +410,7 @@ func judgeCleanPath(start uint32, steps int) (float64, int) {
 			track.count(ts-rttMs, 0, 1, 0)
 		}
 		delete(sent, ts-rttMs)
-		if share, changed := f.judge(&track, 64); changed || share != 0 {
+		if share, verdict := f.judge(&track, 64); verdict != verdictNone || share != 0 {
 			low = min(low, share)
 		}
 		ts += stepMs

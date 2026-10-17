@@ -118,13 +118,29 @@ func (l *dataLane) flush(p *streamTransport, write func([]byte) bool) bool {
 		l.seen.probe() // on the lane's cadence, see kcpConn.probe
 	case l.pace.grow(now, cmp.Or(p.growEvery, defaultGrowEvery), p.fullRate()):
 		l.resize(p)
+		if l.pace.rate == 0 {
+			l.frames.handBackToFrames()
+		}
 	}
 	acked := l.sendAcks(p, write)
 	sent := l.send(p, now, write)
 	if l.seen != nil {
-		if share, changed := l.frames.judge(&l.seen.delivery, p.fullPackets()); changed {
+		share, verdict := l.frames.judge(&l.seen.delivery, p.fullPackets())
+		switch verdict {
+		case verdictNone:
+		case verdictFrames:
 			l.resize(p)
 			logger.Infof("vp8channel: %s: %d%% of pushed packets answered, %s", l.name, int(share*100), l.frameNote())
+		case verdictRate:
+			l.pace.cutTo(share * l.pace.sentRate(now))
+			l.resize(p)
+			logger.Infof("vp8channel: %s: %d%% answered, smaller frames lift none - pacing at delivered: at most %d KiB/s",
+				l.name, int(share*100), int(l.pace.rate)>>10)
+		case verdictRateCut:
+			l.pace.cutTo(share * l.pace.sentRate(now))
+			l.resize(p)
+			logger.Infof("vp8channel: %s: %d%% answered over the pace - cut to what is delivered: at most %d KiB/s",
+				l.name, int(share*100), int(l.pace.rate)>>10)
 		}
 	}
 	return sent || acked
