@@ -245,7 +245,7 @@ func (d *Dialer) dialAddrs(ctx context.Context, network, port string, ips []net.
 		}(i, ip)
 	}
 	var firstErr error
-	for received := range len(ips) {
+	for received := range ips {
 		res := <-results
 		if res.err == nil {
 			go closeLate(results, len(ips)-received-1)
