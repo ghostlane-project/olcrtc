@@ -116,6 +116,7 @@ Full instructions are in [docs/fast.md](docs/fast.md) and [docs/manual.md](docs/
 - [fast.md](docs/fast.md) - quick start for newcomers
 - [manual.md](docs/manual.md) - manual build
 - [configuration.md](docs/configuration.md) - YAML setup
+- [providers.md](docs/providers.md) - carriers: setting up an instance, adding a new one
 - [settings.md](docs/settings.md) - compatibility matrix
 - [uri.md](docs/uri.md) - client URI format
 - [sub.md](docs/sub.md) - subscription format
