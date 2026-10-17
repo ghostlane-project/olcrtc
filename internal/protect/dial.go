@@ -210,18 +210,49 @@ func hasRoute(ip net.IP) bool {
 	return true
 }
 
+// addrStagger is how far behind each other the addresses of one family start.
+const addrStagger = 300 * time.Millisecond
+
+// dialAddrs dials the addresses staggered rather than one after another, and
+// the first to connect wins. Under a whitelist only some of a name's addresses
+// answer (api.vk.me: 8 of 9 on 2026-10-13); dialed in order, a silent one held
+// the dial for defaultDialTimeout and the caller's whole request ran out.
 func (d *Dialer) dialAddrs(ctx context.Context, network, port string, ips []net.IP) (net.Conn, error) {
+	if len(ips) == 1 {
+		conn, err := d.netDialer().DialContext(ctx, network, net.JoinHostPort(ips[0].String(), port))
+		if err != nil {
+			return nil, fmt.Errorf("dial failed: %w", err)
+		}
+		return conn, nil
+	}
+	dialCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	results := make(chan familyResult, len(ips))
+	for i, ip := range ips {
+		go func(i int, ip net.IP) {
+			if i > 0 {
+				timer := time.NewTimer(time.Duration(i) * addrStagger)
+				select {
+				case <-timer.C:
+				case <-dialCtx.Done():
+					timer.Stop()
+					results <- familyResult{err: dialCtx.Err()}
+					return
+				}
+			}
+			conn, err := d.netDialer().DialContext(dialCtx, network, net.JoinHostPort(ip.String(), port))
+			results <- familyResult{conn: conn, err: err}
+		}(i, ip)
+	}
 	var firstErr error
-	for _, ip := range ips {
-		conn, err := d.netDialer().DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
-		if err == nil {
-			return conn, nil
+	for received := range len(ips) {
+		res := <-results
+		if res.err == nil {
+			go closeLate(results, len(ips)-received-1)
+			return res.conn, nil
 		}
 		if firstErr == nil {
-			firstErr = err
-		}
-		if ctx.Err() != nil {
-			break
+			firstErr = res.err
 		}
 	}
 	return nil, fmt.Errorf("dial failed: %w", firstErr)
