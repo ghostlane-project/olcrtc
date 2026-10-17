@@ -113,6 +113,18 @@ func (s *pace) slow(now int64, sent, full float64) bool {
 	return true
 }
 
+// cutTo caps the lane at delivered, the rate its packets were getting
+// through at: the loss was read as following the lane's rate (a policer or
+// shaper that drops, an SFU budget by rate), where half of what is written
+// is retransmission and only a rate at what survives carries anything. The
+// guards of slow do not apply: the evidence is the path's own answer, not a
+// guess at what took it over a budget. The cap grows back a quarter at a
+// time as pace ever did, and the lane that overruns is cut here again.
+func (s *pace) cutTo(delivered float64) {
+	s.rate = max(delivered, minPaceRate)
+	s.credit, s.creditAt, s.held, s.grownAt = 0, monoNow(), false, monoNow()
+}
+
 // grow raises the cap by a quarter when it held data back for a whole grow
 // interval, and lifts it once it reaches full, the most the lane writes
 // uncapped. It reports whether the cap changed.
