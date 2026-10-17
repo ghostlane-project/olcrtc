@@ -122,7 +122,7 @@ var beaconFrame = []byte{ //nolint:gochecknoglobals // one constant frame, embed
 
 // beaconSilence is one Opus frame of silence, the three bytes a muted mic
 // encodes: DTX at its quietest.
-var beaconSilence = []byte{0xF8, 0xFF, 0xFE}
+var beaconSilence = []byte{0xF8, 0xFF, 0xFE} //nolint:gochecknoglobals // three constant bytes
 
 // startBeacon publishes the beacon track and writes the frame on its cadence
 // until the session ends. Called before the publisher peer connection exists:

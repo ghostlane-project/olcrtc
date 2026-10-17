@@ -32,30 +32,34 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	run := func() int {
 
-	creds, err := authTelemost.Provider{}.Issue(ctx, auth.Config{RoomURL: os.Args[1], DNSServer: "8.8.8.8:53"})
-	if err != nil {
-		logger.Errorf("keeper: auth: %v", err)
-		os.Exit(1)
-	}
+		creds, err := authTelemost.Provider{}.Issue(ctx, auth.Config{RoomURL: os.Args[1], DNSServer: "8.8.8.8:53"})
+		if err != nil {
+			logger.Errorf("keeper: auth: %v", err)
+			return 1
+		}
 
-	sess, err := engineGoolom.New(ctx, engine.Config{
-		URL:    creds.URL,
-		Token:  creds.Token,
-		Extra:  creds.Extra,
-		Name:   "keeper",
-		Beacon: true,
-	})
-	if err != nil {
-		logger.Errorf("keeper: engine: %v", err)
-		os.Exit(1)
-	}
-	if err := sess.Connect(ctx); err != nil {
-		logger.Errorf("keeper: connect: %v", err)
-		os.Exit(1)
-	}
-	logger.Infof("keeper: in the room, beacon on")
+		sess, err := engineGoolom.New(ctx, engine.Config{
+			URL:    creds.URL,
+			Token:  creds.Token,
+			Extra:  creds.Extra,
+			Name:   "keeper",
+			Beacon: true,
+		})
+		if err != nil {
+			logger.Errorf("keeper: engine: %v", err)
+			return 1
+		}
+		if err := sess.Connect(ctx); err != nil {
+			logger.Errorf("keeper: connect: %v", err)
+			return 1
+		}
+		logger.Infof("keeper: in the room, beacon on")
 
-	<-ctx.Done()
-	_ = sess.Close()
+		<-ctx.Done()
+		_ = sess.Close()
+		return 0
+	}
+	os.Exit(run())
 }
