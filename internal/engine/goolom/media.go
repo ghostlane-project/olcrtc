@@ -60,12 +60,22 @@ func newWebRTCAPI(resolver protect.Lookup, dtlsProfile engine.DTLSProfile) (*web
 	if err := mediaEngine.RegisterDefaultCodecs(); err != nil {
 		return nil, fmt.Errorf("register default codecs: %w", err)
 	}
+	// The abs-send-time header extension, as the web client carries it: the
+	// platform offers exactly this one extension in its SDP, and a browser
+	// stamps it on every media packet while an engine that declines it sends
+	// bare headers - a byte-level difference visible in each packet (olcrtc#58).
+	// ai-generated: this registration and the interceptor that stamps it.
+	absSendTime := webrtc.RTPHeaderExtensionCapability{URI: absSendTimeURI}
+	if err := mediaEngine.RegisterHeaderExtension(absSendTime, webrtc.RTPCodecTypeVideo); err != nil {
+		logger.Debugf("goolom: abs-send-time registration: %v", err)
+	}
 	interceptorRegistry := &interceptor.Registry{}
 	if err := webrtc.RegisterDefaultInterceptorsWithOptions(
 		mediaEngine, interceptorRegistry, engine.DefaultInterceptorOptions()...,
 	); err != nil {
 		return nil, fmt.Errorf("register default interceptors: %w", err)
 	}
+	interceptorRegistry.Add(&absSendTimeInterceptor{})
 	return webrtc.NewAPI(
 		webrtc.WithSettingEngine(settingEngine),
 		webrtc.WithMediaEngine(mediaEngine),
