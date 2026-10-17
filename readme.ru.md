@@ -97,6 +97,7 @@ curl -fsSL https://raw.githubusercontent.com/ghostlane-project/olcrtc/proofkit/i
 - [fast.md](docs/fast.ru.md) - быстрый старт для новичков
 - [manual.md](docs/manual.ru.md) - ручная сборка
 - [configuration.md](docs/configuration.ru.md) - настройка YAML
+- [providers.md](docs/providers.ru.md) - карьеры: поднять инстанс, добавить новый
 - [settings.md](docs/settings.ru.md) - матрица совместимости
 - [uri.md](docs/uri.ru.md) - формат URI клиента
 - [sub.md](docs/sub.ru.md) - формат подписки
