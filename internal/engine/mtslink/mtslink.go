@@ -14,6 +14,11 @@
 //     (engine.KeyframeRequestSource).
 //   - Nine receive slots, filled with the room's publishers without being
 //     asked: a room of ten is one where everybody sees everybody.
+//   - Every candidate twice: UDP and passive TCP, both on port 443 of the
+//     SFU. The engine offers UDP alone unless the room link asks otherwise
+//     ("…?ice=tcp" or "…?ice=both", roomhint): over TCP it dials the SFU's
+//     passive candidate itself (pion's active ICE-TCP), the way a browser
+//     gets through a network that starves UDP.
 //   - No data between guests. The data channel the web client opens carries
 //     the SFU's own notes about the slots, one way; this engine leaves it out.
 //
@@ -38,6 +43,7 @@ import (
 	"github.com/openlibrecommunity/olcrtc/internal/engine"
 	"github.com/openlibrecommunity/olcrtc/internal/logger"
 	"github.com/openlibrecommunity/olcrtc/internal/protect"
+	"github.com/openlibrecommunity/olcrtc/internal/roomhint"
 )
 
 // Session errors.
@@ -75,7 +81,9 @@ type Session struct {
 	cookies      string
 	gateway      string
 	conferenceID string
-	gen          *generation
+	// ice is the ICE mode the room link asked for (roomhint), empty for UDP.
+	ice string
+	gen *generation
 
 	video    engine.VideoTrackState
 	keyframe atomic.Pointer[func()]
@@ -156,6 +164,7 @@ func (s *Session) adopt(creds engine.Credentials) {
 	s.mu.Lock()
 	s.joinURL, s.cookies = creds.URL, creds.Token
 	s.gateway, s.conferenceID = creds.Extra["gateway"], creds.Extra["conferenceId"]
+	s.ice = creds.Extra["ice"]
 	s.mu.Unlock()
 }
 
@@ -246,6 +255,13 @@ func (s *Session) newAPI() (*webrtc.API, error) {
 	if apply != nil {
 		apply(&settings)
 	}
+	s.mu.Lock()
+	ice := s.ice
+	s.mu.Unlock()
+	if types := iceNetworkTypes(ice); types != nil {
+		logger.Infof("mtslink: ICE over %s, as the room link asks", ice)
+		settings.SetNetworkTypes(types)
+	}
 	registry := &interceptor.Registry{}
 	if err := webrtc.RegisterDefaultInterceptorsWithOptions(
 		media, registry, engine.DefaultInterceptorOptions()...,
@@ -257,6 +273,23 @@ func (s *Session) newAPI() (*webrtc.API, error) {
 		webrtc.WithSettingEngine(settings),
 		webrtc.WithInterceptorRegistry(registry),
 	), nil
+}
+
+// iceNetworkTypes is what an ICE mode from the room link (roomhint) asks of
+// pion, nil for the shared settings' UDP. With TCP among them pion dials the
+// SFU's passive TCP candidate itself; the SFU then answers with that one alone
+// when the offer has no UDP.
+//
+// ai-generated: this function.
+func iceNetworkTypes(mode string) []webrtc.NetworkType {
+	switch mode {
+	case roomhint.ICETCP:
+		return []webrtc.NetworkType{webrtc.NetworkTypeTCP4}
+	case roomhint.ICEBoth:
+		return []webrtc.NetworkType{webrtc.NetworkTypeUDP4, webrtc.NetworkTypeTCP4}
+	default:
+		return nil
+	}
 }
 
 // buildPeerConnection lays the offer out in the web client's order, less what

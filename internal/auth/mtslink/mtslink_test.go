@@ -389,3 +389,23 @@ func TestLeaveTakesTheConferenceBack(t *testing.T) {
 		t.Fatal("a conference id that is not a number went into a path")
 	}
 }
+
+// ai-generated: the room link's ICE hint reaches the engine and nothing else
+//.
+func TestIssuePassesTheLinksICEHintToTheEngine(t *testing.T) {
+	_, srv := newGateway(t)
+	creds, err := issue(t, srv, testLink+"?ice=tcp", "a")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if creds.Extra["ice"] != "tcp" {
+		t.Fatalf("Extra[ice] = %q, want tcp", creds.Extra["ice"])
+	}
+	plain, err := issue(t, srv, testLink, "a")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if _, ok := plain.Extra["ice"]; ok {
+		t.Fatal("a plain link asks for no ICE mode")
+	}
+}

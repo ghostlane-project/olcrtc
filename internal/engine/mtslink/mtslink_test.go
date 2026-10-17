@@ -584,3 +584,16 @@ func TestACloseSessionRefusesToConnect(t *testing.T) {
 		t.Fatalf("Connect on a closed session: %v, want %v", err, ErrSessionClosed)
 	}
 }
+
+// ai-generated: what each ICE mode asks of pion.
+func TestICENetworkTypes(t *testing.T) {
+	if iceNetworkTypes("") != nil || iceNetworkTypes("udp") != nil {
+		t.Fatal("no hint and udp keep the shared UDP settings")
+	}
+	if got := iceNetworkTypes("tcp"); len(got) != 1 || got[0] != webrtc.NetworkTypeTCP4 {
+		t.Fatalf("tcp = %v", got)
+	}
+	if got := iceNetworkTypes("both"); len(got) != 2 {
+		t.Fatalf("both = %v", got)
+	}
+}
