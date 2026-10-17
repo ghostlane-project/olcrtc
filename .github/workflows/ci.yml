@@ -227,14 +227,17 @@ jobs:
     # matrix, which counted a skipped cell as green: here every planned cell
     # ends pass or fail.
     #
-    # One job per provider and flavour (2026-10-17, after three record runs
-    # in a row went red on one carrier's leg while every other carrier was
-    # green): the legs run in parallel, a failed leg is re-run on its own
+    # One job per provider (2026-10-17, after three record runs in a row
+    # went red on one carrier's leg while every other carrier was green):
+    # the jobs run in parallel, a failed one is re-run on its own
     # (Re-run failed jobs), and one carrier's bad day no longer holds the
-    # whole gate. The room queue that used to be one slot for the whole
-    # repository is per provider now — legs of different carriers never
-    # shared a room anyway, and legs of one carrier queue behind each other
-    # exactly as the sequential steps they replace did.
+    # whole gate. Inside a job the three flavours run one after the other,
+    # as the sequential steps of the single job they replace did; the room
+    # queue that used to be one slot for the whole repository is per
+    # provider now — jobs of different carriers never shared a room anyway.
+    # A provider x flavour matrix was tried first and does not work:
+    # GitHub keeps only one pending job per concurrency group, so the third
+    # leg of a provider cancelled the queued second one.
     #
     # Secrets reach go test through step env only, never argv or script text
     # (amendment A7). GATE_TELEMOST_ROOMS (a pool of room ids or URLs,
@@ -253,33 +256,11 @@ jobs:
     # missing secret fails it. The head repository is compared by name,
     # which holds whether or not this repository is itself a fork
     # (head.repo.fork would be true for every branch of a forked repository).
-    name: Gate (${{ matrix.provider }}, ${{ matrix.flavour }})
+    name: Gate (${{ matrix.provider }})
     strategy:
       fail-fast: false
       matrix:
         provider: [jitsi, telemost, salutejazz, vkcalls, mtslink]
-        flavour: [cli, mobile, dtls]
-        include:
-          - flavour: cli
-            tags: ""
-            timeout: 30
-            jobtimeout: 40
-          - flavour: mobile
-            tags: olcrtc_lean
-            # The whole provider's mobile matrix in one go: every load pair
-            # runs S1-S5 and S7, and the slow SaluteJazz leg has measured a
-            # 300 s S0 (45 m cut a run at 2610 s mid-S4, run 36483073049).
-            timeout: 65
-            jobtimeout: 75
-          - flavour: dtls
-            # The fixed ClientHello profile (dtls.profile, off by default),
-            # cli cells only. The profile is experimental and ships off, so
-            # its rows show without failing the job; drop continue-on-error
-            # once it ships on.
-            tags: ""
-            timeout: 25
-            jobtimeout: 35
-            experimental: true
     # ai-generated: the `needs` list beyond gate-plan. The gate holds live
     # rooms, so a branch whose unit tests or lint already failed must not
     # take that slot: it cannot merge anyway. Waiting costs the two or three
@@ -296,7 +277,10 @@ jobs:
     # checkout leaves no credential in .git/config for the test's children.
     permissions:
       contents: read
-    timeout-minutes: ${{ matrix.jobtimeout }}
+    # The three flavours of one provider run one after the other inside the
+    # job (see the steps): 25, 60 and 15 minutes of go test plus the builds
+    # and the upload.
+    timeout-minutes: 110
     # One gate leg at a time per provider, not across the whole repository:
     # only legs of one provider share that provider's pool rooms, and two
     # servers in one room (two legs pushed together, or the same WB account
@@ -370,8 +354,7 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      - name: Run the gate
-        continue-on-error: ${{ matrix.experimental == true }}
+      - name: Run the gate, cli flavour (default build)
         env:
           OLCRTC_GATE_TELEMOST_ROOMS: ${{ secrets.GATE_TELEMOST_ROOMS }}
           OLCRTC_GATE_WBSTREAM_ROOMS: ${{ secrets.GATE_WBSTREAM_ROOMS }}
@@ -380,29 +363,74 @@ jobs:
           OLCRTC_GATE_VKCALLS_ROOMS: ${{ secrets.GATE_VKCALLS_ROOMS }}
           OLCRTC_GATE_MTSLINK_ROOMS: ${{ secrets.GATE_MTSLINK_ROOMS }}
         run: |
-          flags=(-olcrtc.gate -olcrtc.gate-target=local "-olcrtc.gate-dir=gate-artifacts/${{ matrix.flavour }}" "-olcrtc.gate-providers=${{ matrix.provider }}")
-          if [ "${{ matrix.flavour }}" = dtls ]; then
-            flags+=(-olcrtc.gate-dtls-profile=chrome-linux-138-compat-v1)
-          fi
-          go test -count=1 ${{ matrix.tags && format('-tags {0}', matrix.tags) || '' }} \
-            -timeout ${{ matrix.timeout }}m ./internal/gate -run '^TestGate$' -v "${flags[@]}"
+          go test -count=1 -timeout 25m ./internal/gate -run '^TestGate$' -v \
+            -olcrtc.gate -olcrtc.gate-target=local -olcrtc.gate-dir=gate-artifacts/cli \
+            -olcrtc.gate-providers=${{ matrix.provider }}
+
+      - name: Run the gate, mobile flavour (olcrtc_lean build)
+        # Its cells are owed to the report whatever the cli run did. The 60 m
+        # budget covers this provider's mobile matrix — every load pair runs
+        # S1-S5 and S7 — with the slow SaluteJazz leg (a 300 s S0 measured):
+        # 45 m minus the report margin cut a run at 2610 s mid-S4 (run
+        # 36483073049).
+        if: ${{ !cancelled() && steps.go.outcome == 'success' }}
+        env:
+          OLCRTC_GATE_TELEMOST_ROOMS: ${{ secrets.GATE_TELEMOST_ROOMS }}
+          OLCRTC_GATE_WBSTREAM_ROOMS: ${{ secrets.GATE_WBSTREAM_ROOMS }}
+          OLCRTC_GATE_WBSTREAM_TOKEN: ${{ secrets.GATE_WBSTREAM_TOKEN }}
+          OLCRTC_GATE_JITSI_HOSTS: ${{ secrets.GATE_JITSI_HOSTS }}
+          OLCRTC_GATE_VKCALLS_ROOMS: ${{ secrets.GATE_VKCALLS_ROOMS }}
+          OLCRTC_GATE_MTSLINK_ROOMS: ${{ secrets.GATE_MTSLINK_ROOMS }}
+        run: |
+          go test -count=1 -tags olcrtc_lean -timeout 60m ./internal/gate -run '^TestGate$' -v \
+            -olcrtc.gate -olcrtc.gate-target=local -olcrtc.gate-dir=gate-artifacts/mobile \
+            -olcrtc.gate-providers=${{ matrix.provider }}
+
+      - name: Run the gate, cli flavour with the DTLS profile
+        # The fixed ClientHello profile (dtls.profile, off by default) on
+        # this provider's local servers and the client, cli cells only: a
+        # report of its own, gate-artifacts/cli-dtls. The profile is
+        # experimental and ships off, so a red row is shown in the summary
+        # without failing the job; drop continue-on-error once it ships on.
+        if: ${{ !cancelled() && steps.go.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          OLCRTC_GATE_TELEMOST_ROOMS: ${{ secrets.GATE_TELEMOST_ROOMS }}
+          OLCRTC_GATE_WBSTREAM_ROOMS: ${{ secrets.GATE_WBSTREAM_ROOMS }}
+          OLCRTC_GATE_WBSTREAM_TOKEN: ${{ secrets.GATE_WBSTREAM_TOKEN }}
+          OLCRTC_GATE_JITSI_HOSTS: ${{ secrets.GATE_JITSI_HOSTS }}
+          OLCRTC_GATE_VKCALLS_ROOMS: ${{ secrets.GATE_VKCALLS_ROOMS }}
+          OLCRTC_GATE_MTSLINK_ROOMS: ${{ secrets.GATE_MTSLINK_ROOMS }}
+        run: |
+          go test -count=1 -timeout 15m ./internal/gate -run '^TestGate$' -v \
+            -olcrtc.gate -olcrtc.gate-target=local -olcrtc.gate-dir=gate-artifacts/cli-dtls \
+            -olcrtc.gate-providers=${{ matrix.provider }} \
+            -olcrtc.gate-dtls-profile=chrome-linux-138-compat-v1
 
       - name: Summary
         if: ${{ always() && steps.go.outcome == 'success' }}
         run: |
-          report="gate-artifacts/${{ matrix.flavour }}/gate-report.json"
-          if [ ! -f "$report" ]; then
-            echo "### Gate (${{ matrix.provider }}, ${{ matrix.flavour }}): the run wrote no report" >> "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
-          go run ./cmd/gate-report render "$report" \
-            | sed "1s/\$/ (${{ matrix.provider }}, ${{ matrix.flavour }})/" >> "$GITHUB_STEP_SUMMARY"
+          # A report that cannot be read fails the step, after the other
+          # flavours' tables are written.
+          PROVIDER='${{ matrix.provider }}'
+          unreadable=0
+          for flavour in cli mobile cli-dtls; do
+            report="gate-artifacts/$flavour/gate-report.json"
+            if [ ! -f "$report" ]; then
+              echo "### Gate (${{ matrix.provider }}): the $flavour run wrote no report"
+            elif ! go run ./cmd/gate-report render "$report" | sed "1s/\$/ ($PROVIDER, $flavour)"/; then
+              echo "### Gate (${{ matrix.provider }}): the $flavour report could not be rendered"
+              unreadable=1
+            fi
+            echo
+          done >> "$GITHUB_STEP_SUMMARY"
+          exit "$unreadable"
 
       - name: Upload artifacts
         if: ${{ always() && steps.go.outcome == 'success' }}
         uses: actions/upload-artifact@v7
         with:
-          name: gate-${{ matrix.provider }}-${{ matrix.flavour }}
+          name: gate-${{ matrix.provider }}
           path: |
             gate-artifacts/**/*.log
             gate-artifacts/**/*.csv
