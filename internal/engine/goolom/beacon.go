@@ -70,7 +70,7 @@ func beaconFrames() [][]byte {
 // platform forwards a participant's second track at all is the question the
 // live tuning turns on (#58).
 type boundBeacon struct {
-	webrtc.TrackLocalStaticSample
+	*webrtc.TrackLocalStaticSample
 }
 
 func (b *boundBeacon) Bind(t webrtc.TrackLocalContext) (webrtc.RTPCodecParameters, error) {
@@ -84,6 +84,12 @@ func (b *boundBeacon) Unbind(t webrtc.TrackLocalContext) error {
 }
 
 const (
+	// beaconAudioEvery is the silent audio track's cadence: one 20 ms Opus
+	// frame of comfort silence, the shape a muted microphone sends. A call
+	// platform reads a meeting as voices; the keeper speaks none, and the
+	// live matrix says video alone does not open the data tracks (#58).
+	beaconAudioEvery = 20 * time.Millisecond
+	// beaconEvery is the beacon's cadence
 	// beaconEvery is the beacon's cadence: thirty keyframes a second, the
 	// cadence of a camera. A still a second kept the relay's room gate shut
 	// (measured: one packet a second is nothing the classifier reads as
@@ -113,6 +119,10 @@ var beaconFrame = []byte{ //nolint:gochecknoglobals // one constant frame, embed
 	0x75, 0x54, 0x9a, 0xee, 0x21, 0xbc, 0x00, 0xfe, 0xff, 0xab, 0x50, 0x80,
 }
 
+// beaconSilence is one Opus frame of silence, the three bytes a muted mic
+// encodes: DTX at its quietest.
+var beaconSilence = []byte{0xF8, 0xFF, 0xFE}
+
 // startBeacon publishes the beacon track and writes the frame on its cadence
 // until the session ends. Called before the publisher peer connection exists:
 // the track is stored with the session's video tracks and attached when that
@@ -127,12 +137,34 @@ func (s *Session) startBeacon() {
 		logger.Debugf("goolom: beacon: track: %v", err)
 		return
 	}
-	track := &boundBeacon{TrackLocalStaticSample: *base}
+	track := &boundBeacon{TrackLocalStaticSample: base}
 	if err := s.AddVideoTrack(track); err != nil {
 		logger.Debugf("goolom: beacon: add track: %v", err)
 		return
 	}
 	frames := beaconFrames()
+	if audio, err := webrtc.NewTrackLocalStaticSample(
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus}, "olcrtc-beacon-audio", "olcrtc-beacon",
+	); err == nil {
+		if err := s.AddVideoTrack(audio); err != nil {
+			logger.Debugf("goolom: beacon: add audio track: %v", err)
+		} else {
+			s.beaconWg.Add(1)
+			go func() {
+				defer s.beaconWg.Done()
+				ticker := time.NewTicker(beaconAudioEvery)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-s.closeCh:
+						return
+					case <-ticker.C:
+						_ = audio.WriteSample(media.Sample{Data: beaconSilence, Duration: beaconAudioEvery})
+					}
+				}
+			}()
+		}
+	}
 	s.beaconWg.Add(1)
 	go func() {
 		defer s.beaconWg.Done()

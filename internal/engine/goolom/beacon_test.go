@@ -31,20 +31,22 @@ func newBeaconSession(t *testing.T, beacon bool) *Session {
 	return s.(*Session)
 }
 
-// A session asked for a beacon carries exactly one video track - the beacon's
-// - stored before the publisher connection exists, so it is attached when
-// that connection is negotiated. A session not asked carries none.
+// A session asked for a beacon carries exactly the beacon's two tracks -
+// its video and its silent audio - stored before the publisher connection
+// exists, so they are attached when that connection is negotiated. A session
+// not asked carries none.
 func TestTheBeaconRidesOnlyWhenAsked(t *testing.T) {
 	on := newBeaconSession(t, true)
 	tracks := 0
 	on.RangeVideoTracks(func(_ webrtc.TrackLocal, _ bool) { tracks++ })
-	if tracks != 1 {
-		t.Fatalf("a beacon session holds %d video tracks, want the one beacon", tracks)
+	if tracks != 2 {
+		t.Fatalf("a beacon session holds %d tracks, want the beacon's video and audio", tracks)
 	}
 	off := newBeaconSession(t, false)
-	off.RangeVideoTracks(func(_ webrtc.TrackLocal, _ bool) { tracks++ })
-	if n := tracks - 1; n != 0 {
-		t.Fatalf("a session without the beacon holds %d video tracks, want none", n)
+	offTracks := 0
+	off.RangeVideoTracks(func(_ webrtc.TrackLocal, _ bool) { offTracks++ })
+	if offTracks != 0 {
+		t.Fatalf("a session without the beacon holds %d tracks, want none", offTracks)
 	}
 }
 

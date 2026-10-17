@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 
 	"github.com/openlibrecommunity/olcrtc/internal/engine"
@@ -129,6 +130,7 @@ type Session struct {
 	// beaconWg waits for the beacon's writer (beacon.go) on the way out, so
 	// a closed session leaves it no goroutine behind.
 	beaconWg       sync.WaitGroup
+	beaconKeyframe chan struct{}
 	keepAliveCh    chan struct{}
 	telemetryCh    chan struct{}
 	sessionCloseCh chan struct{}
@@ -333,6 +335,7 @@ func New(_ context.Context, cfg engine.Config) (engine.Session, error) {
 		},
 	}
 	if cfg.Beacon {
+		s.beaconKeyframe = make(chan struct{}, 1)
 		s.startBeacon()
 	}
 	s.Configure(engine.ReconnectorConfig{
@@ -442,12 +445,67 @@ func (s *Session) attachPendingVideoTracks(pub *webrtc.PeerConnection) error {
 	return attachErr
 }
 
+// askBeaconForKeyframe wakes the beacon's writer to send a keyframe now
+// (a PLI or FIR from the SFU). Non-blocking: a piled request is one request.
+func (s *Session) askBeaconForKeyframe() {
+	if s.beaconKeyframe == nil {
+		return
+	}
+	select {
+	case s.beaconKeyframe <- struct{}{}:
+	default:
+	}
+}
+
 // drainPublisherRTCP reads (and discards) RTCP feedback the SFU sends for our
 // published track. The read is required so the interceptor chain keeps
 // processing incoming RTCP; without an active reader it stalls.
+//
+// The read also names what the SFU says to the publisher (the beacon's live
+// matrix, #58: a browser answers this traffic and our writer did not): PLI
+// and FIR want a keyframe at once, REMB and TWCC set the pace, and a burst
+// of any of them just before a cut is the answer to what the platform could
+// not get from us.
 func (s *Session) drainPublisherRTCP(sender *webrtc.RTPSender) {
 	if sender == nil {
 		return
 	}
-	go engine.DrainRTCP(sender)
+	go func() {
+		buf := make([]byte, 1500)
+		counts := map[string]int{}
+		next := 1
+		for {
+			n, _, err := sender.Read(buf)
+			if err != nil {
+				return
+			}
+			pkts, err := rtcp.Unmarshal(buf[:n])
+			if err != nil {
+				continue
+			}
+			for _, p := range pkts {
+				switch fb := p.(type) {
+				case *rtcp.PictureLossIndication:
+					counts["pli"]++
+					s.askBeaconForKeyframe()
+				case *rtcp.FullIntraRequest:
+					counts["fir"]++
+					s.askBeaconForKeyframe()
+				case *rtcp.ReceiverEstimatedMaximumBitrate:
+					counts["remb"]++
+					logger.Debugf("goolom: publisher RTCP: REMB %.0f bit/s", fb.Bitrate)
+				case *rtcp.TransportLayerCC:
+					counts["twcc"]++
+				case *rtcp.ReceiverReport:
+					counts["rr"]++
+				default:
+					counts[fmt.Sprintf("%T", p)]++
+				}
+			}
+			if total := counts["pli"] + counts["fir"] + counts["remb"] + counts["twcc"] + counts["rr"]; total >= next {
+				logger.Infof("goolom: publisher RTCP so far: %v", counts)
+				next = total + 10
+			}
+		}
+	}()
 }
