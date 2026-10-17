@@ -18,6 +18,9 @@ package goolom
 // as before. Nothing about the data track itself changes.
 
 import (
+	"bytes"
+	"embed"
+	"encoding/binary"
 	"time"
 
 	"github.com/pion/webrtc/v4"
@@ -25,6 +28,60 @@ import (
 
 	"github.com/openlibrecommunity/olcrtc/internal/logger"
 )
+
+// beaconClip is the beacon's payload: ten seconds of a slowly moving
+// gradient under light sensor noise, 64x36, encoded once with libvpx - a
+// frame every thirtieth of a second, a keyframe each second, 300 distinct
+// frames looping. A still keyframe repeated did not open the relay's room
+// gate and the platform cut the frozen stream's subscriber in ~15 s
+// (measured 2026-10-17); what held the gate open in the same room was a
+// browser camera - near-static, but never the same frame twice. The clip is
+// the honest copy of that: ~390 kbit/s, every frame its own bytes, the
+// ten-second loop longer than the window anything was cut in.
+//
+//go:embed beacon_frames.bin
+var beaconClip embed.FS
+
+// beaconFrames unpacks the clip: [len u32][frame]... A decode of it that
+// comes out wrong is a build error, not a runtime one.
+func beaconFrames() [][]byte {
+	raw, err := beaconClip.ReadFile("beacon_frames.bin")
+	if err != nil || len(raw) < 4 {
+		panic("goolom: beacon clip unreadable") //nolint:forbidigo // a broken build artifact
+	}
+	var frames [][]byte
+	for len(raw) >= 4 {
+		n := binary.BigEndian.Uint32(raw)
+		raw = raw[4:]
+		if uint64(n) > uint64(len(raw)) {
+			panic("goolom: beacon clip truncated")
+		}
+		frames = append(frames, raw[:n:n])
+		raw = raw[n:]
+	}
+	if len(frames) == 0 {
+		panic("goolom: beacon clip empty")
+	}
+	return frames
+}
+
+// boundBeacon is the beacon's sample track that says when the SFU subscribes
+// to it: Bind is pion's word for a receiver taking the track, and whether the
+// platform forwards a participant's second track at all is the question the
+// live tuning turns on (#58).
+type boundBeacon struct {
+	webrtc.TrackLocalStaticSample
+}
+
+func (b *boundBeacon) Bind(t webrtc.TrackLocalContext) (webrtc.RTPCodecParameters, error) {
+	logger.Infof("goolom: beacon: the SFU subscribed to it")
+	return b.TrackLocalStaticSample.Bind(t)
+}
+
+func (b *boundBeacon) Unbind(t webrtc.TrackLocalContext) error {
+	logger.Infof("goolom: beacon: the SFU dropped its subscription")
+	return b.TrackLocalStaticSample.Unbind(t)
+}
 
 const (
 	// beaconEvery is the beacon's cadence: thirty keyframes a second, the
@@ -63,32 +120,35 @@ var beaconFrame = []byte{ //nolint:gochecknoglobals // one constant frame, embed
 // before a binding are pion's to drop: the samples that matter are the ones
 // after the SFU subscribes.
 func (s *Session) startBeacon() {
-	track, err := webrtc.NewTrackLocalStaticSample(
+	base, err := webrtc.NewTrackLocalStaticSample(
 		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8}, beaconTrackID, beaconStreamID,
 	)
 	if err != nil {
 		logger.Debugf("goolom: beacon: track: %v", err)
 		return
 	}
+	track := &boundBeacon{TrackLocalStaticSample: *base}
 	if err := s.AddVideoTrack(track); err != nil {
 		logger.Debugf("goolom: beacon: add track: %v", err)
 		return
 	}
+	frames := beaconFrames()
 	s.beaconWg.Add(1)
 	go func() {
 		defer s.beaconWg.Done()
 		ticker := time.NewTicker(beaconEvery)
 		defer ticker.Stop()
-		for {
+		for i := 0; ; i = (i + 1) % len(frames) {
 			select {
 			case <-s.closeCh:
 				return
 			case <-ticker.C:
-				// A lost write (no binding yet) is no loss: the next
-				// second brings the same frame.
-				_ = track.WriteSample(media.Sample{Data: beaconFrame, Duration: beaconEvery})
+				// A lost write (no binding yet) is no loss: the loop goes
+				// on and the next frame is its own.
+				frame := frames[i]
+				_ = track.WriteSample(media.Sample{Data: bytes.Clone(frame), Duration: beaconEvery})
 			}
 		}
 	}()
-	logger.Infof("goolom: beacon on: a real 160x90 keyframe 30 times a second, the room's data track rides beside it")
+	logger.Infof("goolom: beacon on: %d frames of a ten-second clip, thirty a second, the room's data track rides beside it", len(frames))
 }
