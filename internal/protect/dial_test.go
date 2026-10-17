@@ -7,6 +7,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // staticLookup answers every host with fixed addresses.
@@ -78,5 +79,23 @@ func TestProtectorRefusalIsNamed(t *testing.T) {
 	_, err := NewDialer().DialContext(context.Background(), "tcp4", "127.0.0.1:1")
 	if !errors.Is(err, ErrProtectorRejected) {
 		t.Fatalf("error = %v, want ErrProtectorRejected", err)
+	}
+}
+
+// The first address never answers (TEST-NET-1 is not routed), the second
+// does: the dial must land on the second within a few staggers, not after
+// the first one's whole dial timeout (whitelists answer only some addresses).
+func TestDialAddrsDoesNotWaitOutASilentAddress(t *testing.T) {
+	port, stop := listenLoopback(t, "tcp4", "127.0.0.1")
+	defer stop()
+	d := NewDialer(staticLookup{v4: []net.IP{net.ParseIP("192.0.2.1"), net.ParseIP("127.0.0.1")}})
+	start := time.Now()
+	conn, err := d.DialContext(context.Background(), "tcp4", "carrier.test:"+port)
+	if err != nil {
+		t.Fatalf("DialContext = %v, want the second address to connect", err)
+	}
+	_ = conn.Close()
+	if took := time.Since(start); took > 3*time.Second {
+		t.Fatalf("dial took %v, want the silent first address raced, not waited out", took)
 	}
 }
