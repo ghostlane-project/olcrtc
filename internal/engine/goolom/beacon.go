@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"embed"
 	"encoding/binary"
+	"math/rand"
 	"time"
 
 	"github.com/pion/webrtc/v4"
@@ -168,19 +169,39 @@ func (s *Session) startBeacon() {
 	s.beaconWg.Add(1)
 	go func() {
 		defer s.beaconWg.Done()
-		ticker := time.NewTicker(beaconEvery)
-		defer ticker.Stop()
+		// A camera's cadence, not a ticker's: the interval jitters by a
+		// quarter of itself either way and a frame is dropped now and
+		// then. Perfectly even 33.333 ms is a machine signature no
+		// capture pipeline produces, and the honest differences between
+		// this beacon and the browser camera that held the data tracks
+		// open are nearly used up (#58).
+		rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+		next := time.Now()
 		for i := 0; ; i = (i + 1) % len(frames) {
+			wait := beaconEvery + time.Duration(rng.Int63n(int64(beaconEvery/2))-int64(beaconEvery/4))
+			if rng.Intn(97) == 0 {
+				wait += beaconEvery
+			}
+			timer := time.NewTimer(time.Until(next.Add(wait)))
+			next = next.Add(wait)
 			select {
 			case <-s.closeCh:
+				timer.Stop()
 				return
-			case <-ticker.C:
+			case <-s.beaconKeyframe:
+				timer.Stop()
+				// The SFU asked (PLI/FIR): a keyframe at once, the way a
+				// browser answers, and the loop restarts from it.
+				i = 0
+				next = time.Now()
+				_ = track.WriteSample(media.Sample{Data: bytes.Clone(frames[0]), Duration: beaconEvery})
+			case <-timer.C:
 				// A lost write (no binding yet) is no loss: the loop goes
 				// on and the next frame is its own.
 				frame := frames[i]
-				_ = track.WriteSample(media.Sample{Data: bytes.Clone(frame), Duration: beaconEvery})
+				_ = track.WriteSample(media.Sample{Data: bytes.Clone(frame), Duration: wait})
 			}
 		}
 	}()
-	logger.Infof("goolom: beacon on: %d frames of a ten-second clip, thirty a second, the room's data track rides beside it", len(frames))
+	logger.Infof("goolom: beacon on: %d frames of camera-like cadence, the room's data track rides beside it", len(frames))
 }

@@ -126,6 +126,8 @@ func (s *Session) handleSdpOffer(offer map[string]any, uid string, sendPub bool)
 	sdp, _ := offer["sdp"].(string)
 	pcSeq, _ := offer["pcSeq"].(float64)
 
+	logger.Infof("goolom: subscriber offer from the SFU:\n%s", sdp)
+
 	if err := sub.SetRemoteDescription(webrtc.SessionDescription{
 		Type: webrtc.SDPTypeOffer,
 		SDP:  sdp,
@@ -137,6 +139,7 @@ func (s *Session) handleSdpOffer(offer map[string]any, uid string, sendPub bool)
 	if err != nil {
 		return fmt.Errorf("create answer: %w", err)
 	}
+	logger.Infof("goolom: our subscriber answer:\n%s", answer.SDP)
 
 	if setErr := sub.SetLocalDescription(answer); setErr != nil {
 		return fmt.Errorf("set local desc: %w", setErr)
@@ -208,6 +211,7 @@ func (s *Session) handleSdpAnswer(answer map[string]any, uid string) {
 		return
 	}
 	sdp, _ := answer["sdp"].(string)
+	logger.Infof("goolom: publisher answer from the SFU:\n%s", sdp)
 	if err := pub.SetRemoteDescription(webrtc.SessionDescription{
 		Type: webrtc.SDPTypeAnswer,
 		SDP:  sdp,
