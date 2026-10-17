@@ -144,6 +144,7 @@ type Config struct {
 	SOCKSPass             string
 	DNSServer             string
 	DTLSProfile           string
+	Beacon                bool
 	Resolver              protect.Lookup
 	SOCKSProxyAddr        string
 	SOCKSProxyPort        int

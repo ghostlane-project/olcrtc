@@ -284,6 +284,7 @@ func (s *Session) Close() error {
 	}
 
 	s.closeOnce.Do(func() { close(s.closeCh) })
+	s.beaconWg.Wait()
 	s.stopSession()
 
 	s.closeDataChannel()

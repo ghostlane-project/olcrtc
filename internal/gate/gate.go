@@ -43,6 +43,10 @@ type Endpoint struct {
 	// DTLSProfile is the DTLS ClientHello profile both ends handshake with
 	// (dtls.profile), empty for the stock handshake. Not a secret.
 	DTLSProfile string
+	// Beacon turns the real-video beacon on for this endpoint's server: the
+	// Telemost relay forwards a room's tracks only while it holds genuinely
+	// decodable video (olcrtc#58), so every telemost server carries one.
+	Beacon bool
 	// ServerLog is the raw log of the server behind this endpoint, for a
 	// target that runs one; empty for the link target, whose server is a
 	// fleet node. A failed cell is read for what the relay did to it (see

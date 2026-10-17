@@ -42,15 +42,17 @@ var ErrAuthFailed = errors.New("auth provider rejected the request")
 // Config holds the inputs to [Open]. The fields mirror the subset of
 // transport.Config that engines consume.
 type Config struct {
-	RoomURL             string
-	Name                string
-	OnData              func([]byte)
-	OnPeerData          func(peerID string, data []byte)
-	OnDatagram          func([]byte)
-	OnPeerDatagram      func(peerID string, data []byte)
-	DNSServer           string
-	Resolver            protect.Lookup
-	DTLSProfile         engine.DTLSProfile
+	RoomURL        string
+	Name           string
+	OnData         func([]byte)
+	OnPeerData     func(peerID string, data []byte)
+	OnDatagram     func([]byte)
+	OnPeerDatagram func(peerID string, data []byte)
+	DNSServer      string
+	Resolver       protect.Lookup
+	DTLSProfile    engine.DTLSProfile
+	// Beacon keeps a small real-video stream in the room (see engine.Config).
+	Beacon              bool
 	ProxyAddr           string
 	ProxyPort           int
 	RequireTargetedPeer bool
@@ -155,6 +157,7 @@ func register(name string, provider auth.Provider) {
 			ProxyAddr:           cfg.ProxyAddr,
 			ProxyPort:           cfg.ProxyPort,
 			RequireTargetedPeer: cfg.RequireTargetedPeer,
+			Beacon:              cfg.Beacon,
 			Refresh:             refresh,
 		})
 		if err != nil {

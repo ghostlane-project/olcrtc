@@ -89,7 +89,8 @@ func runServer(
 		Transport: cfg.Transport, Provider: cfg.Provider, RoomURL: roomURL, ChannelID: cfg.ChannelID,
 		KeyHex: cfg.KeyHex, Keys: cfg.KeysHex, StatsListen: cfg.StatsListen,
 		UDPDisabled: cfg.UDPDisabled, UDPMaxFlows: cfg.UDPMaxFlows,
-		DNSServer: cfg.DNSServer, DTLSProfile: engine.DTLSProfile(cfg.DTLSProfile), Resolver: cfg.Resolver,
+		DNSServer: cfg.DNSServer, DTLSProfile: engine.DTLSProfile(cfg.DTLSProfile), Beacon: cfg.Beacon,
+		Resolver:       cfg.Resolver,
 		SOCKSProxyAddr: cfg.SOCKSProxyAddr, SOCKSProxyPort: cfg.SOCKSProxyPort,
 		SOCKSProxyUser: cfg.SOCKSProxyUser, SOCKSProxyPass: cfg.SOCKSProxyPass,
 		TransportOptions: opts, Engine: cfg.Engine, URL: cfg.URL, Token: cfg.Token,
@@ -133,7 +134,7 @@ func runClient(
 	err = client.Run(ctx, client.Config{
 		Transport: cfg.Transport, Provider: cfg.Provider, RoomURL: roomURL, ChannelID: cfg.ChannelID,
 		KeyHex: cfg.KeyHex, LocalAddr: fmt.Sprintf("%s:%d", cfg.SOCKSHost, cfg.SOCKSPort),
-		DNSServer: cfg.DNSServer, DTLSProfile: engine.DTLSProfile(cfg.DTLSProfile),
+		DNSServer: cfg.DNSServer, DTLSProfile: engine.DTLSProfile(cfg.DTLSProfile), Beacon: cfg.Beacon,
 		Resolver: cfg.Resolver, SOCKSUser: cfg.SOCKSUser,
 		SOCKSPass: cfg.SOCKSPass, TransportOptions: opts, Engine: cfg.Engine,
 		URL: cfg.URL, Token: cfg.Token, ProviderToken: cfg.ProviderToken,

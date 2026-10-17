@@ -449,6 +449,9 @@ func RenderServerConfig(ep Endpoint, token string) string {
 	if ep.DTLSProfile != "" {
 		lines = append(lines, "dtls: { profile: "+strconv.Quote(ep.DTLSProfile)+" }")
 	}
+	if ep.Beacon {
+		lines = append(lines, "beacon: true")
+	}
 	return strings.Join(append(lines, "debug: true"), "\n") + "\n"
 }
 

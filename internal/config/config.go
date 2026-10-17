@@ -54,6 +54,11 @@ type Settings struct {
 	UDP       UDP       `yaml:"udp"`
 	Route     Route     `yaml:"route"`
 	DTLS      DTLS      `yaml:"dtls"`
+	// Beacon keeps a small real-video stream in the room beside the data
+	// track: a relay may forward the room only while it holds real video
+	// (the Telemost cut, #58). Off by default; a server of a carrier that
+	// needs it turns it on.
+	Beacon bool `yaml:"beacon"`
 }
 
 // DTLS selects the ClientHello profile of the engine handshake. An empty or
@@ -435,6 +440,9 @@ func ApplySettings(dst session.Config, s Settings) session.Config {
 	dst.Transport = overlay(dst.Transport, s.Net.Transport)
 	dst.DNSServer = overlay(dst.DNSServer, s.Net.DNS)
 	dst.DTLSProfile = overlay(dst.DTLSProfile, s.DTLS.Profile)
+	if s.Beacon {
+		dst.Beacon = true
+	}
 
 	dst.Provider = overlay(dst.Provider, s.Auth.Provider)
 	dst.ProviderToken = overlay(dst.ProviderToken, s.Auth.Token)

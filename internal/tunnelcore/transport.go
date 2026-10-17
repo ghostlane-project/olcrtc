@@ -18,6 +18,7 @@ type LinkConfig struct {
 	ChannelID     string
 	DNSServer     string
 	DTLSProfile   engine.DTLSProfile
+	Beacon        bool
 	Options       transport.Options
 	Traffic       transport.TrafficConfig
 }
@@ -53,6 +54,7 @@ func BuildTransportConfig(base LinkConfig, role LinkRoleConfig) transport.Config
 		OnPeerDatagram:      role.OnPeerDatagram,
 		DNSServer:           base.DNSServer,
 		DTLSProfile:         base.DTLSProfile,
+		Beacon:              base.Beacon,
 		Resolver:            Resolver(role.Resolver, base.DNSServer),
 		ProxyAddr:           role.ProxyAddr,
 		ProxyPort:           role.ProxyPort,

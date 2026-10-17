@@ -233,6 +233,7 @@ type Config struct {
 	LocalAddr        string
 	DNSServer        string
 	DTLSProfile      engine.DTLSProfile
+	Beacon           bool
 	Resolver         protect.Lookup
 	SOCKSUser        string
 	SOCKSPass        string

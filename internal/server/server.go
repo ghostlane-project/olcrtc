@@ -150,6 +150,7 @@ type Config struct {
 	UnsafeAllowPrivateTargets bool
 	DNSServer                 string
 	DTLSProfile               engine.DTLSProfile
+	Beacon                    bool
 	Resolver                  protect.Lookup
 	SOCKSProxyAddr            string
 	SOCKSProxyPort            int

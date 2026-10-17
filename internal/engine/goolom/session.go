@@ -124,8 +124,11 @@ type Session struct {
 
 	onData func([]byte)
 
-	closeCh        chan struct{}
-	closeOnce      sync.Once
+	closeCh   chan struct{}
+	closeOnce sync.Once
+	// beaconWg waits for the beacon's writer (beacon.go) on the way out, so
+	// a closed session leaves it no goroutine behind.
+	beaconWg       sync.WaitGroup
 	keepAliveCh    chan struct{}
 	telemetryCh    chan struct{}
 	sessionCloseCh chan struct{}
@@ -328,6 +331,9 @@ func New(_ context.Context, cfg engine.Config) (engine.Session, error) {
 			MinDelay:       defaultSendDelayLow,
 			MaxDelay:       defaultSendDelayMax,
 		},
+	}
+	if cfg.Beacon {
+		s.startBeacon()
 	}
 	s.Configure(engine.ReconnectorConfig{
 		MaxAttempts: 10,

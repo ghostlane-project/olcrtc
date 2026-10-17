@@ -59,8 +59,13 @@ type Config struct {
 	// DTLSProfile selects a fixed ClientHello profile for this session;
 	// empty keeps the stock Pion handshake. Validated before dialing.
 	DTLSProfile DTLSProfile
-	ProxyAddr   string
-	ProxyPort   int
+	// Beacon asks an engine that understands it to keep a small, genuinely
+	// decodable video stream in the room beside whatever else it publishes:
+	// a relay may forward a room's tracks only while it holds real video
+	// (the Telemost cut, #58). Engines without the notion ignore it.
+	Beacon    bool
+	ProxyAddr string
+	ProxyPort int
 	// RequireTargetedPeer asks engines that multiplex room-wide messages to
 	// ignore single-peer broadcast frames until the remote has addressed this
 	// session's local epoch.

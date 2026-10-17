@@ -246,6 +246,10 @@ type Config struct {
 	ProxyAddr      string
 	ProxyPort      int
 	DTLSProfile    engine.DTLSProfile
+	// Beacon keeps a small real-video stream in the room beside the data
+	// track (engine.Config.Beacon): a relay may forward the room only while
+	// it holds real video.
+	Beacon bool
 
 	// RequireTargetedPeer makes single-peer engines ignore broadcast frames
 	// from unrelated olcrtc clients until a peer sends a frame addressed to
@@ -278,6 +282,7 @@ func (c Config) EngineConfig() enginebuiltin.Config {
 		ProxyAddr:           c.ProxyAddr,
 		ProxyPort:           c.ProxyPort,
 		RequireTargetedPeer: c.RequireTargetedPeer,
+		Beacon:              c.Beacon,
 		Engine:              c.Engine,
 		URL:                 c.URL,
 		Token:               c.Token,
