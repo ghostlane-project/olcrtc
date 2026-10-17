@@ -27,27 +27,30 @@ func (a *absSendTimeInterceptor) NewInterceptor(string) (interceptor.Interceptor
 
 // BindLocalStream wraps the writer of every outgoing stream: each packet is
 // stamped before it goes out.
-func (a *absSendTimeInterceptor) BindLocalStream(info *interceptor.StreamInfo, writer interceptor.RTPWriter) interceptor.RTPWriter {
-	id := uint8(0)
+func (a *absSendTimeInterceptor) BindLocalStream(info *interceptor.StreamInfo,
+	writer interceptor.RTPWriter,
+) interceptor.RTPWriter {
+	id := 0
 	for _, ext := range info.RTPHeaderExtensions {
 		if strings.EqualFold(ext.URI, absSendTimeURI) {
-			id = uint8(ext.ID)
+			id = ext.ID
 			break
 		}
 	}
 	if id == 0 {
 		return writer
 	}
-	return interceptor.RTPWriterFunc(func(header *rtp.Header, payload []byte, attributes interceptor.Attributes) (int, error) {
-		header.SetExtension(id, absSendTimeNow())
+	return interceptor.RTPWriterFunc(func(header *rtp.Header, payload []byte,
+		attributes interceptor.Attributes) (int, error) {
+		_ = header.SetExtension(uint8(id), absSendTimeNow()) //nolint:gosec // an SDP extension id, one byte by definition
 		return writer.Write(header, payload, attributes)
 	})
 }
 
-// absSendTimeNow is the extension's 3-byte value: NTP time mod 64 s as a
-// 6.18 fixed-point, the formula every WebRTC stack shares.
+// absSendTimeNow is the extension's 3-byte value: NTP time mod 64 s as
+// a 6.18 fixed-point, the formula every WebRTC stack shares.
 func absSendTimeNow() []byte {
 	ms := time.Now().UnixNano() / int64(time.Millisecond)
 	v := uint32(float64(ms&0xFFFF) / 65536.0 * float64(1<<24))
-	return []byte{byte(v >> 16), byte(v >> 8), byte(v)}
+	return []byte{byte(v >> 16), byte(v >> 8), byte(v)} //nolint:gosec // the extension's own 24-bit field
 }

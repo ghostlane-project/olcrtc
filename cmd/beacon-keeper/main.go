@@ -29,17 +29,20 @@ func main() {
 		logger.Errorf("usage: beacon-keeper <room-url>")
 		os.Exit(2)
 	}
+	os.Exit(keeper(os.Args[1]))
+}
 
+// keeper is main's body: a plain function, so its deferred signal-stop always
+// runs before main's os.Exit takes the process down.
+func keeper(roomURL string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	run := func() int {
-
-		creds, err := authTelemost.Provider{}.Issue(ctx, auth.Config{RoomURL: os.Args[1], DNSServer: "8.8.8.8:53"})
+		creds, err := authTelemost.Provider{}.Issue(ctx, auth.Config{RoomURL: roomURL, DNSServer: "8.8.8.8:53"})
 		if err != nil {
 			logger.Errorf("keeper: auth: %v", err)
 			return 1
 		}
-
 		sess, err := engineGoolom.New(ctx, engine.Config{
 			URL:    creds.URL,
 			Token:  creds.Token,
@@ -56,10 +59,9 @@ func main() {
 			return 1
 		}
 		logger.Infof("keeper: in the room, beacon on")
-
 		<-ctx.Done()
 		_ = sess.Close()
 		return 0
 	}
-	os.Exit(run())
+	return run()
 }

@@ -19,6 +19,7 @@ package goolom
 
 import (
 	"bytes"
+	crand "crypto/rand"
 	"embed"
 	"encoding/binary"
 	"math/rand"
@@ -48,7 +49,7 @@ var beaconClip embed.FS
 func beaconFrames() [][]byte {
 	raw, err := beaconClip.ReadFile("beacon_frames.bin")
 	if err != nil || len(raw) < 4 {
-		panic("goolom: beacon clip unreadable") //nolint:forbidigo // a broken build artifact
+		panic("goolom: beacon clip unreadable")
 	}
 	var frames [][]byte
 	for len(raw) >= 4 {
@@ -76,12 +77,12 @@ type boundBeacon struct {
 
 func (b *boundBeacon) Bind(t webrtc.TrackLocalContext) (webrtc.RTPCodecParameters, error) {
 	logger.Infof("goolom: beacon: the SFU subscribed to it")
-	return b.TrackLocalStaticSample.Bind(t)
+	return b.TrackLocalStaticSample.Bind(t) //nolint:wrapcheck // pion binding forwarded
 }
 
 func (b *boundBeacon) Unbind(t webrtc.TrackLocalContext) error {
 	logger.Infof("goolom: beacon: the SFU dropped its subscription")
-	return b.TrackLocalStaticSample.Unbind(t)
+	return b.TrackLocalStaticSample.Unbind(t) //nolint:wrapcheck // pion unbind forwarded
 }
 
 const (
@@ -104,25 +105,17 @@ const (
 	beaconStreamID = "olcrtc-beacon"
 )
 
-// beaconFrame is one 160x90 solid-black VP8 keyframe, 57 bytes:
-//
-//	50 05 00        the uncompressed header: a keyframe, shown
-//	9d 01 2a        VP8's start code
-//	a0 00 5a 00     160 by 90
-//
-// Encoded once with libvpx (ffmpeg -f lavfi -i color=black:s=160x90 -frames:v
-// 1 -c:v libvpx) and embedded: no encoder ships with the engine, and a still
-// frame never needs another one.
-var beaconFrame = []byte{ //nolint:gochecknoglobals // one constant frame, embedded once
-	0x50, 0x05, 0x00, 0x9d, 0x01, 0x2a, 0xa0, 0x00, 0x5a, 0x00, 0x00, 0x47, 0x08, 0x85, 0x85,
-	0x88, 0x85, 0x84, 0x88, 0x02, 0x02, 0x00, 0x06, 0x28, 0x0f, 0x08, 0x75, 0x54, 0x9a, 0xee,
-	0x21, 0xd5, 0x52, 0x6b, 0xb8, 0x87, 0x55, 0x49, 0xae, 0xe2, 0x1d, 0x55, 0x26, 0xbb, 0x88,
-	0x75, 0x54, 0x9a, 0xee, 0x21, 0xbc, 0x00, 0xfe, 0xff, 0xab, 0x50, 0x80,
-}
-
 // beaconSilence is one Opus frame of silence, the three bytes a muted mic
 // encodes: DTX at its quietest.
 var beaconSilence = []byte{0xF8, 0xFF, 0xFE} //nolint:gochecknoglobals // three constant bytes
+
+// mustSeed is the jitter generator's seed: any entropy does, this is not a
+// secret, but gosec wants the strong source named.
+func mustSeed() []byte {
+	b := make([]byte, 8)
+	_, _ = crand.Read(b)
+	return b
+}
 
 // startBeacon publishes the beacon track and writes the frame on its cadence
 // until the session ends. Called before the publisher peer connection exists:
@@ -175,7 +168,7 @@ func (s *Session) startBeacon() {
 		// capture pipeline produces, and the honest differences between
 		// this beacon and the browser camera that held the data tracks
 		// open are nearly used up (#58).
-		rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+		rng := rand.New(rand.NewSource(int64(binary.BigEndian.Uint64(mustSeed())))) //nolint:gosec // jitter, not secrets
 		next := time.Now()
 		for i := 0; ; i = (i + 1) % len(frames) {
 			wait := beaconEvery + time.Duration(rng.Int63n(int64(beaconEvery/2))-int64(beaconEvery/4))

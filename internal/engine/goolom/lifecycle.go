@@ -121,7 +121,8 @@ func (s *Session) waitForMediaReady(ctx context.Context, timeout time.Duration) 
 func wsBrowserHeaders() http.Header {
 	h := http.Header{}
 	h.Set("Origin", "https://telemost.yandex.ru")
-	h.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.5 Safari/605.1.15")
+	h.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "+
+		"(KHTML, like Gecko) Version/26.5 Safari/605.1.15")
 	return h
 }
 
