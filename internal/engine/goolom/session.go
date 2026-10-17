@@ -55,6 +55,7 @@ const (
 	credentialKeyCredentials      = "credentials"
 	credentialKeyRoomURL          = "roomURL"
 	credentialKeyTelemetryReferer = "telemetryReferer"
+	credentialKeyWebSession       = "webSession"
 )
 
 var (
@@ -100,11 +101,14 @@ type Session struct {
 	engine.Reconnector
 	engine.VideoTrackState
 
-	name             string
-	mediaServerURL   string
-	peerID           string
-	roomID           string
-	credentials      string
+	name           string
+	mediaServerURL string
+	peerID         string
+	roomID         string
+	credentials    string
+	// webSession is the web client's cookie header for the signaling
+	// WebSocket: the media platform reads the upgrade by it (#58).
+	webSession       string
 	roomURL          string // referer for telemetry - opaque to the engine
 	telemetryReferer string
 	refresh          func(ctx context.Context) (engine.Credentials, error)
@@ -296,11 +300,13 @@ func New(_ context.Context, cfg engine.Config) (engine.Session, error) {
 	credentials := ""
 	roomURL := ""
 	telemetryReferer := ""
+	webSession := ""
 	if cfg.Extra != nil {
 		roomID = cfg.Extra[credentialKeyRoomID]
 		credentials = cfg.Extra[credentialKeyCredentials]
 		roomURL = cfg.Extra[credentialKeyRoomURL]
 		telemetryReferer = cfg.Extra[credentialKeyTelemetryReferer]
+		webSession = cfg.Extra[credentialKeyWebSession]
 	}
 	if roomID == "" {
 		return nil, ErrRoomIDRequired
@@ -315,6 +321,7 @@ func New(_ context.Context, cfg engine.Config) (engine.Session, error) {
 		peerID:           peerID,
 		roomID:           roomID,
 		credentials:      credentials,
+		webSession:       webSession,
 		roomURL:          roomURL,
 		telemetryReferer: telemetryReferer,
 		refresh:          cfg.Refresh,

@@ -3,6 +3,7 @@ package goolom
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"sync"
 	"time"
 
@@ -111,9 +112,26 @@ func (s *Session) waitForMediaReady(ctx context.Context, timeout time.Duration) 
 	return nil
 }
 
+// wsBrowserHeaders is what the service's own web client carries on the same
+// WebSocket upgrade (its Origin, a browser user agent), which the media
+// platform reads off the signaling connection before any media flows: a
+// headerless upgrade is how every non-browser join has looked to it since it
+// began sorting connections (olcrtc#58) - all of a machine's tracks then run
+// under the service's throttle, decodable or not.
+func wsBrowserHeaders() http.Header {
+	h := http.Header{}
+	h.Set("Origin", "https://telemost.yandex.ru")
+	h.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.5 Safari/605.1.15")
+	return h
+}
+
 func (s *Session) dialWebSocket() error {
 	wsDialer := protect.NewWebSocketDialer(wsHandshakeTimeout, s.resolver)
-	ws, resp, err := wsDialer.Dial(s.signalingURL(), nil)
+	headers := wsBrowserHeaders()
+	if s.webSession != "" {
+		headers.Set("Cookie", s.webSession)
+	}
+	ws, resp, err := wsDialer.Dial(s.signalingURL(), headers)
 	if err != nil {
 		return fmt.Errorf("dial ws: %w", err)
 	}
