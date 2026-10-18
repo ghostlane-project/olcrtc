@@ -86,6 +86,7 @@ func loadPair(t Target, p Pair, client string) bool {
 	return slices.Contains([]Pair{
 		{providerJitsi, transportData}, {providerTelemost, transportVP8}, {providerWBStream, transportVP8},
 		{providerSaluteJazz, transportData}, {providerVKCalls, transportVP8}, {providerMTSLink, transportVP8},
+		{providerMAX, transportData},
 	}, p)
 }
 
