@@ -347,7 +347,15 @@ func (s *Session) readLoop(sig *signaling, pc *webrtc.PeerConnection, dc *webrtc
 			if err := jsonUnmarshal(msg.Data, &payload); err != nil {
 				continue
 			}
-			peer := s.peer.Load()
+			// A relayed frame names its sender, and that is who it is from:
+			// the SFU can deliver the peer's offer and candidates before the
+			// response to our own accept-call, the one frame that lists the
+			// room (measured 2026-10-18), so an answer addressed from that
+			// list went nowhere and the candidates were dropped.
+			from := s.peer.Load()
+			if resp != nil && resp.ParticipantID != 0 {
+				from = resp.ParticipantID
+			}
 			switch {
 			case resp != nil && len(resp.Description) > 100:
 				// the SFU's consumer answer (ice-lite) or its producer offer
@@ -387,9 +395,12 @@ func (s *Session) readLoop(sig *signaling, pc *webrtc.PeerConnection, dc *webrtc
 				if payload.SDP.Type == "answer" {
 					s.handleAnswer(pc, payload.SDP.SDP)
 				} else if payload.SDP.Type == "offer" {
-					s.handleIncomingOffer(pc, sig, peer, payload.SDP.SDP)
+					if from != 0 {
+						s.peer.Store(from)
+					}
+					s.handleIncomingOffer(pc, sig, from, payload.SDP.SDP)
 				}
-			case payload.Candidate != nil && peer != 0:
+			case payload.Candidate != nil && from != 0:
 				init := webrtc.ICECandidateInit{Candidate: payload.Candidate.Candidate}
 				if payload.Candidate.SDPMid != nil {
 					init.SDPMid = payload.Candidate.SDPMid
@@ -451,8 +462,14 @@ func (s *Session) handleAnswer(pc *webrtc.PeerConnection, sdp string) {
 	logger.Infof("max: answer applied (%d bytes)", len(sdp))
 }
 
-// handleIncomingOffer answers a peer that offered first.
+// handleIncomingOffer answers a peer that offered first. An offer with no
+// sender to answer is left alone: applied, it would hold the PC in
+// have-remote-offer with nobody to finish it.
 func (s *Session) handleIncomingOffer(pc *webrtc.PeerConnection, sig *signaling, peer int64, sdp string) {
+	if peer == 0 {
+		logger.Debugf("max: an offer that names no sender, dropped")
+		return
+	}
 	if err := pc.SetRemoteDescription(webrtc.SessionDescription{
 		Type: webrtc.SDPTypeOffer, SDP: sdp,
 	}); err != nil {
@@ -469,12 +486,11 @@ func (s *Session) handleIncomingOffer(pc *webrtc.PeerConnection, sig *signaling,
 		return
 	}
 	stripped := stripCandidates(answer.SDP)
-	if peer != 0 {
-		if err := sig.sendSDPExchange(peer, "answer", stripped); err != nil {
-			logger.Debugf("max: answer relay: %v", err)
-		}
+	if err := sig.sendSDPExchange(peer, "answer", stripped); err != nil {
+		logger.Debugf("max: answer relay: %v", err)
+		return
 	}
-	logger.Infof("max: answered incoming offer (%d bytes)", len(stripped))
+	logger.Infof("max: answered the offer of %d (%d bytes SDP)", peer, len(stripped))
 }
 
 // Send writes to the datachannel, holding at the SCTP watermark so the
