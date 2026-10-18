@@ -47,9 +47,9 @@ func (d *Transport) NewClientConn(qconn *quic.Conn) (*ClientConn, error) {
 	if d.Config != nil {
 		config = *d.Config
 	}
-	additionalSettings := map[uint64]uint64{settingsWebTransportEnabled: 1, 0x2f60b3: 1} // olcrtc: RFC 9417 SETTINGS_WEBTRANSPORT_MAX_SESSIONS, the dialect the okcdn SFU speaks
+	additionalSettings := map[uint64]uint64{} // olcrtc: stripped to bisect which setting the SFU rejects
 	config.addSettings(additionalSettings)
-	tr := &http3.Transport{EnableDatagrams: true, AdditionalSettings: additionalSettings}
+	tr := &http3.Transport{EnableDatagrams: false, AdditionalSettings: additionalSettings}
 
 	timeout := d.StreamReorderingTimeout
 	if timeout == 0 {

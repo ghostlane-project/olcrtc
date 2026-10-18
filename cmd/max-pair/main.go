@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -61,7 +62,7 @@ const (
 func main() {
 	hold := flag.Duration("hold", 45*time.Second, "media measurement window")
 	linkFile := flag.String("link-file", "/tmp/max-multi-link.txt", "join link file")
-	tokenFile := flag.String("calls-token-file", "/root/max-calls-token.txt", "calls auth token file")
+	sessionKeyFile := flag.String("session-key-file", "/root/max-session-key.txt", "live calls session key file")
 	flag.Parse()
 
 	linkBytes, err := os.ReadFile(*linkFile)
@@ -72,28 +73,20 @@ func main() {
 	if i := strings.LastIndex(joinHash, "/joincall/"); i >= 0 {
 		joinHash = joinHash[i+len("/joincall/"):]
 	}
-	tokenBytes, err := os.ReadFile(*tokenFile)
+	skBytes, err := os.ReadFile(*sessionKeyFile)
 	if err != nil {
-		fatal("calls token: %v (start the host so the SDK mints one)", err)
+		fatal("session key file: %v", err)
 	}
-	callsToken := strings.TrimSpace(string(tokenBytes))
-	fmt.Printf("room=%s callsToken=%dB\n", joinHash, len(callsToken))
+	sess := &anonymSession{SessionKey: strings.TrimSpace(string(skBytes))}
+	fmt.Printf("room=%s sessionKey=%dB\n", joinHash, len(sess.SessionKey))
 
-	sides := make([]*side, 2)
-	var wg sync.WaitGroup
-	for i := range sides {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			s, err := newSide(idx, callsToken, joinHash)
-			if err != nil {
-				fatal("side %d: %v", idx, err)
-			}
-			sides[idx] = s
-		}(i)
+	sides := make([]*side, 1)
+	s, err := newSide(0, sess, joinHash)
+	if err != nil {
+		fatal("side 0: %v", err)
 	}
-	wg.Wait()
-	fmt.Printf("side0 peer=%d  side1 peer=%d\n", sides[0].peerID, sides[1].peerID)
+	sides[0] = s
+	fmt.Printf("side0 peer=%d\n", s.peerID)
 
 	// wire the SDP exchange: each side forwards its offers/answers to the peer
 	sdpCh := make(chan sdpMsg, 8)
@@ -101,51 +94,83 @@ func main() {
 		go s.readLoop(sdpCh)
 	}
 
-	// side 0 offers, side 1 answers
-	offer, err := sides[0].pc.CreateOffer(nil)
-	if err != nil {
-		fatal("offer: %v", err)
+	// single side: negotiate with the SFU over WT
+	// SFU negotiation: allocate the consumer (caps only), then answer the
+	// producer-updated offer the server pushes.
+	sides[0].seq++
+	if err := sides[0].send(map[string]any{
+		"command":      "allocate-consumer",
+		"sequence":     sides[0].seq,
+		"capabilities": pairCapabilities(),
+	}); err != nil {
+		fatal("allocate-consumer: %v", err)
 	}
-	if err := sides[0].pc.SetLocalDescription(offer); err != nil {
-		fatal("local0: %v", err)
-	}
-	fmt.Printf("side0 offer created (%dB SDP)\n", len(offer.SDP))
-	sides[0].sendSDP(offer.SDP, "offer")
+	fmt.Println("allocate-consumer (caps) sent; waiting for producer-updated")
 
-	deadline := time.Now().Add(20 * time.Second)
-	var answer webrtc.SessionDescription
-	gotAnswer := false
-	for !gotAnswer && time.Now().Before(deadline) {
+	deadline := time.Now().Add(45 * time.Second)
+	negotiated := false
+	for !negotiated && time.Now().Before(deadline) {
 		select {
 		case m := <-sdpCh:
-			fmt.Printf("[%d] signal: type=%s len=%d from=%d\n", m.side, m.typ, len(m.sdp), m.from)
+			fmt.Printf("[signal] type=%s len=%d session=%s\n", m.typ, len(m.sdp), m.sessionId)
 			switch {
-			case m.typ == "offer" && m.side == 1:
-				if err := sides[1].pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: m.sdp}); err != nil {
-					fmt.Printf("side1 remote: %v\n", err)
+			case m.typ == "offer":
+				if err := sides[0].pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: m.sdp}); err != nil {
+					fmt.Printf("remote offer: %v\n", err)
 					continue
 				}
-				ans, err := sides[1].pc.CreateAnswer(nil)
+				ans, err := sides[0].pc.CreateAnswer(nil)
 				if err != nil {
-					fmt.Printf("side1 answer: %v\n", err)
+					fmt.Printf("answer: %v\n", err)
 					continue
 				}
-				if err := sides[1].pc.SetLocalDescription(ans); err != nil {
-					fmt.Printf("side1 local: %v\n", err)
+				if err := sides[0].pc.SetLocalDescription(ans); err != nil {
+					fmt.Printf("local answer: %v\n", err)
 					continue
 				}
-				sides[1].sendSDP(ans.SDP, "answer")
-				fmt.Println("side1 answered")
-			case m.typ == "answer" && m.side == 0:
-				answer = webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: m.sdp}
-				_ = sides[0].pc.SetRemoteDescription(answer)
-				gotAnswer = true
+				trimmed := []string{}
+				ssrc := ""
+				for _, ln := range strings.Split(ans.SDP, "\r\n") {
+					if strings.HasPrefix(ln, "a=candidate:") {
+						continue
+					}
+					if strings.HasPrefix(ln, "a=ssrc:") {
+						f := strings.SplitN(strings.TrimPrefix(ln, "a=ssrc:"), " ", 2)
+						ssrc = f[0]
+					}
+					trimmed = append(trimmed, ln)
+				}
+				payload := map[string]any{
+					"command":     "accept-producer",
+					"sequence":    sides[0].seq + 1,
+					"description": strings.Join(trimmed, "\r\n"),
+				}
+				if m.sessionId != "" {
+					payload["sessionId"] = m.sessionId
+				}
+				if ssrc != "" {
+					payload["ssrcs"] = []string{ssrc}
+				}
+				sides[0].seq++
+				if err := sides[0].send(payload); err != nil {
+					fmt.Printf("accept-producer send: %v\n", err)
+				} else {
+					fmt.Printf("accept-producer sent (session=%s ssrc=%s)\n", m.sessionId, ssrc)
+					negotiated = true
+				}
+			case m.typ == "answer":
+				if err := sides[0].pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: m.sdp}); err != nil {
+					fmt.Printf("remote answer: %v\n", err)
+					continue
+				}
+				fmt.Println("SFU consumer answer applied")
+				negotiated = true
 			}
 		case <-time.After(time.Second):
 		}
 	}
-	if !gotAnswer {
-		fmt.Println("NO ANSWER relayed through SFU in 20s")
+	if !negotiated {
+		fmt.Println("NO SDP from the SFU in 45s")
 	}
 
 	// wait for ICE + measure
@@ -159,28 +184,40 @@ func main() {
 func waitConnected(sides []*side, window time.Duration) {
 	deadline := time.Now().Add(window)
 	for time.Now().Before(deadline) {
-		if sides[0].state.Load() && sides[1].state.Load() {
-			fmt.Println("BOTH PEERS CONNECTED")
+		all := true
+		for _, s := range sides {
+			if !s.state.Load() {
+				all = false
+			}
+		}
+		if all {
+			fmt.Println("PEER(S) CONNECTED")
 			return
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	fmt.Printf("peers not fully connected: side0=%v side1=%v\n", sides[0].state.Load(), sides[1].state.Load())
+	for i, s := range sides {
+		fmt.Printf("side%d connected=%v\n", i, s.state.Load())
+	}
 }
 
 func measure(sides []*side, window time.Duration) {
 	fmt.Printf("measuring %s...\n", window)
 	start := time.Now().Add(3 * time.Second) // let ICE settle
 	time.Sleep(3 * time.Second)
-	b0 := sides[0].bytesReceived()
-	b1 := sides[1].bytesReceived()
+	before := make([]int64, len(sides))
+	for i, s := range sides {
+		before[i] = s.bytesReceived()
+	}
 	time.Sleep(window - 3*time.Second)
 	d := time.Since(start)
-	r0 := sides[0].bytesReceived() - b0
-	r1 := sides[1].bytesReceived() - b1
-	fmt.Printf("received: side0 %d B (%.1f kbit/s), side1 %d B (%.1f kbit/s) over %s\n",
-		r0, float64(r0)*8/d.Seconds()/1000, r1, float64(r1)*8/d.Seconds()/1000, d.Truncate(time.Second))
-	if r0+r1 > 100_000 {
+	var total int64
+	for i, s := range sides {
+		r := s.bytesReceived() - before[i]
+		total += r
+		fmt.Printf("side%d received %d B (%.1f kbit/s)\n", i, r, float64(r)*8/d.Seconds()/1000)
+	}
+	if total > 100_000 {
 		fmt.Println("MEDIA FLOW: PASS")
 	} else {
 		fmt.Println("MEDIA FLOW: FAIL/THROTTLED")
@@ -188,10 +225,11 @@ func measure(sides []*side, window time.Duration) {
 }
 
 type sdpMsg struct {
-	side int
-	from int64
-	typ  string
-	sdp  string
+	side      int
+	from      int64
+	typ       string
+	sdp       string
+	sessionId string
 }
 
 type side struct {
@@ -224,20 +262,34 @@ type atomicInt64 struct{ v int64 }
 func (i *atomicInt64) Add(n int64) { i.v += n }
 func (i *atomicInt64) load() int64 { return i.v }
 
-func newSide(idx int, callsToken, joinHash string) (*side, error) {
+func newSide(idx int, sessIn *anonymSession, joinHash string) (*side, error) {
 	s := &side{idx: idx}
 	var err error
-	s.sess, err = anonymLogin(callsToken, fmt.Sprintf("olcrtc-pair-%d", idx))
-	if err != nil {
-		return nil, fmt.Errorf("anonymLogin: %w", err)
-	}
+	s.sess = sessIn
 	s.params, err = joinByLink(s.sess, joinHash)
 	if err != nil {
 		return nil, fmt.Errorf("join: %w", err)
 	}
 	s.peerID = s.params.PeerID
+	if s.peerID == 0 && s.params.Endpoint != "" {
+		if i := strings.Index(s.params.Endpoint, "peerId="); i >= 0 {
+			v := s.params.Endpoint[i+len("peerId="):]
+			if j := strings.IndexAny(v, "&?#"); j >= 0 {
+				v = v[:j]
+			}
+			s.peerID, _ = strconv.ParseInt(v, 10, 64)
+		}
+	}
 
-	s.pc, err = webrtc.NewPeerConnection(webrtc.Configuration{
+	me := &webrtc.MediaEngine{}
+	if err := me.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8, ClockRate: 90000},
+		PayloadType:        96,
+	}, webrtc.RTPCodecTypeVideo); err != nil {
+		return nil, fmt.Errorf("codec: %w", err)
+	}
+	api := webrtc.NewAPI(webrtc.WithMediaEngine(me))
+	s.pc, err = api.NewPeerConnection(webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{{
 			URLs:       s.params.TURN.URLs,
 			Username:   s.params.TURN.Username,
@@ -284,7 +336,11 @@ func newSide(idx int, callsToken, joinHash string) (*side, error) {
 	q.Set("compression", "deflate-raw")
 	q.Set("ua", ua)
 	q.Set("peerId", fmt.Sprint(s.peerID))
-	wtURL := s.params.WTEndpoint + "?" + q.Encode()
+	sep := "?"
+	if strings.Contains(s.params.WTEndpoint, "?") {
+		sep = "&"
+	}
+	wtURL := s.params.WTEndpoint + sep + q.Encode()
 	fmt.Printf("[side%d] WT %s\n", idx, wtURL)
 	d := &webtransport.Transport{TLSClientConfig: okcdnTrust()}
 	_, sess, err := d.Dial(context.Background(), wtURL, nil)
@@ -297,10 +353,8 @@ func newSide(idx int, callsToken, joinHash string) (*side, error) {
 		return nil, fmt.Errorf("wt stream: %w", err)
 	}
 	s.seq++
-	_ = s.send(map[string]any{"command": "accept-call", "sequence": s.seq})
-	s.seq++
 	_ = s.send(map[string]any{
-		"command":  "change-media-settings",
+		"command":  "accept-call",
 		"sequence": s.seq,
 		"mediaSettings": map[string]bool{
 			"isAudioEnabled": false, "isVideoEnabled": true,
@@ -384,6 +438,22 @@ func (s *side) readLoop(out chan<- sdpMsg) {
 						d = d[:300] + "..."
 					}
 					fmt.Printf("[side%d] < %s\n", s.idx, d)
+					continue
+				}
+				if d, ok := m["description"].(string); ok && len(d) > 100 {
+					notif, _ := m["notification"].(string)
+					sess := ""
+					if v, ok := m["sessionId"].(string); ok {
+						sess = v
+					} else if v, ok := m["sessionId"].(float64); ok {
+						sess = fmt.Sprint(int64(v))
+					}
+					typ := "offer"
+					if notif == "consumer-answered" {
+						typ = "answer"
+					}
+					fmt.Printf("[side%d] notification=%q sessionId=%q description=%dB\n", s.idx, notif, sess, len(d))
+					out <- sdpMsg{side: s.idx, typ: typ, sdp: d, sessionId: sess}
 					continue
 				}
 				if cmd, _ := m["command"].(string); cmd == "transmit-data" || m["data"] != nil {
@@ -556,4 +626,17 @@ func inflateRaw(b []byte) ([]byte, error) {
 func fatal(f string, args ...any) {
 	fmt.Fprintf(os.Stderr, "FATAL: "+f+"\n", args...)
 	os.Exit(1)
+}
+
+func pairCapabilities() map[string]any {
+	return map[string]any{
+		"estimatedPerformanceIndex": 1000, "audioMix": true, "consumerUpdate": true,
+		"producerNotificationDataChannelVersion": 8, "producerCommandDataChannelVersion": 3,
+		"consumerScreenDataChannelVersion": 1, "producerScreenDataChannelVersion": 1,
+		"asrDataChannelVersion": 0, "animojiDataChannelVersion": 1, "animojiBackendRender": true,
+		"onDemandTracks": true, "unifiedPlan": true, "singleSession": true, "videoTracksCount": 1,
+		"red": true, "audioShare": false, "fastScreenShare": false, "videoSuspend": true,
+		"simulcast": false, "simulcastNativeOrder": true, "consumerFastScreenShare": false,
+		"consumerFastScreenShareQualityOnDemand": false, "transparentAudio": false,
+	}
 }

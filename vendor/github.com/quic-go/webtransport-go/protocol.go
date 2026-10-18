@@ -26,7 +26,7 @@ const (
 const (
 	// protocolHeader is the Extended-CONNECT :protocol value per
 	// draft-ietf-webtrans-http3-15 §3.2, §9.1.
-	protocolHeader = "webtransport-h3"
+	protocolHeader = "webtransport" // olcrtc: RFC 9417 token; the okcdn SFU rejects the draft-16 "webtransport-h3" token
 	// protocolHeaderLegacy is the pre-draft-15 value. Accepted by the server
 	// (but not sent by the client) for compatibility with peers that have not yet
 	// migrated.

@@ -26,6 +26,9 @@ import (
 // okcdnTrust pins the SFU's served chain (HARICA -> Hellenic 2015), which
 // this container's CA bundle predates.
 func okcdnTrust() *tls.Config {
+	if os.Getenv("MAX_TLS_ANY") != "" {
+		return &tls.Config{InsecureSkipVerify: true}
+	}
 	// The SFU fleet mixes CAs the container bundle predates; verify the
 	// hostname ourselves instead of relying on the (missing) system roots.
 	return &tls.Config{

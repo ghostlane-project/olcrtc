@@ -209,6 +209,7 @@ func parseSettingsFrame(r *countingByteReader, l uint64, streamID quic.StreamID,
 		if err != nil { // should not happen. We allocated the whole frame already.
 			return nil, err
 		}
+		fmt.Printf("[olcrtc-settings] id=%#x val=%d\n", id, val)
 
 		switch id {
 		case settingMaxFieldSectionSize:
