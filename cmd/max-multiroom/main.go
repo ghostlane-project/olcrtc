@@ -47,7 +47,20 @@ func main() {
 	flag.Parse()
 
 	var joinHash, webToken string
-	if *mode == "params" {
+	if *mode == "joinsk" {
+		if *sessionKey == "" {
+			fatal("joinsk mode needs -session-key (a live calls session key)")
+		}
+		linkBytes, err := os.ReadFile(*linkFile)
+		if err != nil {
+			fatal("link file: %v", err)
+		}
+		joinHash = strings.TrimSpace(string(linkBytes))
+		if i := strings.LastIndex(joinHash, "/joincall/"); i >= 0 {
+			joinHash = joinHash[i+len("/joincall/"):]
+		}
+		joinHash = strings.TrimRight(joinHash, "/?# \n")
+	} else if *mode == "params" {
 		if *sessionKey == "" || *conversationID == "" {
 			fatal("params mode needs -session-key and -conversation-id")
 		}
@@ -91,6 +104,13 @@ func main() {
 				p, err := getConversationParams(*sessionKey, *conversationID)
 				if err != nil {
 					r.Err = "getConversationParams: " + err.Error()
+					return
+				}
+				params = p
+			} else if *mode == "joinsk" {
+				p, err := joinByLink(&anonymSession{SessionKey: *sessionKey}, joinHash)
+				if err != nil {
+					r.Err = "joinByLink: " + err.Error()
 					return
 				}
 				params = p
