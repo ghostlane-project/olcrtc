@@ -95,6 +95,50 @@ func main() {
 	}
 
 	// single side: negotiate with the SFU over WT
+	if os.Getenv("MAX_P2P") != "" {
+		// P2P room: exchange SDP with the other participant through the
+		// transmit-data relay and measure the direct/TURN media flow.
+		other := int64(0)
+		for i := 0; i < 12 && other == 0; i++ {
+			time.Sleep(2 * time.Second)
+			other = sides[0].other.Load()
+		}
+		if other == 0 {
+			fmt.Println("no other participant seen")
+		} else {
+			fmt.Printf("other participant: %d - sending P2P offer\n", other)
+			trimmed := []string{}
+			for _, ln := range strings.Split(offer.SDP, "\r\n") {
+				if strings.HasPrefix(ln, "a=candidate:") {
+					continue
+				}
+				trimmed = append(trimmed, ln)
+			}
+			sides[0].seq++
+			if err := sides[0].send(map[string]any{
+				"command":       "transmit-data",
+				"sequence":      sides[0].seq,
+				"participantId": other,
+				"data": map[string]any{
+					"sdp":            map[string]string{"type": "offer", "sdp": strings.Join(trimmed, "\r\n")},
+					"animojiVersion": 1,
+				},
+			}); err != nil {
+				fmt.Printf("p2p offer send: %v\n", err)
+			} else {
+				fmt.Println("P2P offer relayed")
+			}
+			sides[0].seq++
+			_ = sides[0].send(map[string]any{
+				"command":       "transmit-data",
+				"sequence":      sides[0].seq,
+				"participantId": other,
+				"data":          map[string]any{"candidate": map[string]any{"candidate": ""}},
+			})
+		}
+		// the negotiation loop below applies any answer that arrives
+	}
+
 	// SFU negotiation: allocate the consumer (caps only), then answer the
 	// producer-updated offer the server pushes.
 	sides[0].seq++
@@ -269,6 +313,11 @@ type side struct {
 	state   atomicBool
 	recvN   atomicInt64
 }
+
+type atomicI64 struct{ v int64 }
+
+func (a *atomicI64) Store(x int64) { a.v = x }
+func (a *atomicI64) Load() int64   { return a.v }
 
 type atomicBool struct{ v int32 }
 
@@ -457,6 +506,11 @@ func (s *side) readLoop(out chan<- sdpMsg) {
 				}
 				var m map[string]any
 				if json.Unmarshal(plain, &m) == nil {
+					if ids, ok := m["participantIds"].([]any); ok && len(ids) > 0 {
+						if f, ok := ids[0].(float64); ok {
+							s.other.Store(int64(f))
+						}
+					}
 					if conv, ok := m["conversation"].(map[string]any); ok {
 						if topo, ok := conv["topology"].(string); ok {
 							fmt.Printf("[side%d] room topology: %s\n", s.idx, topo)

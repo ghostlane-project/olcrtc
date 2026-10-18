@@ -293,6 +293,8 @@ func holdOne(r *joinResult, params *convParams, conversationID string, hold time
 			if ids, ok := hm["participantIds"].([]any); ok && len(ids) > 0 && r.OtherParticipant == 0 {
 				r.OtherParticipant = int64(ids[0].(float64))
 				fmt.Printf("[%d] other participant: %d\n", r.Idx, r.OtherParticipant)
+			}
+			if resp, ok := hm["response"].(string); ok && resp == "accept-call" {
 				if os.Getenv("MAX_MEDIA") != "" && mediaOnce.TryClaim() {
 					runMedia(r, conn, params, &seq)
 				}
@@ -539,6 +541,7 @@ func runMedia(r *joinResult, conn *websocket.Conn, params *convParams, seq *int)
 		kept = append(kept, ln)
 	}
 	sdpFull := strings.Join(kept, "\r\n")
+	_ = os.WriteFile("/tmp/max-my-offer.sdp", []byte(sdpFull), 0o644)
 
 	*seq++
 	if err := conn.WriteJSON(map[string]any{
