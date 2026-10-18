@@ -80,33 +80,21 @@ func (s *signaling) sendJSON(v any) error {
 	return s.conn.WriteJSON(v)
 }
 
-// sendBinary writes one binary TRANSMIT_DATA message.
-func (s *signaling) sendBinary(participantID int, sdp, sdpType string) error {
-	td := transmitData{}
-	td.Name = "transmit-data"
-	td.Params.ParticipantID = participantID
-	td.Params.Data.SDP = sdp
-	td.Params.Data.Type = sdpType
-
-	payload, err := msgpack.Marshal(td)
-	if err != nil {
-		return fmt.Errorf("pack: %w", err)
+// sendSDP writes one transmit-data command carrying an SDP offer or answer,
+// the JSON shape the calls SDK serializes: {command, sequence, ...params}.
+func (s *signaling) sendSDP(sequence int, participantID int, sdp, sdpType string) error {
+	msg := map[string]any{
+		"command":  "transmit-data",
+		"sequence": sequence,
 	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.seq++
-	msg := make([]byte, headerSize+len(payload))
-	msg[0] = protoVersion
-	msg[1] = cmdSignaling
-	binary.BigEndian.PutUint16(msg[2:4], uint16(s.seq))
-	binary.BigEndian.PutUint16(msg[4:6], opTransmitData)
-	msg[6] = 0 // chunks
-	msg[7] = byte(len(payload) >> 16)
-	msg[8] = byte(len(payload) >> 8)
-	msg[9] = byte(len(payload))
-	copy(msg[headerSize:], payload)
-	return s.conn.WriteMessage(websocket.BinaryMessage, msg)
+	if participantID != 0 {
+		msg["participantId"] = participantID
+	}
+	msg["data"] = map[string]string{
+		"sdp":  sdp,
+		"type": sdpType,
+	}
+	return s.sendJSON(msg)
 }
 
 // sendPong answers the SFU's raw-text keepalive.

@@ -246,7 +246,7 @@ func (s *Session) handleOffer(sdp string) {
 	// Send the answer back on the signaling as binary TRANSMIT_DATA.
 	sig := s.sig.Load()
 	if sig != nil {
-		_ = sig.sendBinary(0, answer.SDP, "answer")
+		_ = sig.sendSDP(3, 0, answer.SDP, "answer")
 	}
 }
 
