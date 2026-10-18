@@ -8,12 +8,6 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// parseNotification decodes the connection assignment from the first
-// signaling frame.
-func parseNotification(msg *sigMessage, out *connectionNotification) error {
-	return json.Unmarshal(msg.Data, out)
-}
-
 // jsonUnmarshal is a tiny alias to keep readLoop tidy.
 func jsonUnmarshal(data []byte, v any) error { return json.Unmarshal(data, v) }
 
@@ -35,6 +29,32 @@ func shortConv(id string) string {
 		return id[:8]
 	}
 	return id
+}
+
+// maxCapabilities is the ok-calls capability set the SFU validates
+// (schema-extracted and server-confirmed during the 2026-10-18 spike).
+func maxCapabilities() map[string]any {
+	return map[string]any{
+		"estimatedPerformanceIndex": 1000, "audioMix": true, "consumerUpdate": true,
+		"producerNotificationDataChannelVersion": 8, "producerCommandDataChannelVersion": 3,
+		"consumerScreenDataChannelVersion": 1, "producerScreenDataChannelVersion": 1,
+		"asrDataChannelVersion": 0, "animojiDataChannelVersion": 1, "animojiBackendRender": true,
+		"onDemandTracks": true, "unifiedPlan": true, "singleSession": true, "videoTracksCount": 1,
+		"red": true, "audioShare": false, "fastScreenShare": false, "videoSuspend": true,
+		"simulcast": false, "simulcastNativeOrder": true, "consumerFastScreenShare": false,
+		"consumerFastScreenShareQualityOnDemand": false, "transparentAudio": false,
+	}
+}
+
+// clientQuery completes the endpoint's query with the web client's
+// parameters: the SFU answers a bare join endpoint with "Parameter
+// appVersion is required" (measured 2026-10-18).
+func clientQuery(endpoint string) string {
+	sep := "?"
+	if strings.Contains(endpoint, "?") {
+		sep = "&"
+	}
+	return endpoint + sep + "platform=web&appVersion=26.10.3&version=3&device=web&capabilities=webrtc&clientType=SDK_JS"
 }
 
 // stripCandidates removes ICE candidate lines from an SDP: candidates

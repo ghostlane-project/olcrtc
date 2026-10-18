@@ -52,6 +52,7 @@ type responseFrame struct {
 	Response       string  `json:"response"`
 	Sequence       int     `json:"sequence"`
 	ParticipantIDs []int64 `json:"participantIds"`
+	ParticipantID  int64   `json:"participantId"`
 	Error          string  `json:"error"`
 	Message        string  `json:"message"`
 	Notification   string  `json:"notification"`
@@ -154,6 +155,28 @@ func (s *signaling) recv() (*sigMessage, *responseFrame, error) {
 		return &m, &r, nil
 	}
 	return nil, nil, nil
+}
+
+// recvRaw reads the next message with its raw bytes: notifications are
+// whole-frame objects, not a nested data field.
+func (s *signaling) recvRaw() ([]byte, *sigMessage, *responseFrame, error) {
+	msgType, data, err := s.conn.ReadMessage()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if msgType != websocket.TextMessage {
+		return nil, nil, nil, nil
+	}
+	if string(data) == "ping" {
+		return data, &sigMessage{Type: "ping"}, nil, nil
+	}
+	var m sigMessage
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, nil, nil, fmt.Errorf("parse %dB frame: %w", len(data), err)
+	}
+	var r responseFrame
+	_ = json.Unmarshal(data, &r)
+	return data, &m, &r, nil
 }
 
 // close shuts the signaling socket.

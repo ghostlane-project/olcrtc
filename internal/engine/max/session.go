@@ -51,11 +51,12 @@ type Session struct {
 	endpoint string
 	turn     []webrtc.ICEServer
 
-	peer    atomic.Int64 // the other participant's uid, from accept-call
-	selfUID int64
-	pc      atomic.Pointer[webrtc.PeerConnection]
-	dc      atomic.Pointer[webrtc.DataChannel]
-	sig     atomic.Pointer[signaling]
+	peer     atomic.Int64 // the other participant's uid, from accept-call
+	selfUID  int64
+	topology string // DIRECT rides the participant relay, SERVER the SFU legs
+	pc       atomic.Pointer[webrtc.PeerConnection]
+	dc       atomic.Pointer[webrtc.DataChannel]
+	sig      atomic.Pointer[signaling]
 
 	onData  func([]byte)
 	closed  atomic.Bool
@@ -109,23 +110,35 @@ func (s *Session) Connect(ctx context.Context) error {
 	header := http.Header{}
 	header.Set("Origin", "https://web.max.ru")
 	header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15")
-	conn, _, err := dialer.Dial(s.endpoint, header)
+	conn, _, err := dialer.Dial(clientQuery(s.endpoint), header)
 	if err != nil {
 		return fmt.Errorf("max: signaling dial: %w", err)
 	}
 	sig := newSignaling(conn)
 	s.sig.Store(sig)
 
-	// First frame: the connection notification assigns our peerId.
-	msg, _, err := sig.recv()
-	if err != nil || msg == nil {
-		_ = conn.Close()
-		return fmt.Errorf("max: no connection notification: %v", err)
-	}
+	// First frame: the connection notification assigns our peerId (a raw
+	// ping before it is answered and skipped).
 	var notif connectionNotification
-	if err := parseNotification(msg, &notif); err != nil || notif.PeerID.ID == 0 {
-		_ = conn.Close()
-		return fmt.Errorf("max: unexpected first frame: %v", err)
+	for i := 0; i < 5; i++ {
+		raw, msg, _, rerr := sig.recvRaw()
+		if rerr != nil {
+			_ = conn.Close()
+			return fmt.Errorf("max: no connection notification: %v", rerr)
+		}
+		if msg != nil && msg.Type == "ping" {
+			_ = sig.sendPong()
+			continue
+		}
+		if err := jsonUnmarshal(raw, &notif); err != nil || notif.PeerID.ID == 0 {
+			_ = conn.Close()
+			clip := string(raw)
+			if len(clip) > 220 {
+				clip = clip[:220]
+			}
+			return fmt.Errorf("max: unexpected first frame (%d bytes): %v; frame: %s", len(raw), err, clip)
+		}
+		break
 	}
 	if len(s.turn) == 0 && len(notif.ConversationParams.TURN.URLs) > 0 {
 		s.turn = append(s.turn, webrtc.ICEServer{
@@ -134,8 +147,9 @@ func (s *Session) Connect(ctx context.Context) error {
 			Credential: notif.ConversationParams.TURN.Credential,
 		})
 	}
+	s.topology = notif.Conversation.Topology
 	logger.Infof("max: joined %s (topology %s) as peer %d",
-		shortConv(notif.Conversation.ID), notif.Conversation.Topology, notif.PeerID.ID)
+		shortConv(notif.Conversation.ID), s.topology, notif.PeerID.ID)
 
 	pc, dc, err := s.buildPeerConnection(sig)
 	if err != nil {
@@ -158,22 +172,71 @@ func (s *Session) Connect(ctx context.Context) error {
 		return fmt.Errorf("max: accept-call: %w", err)
 	}
 
+	if s.topology == "SERVER" {
+		go s.sfuLeg(sig, pc)
+	}
 	s.wg.Add(1)
 	go s.readLoop(sig, pc, dc)
 	logger.Infof("max: connected to %s", strings.SplitN(s.endpoint, "?", 2)[0])
 	return nil
 }
 
+// sfuLeg is the SERVER-topology negotiation: our consumer offer rides
+// allocate-consumer, the SFU answers with its description, and the
+// producer-updated offer it pushes is answered via accept-producer - the
+// measured dance of the fresh rooms (the participant relay is quiet there).
+func (s *Session) sfuLeg(sig *signaling, pc *webrtc.PeerConnection) {
+	time.Sleep(2 * time.Second) // let accept-call settle first
+	offer, err := pc.CreateOffer(nil)
+	if err != nil {
+		logger.Debugf("max: sfu offer: %v", err)
+		return
+	}
+	if err := pc.SetLocalDescription(offer); err != nil {
+		logger.Debugf("max: sfu local: %v", err)
+		return
+	}
+	stripped := stripCandidates(offer.SDP)
+	if len(stripped) > 3400 {
+		logger.Debugf("max: sfu offer %d bytes over the relay cap", len(stripped))
+		return
+	}
+	if err := sig.sendCommand("allocate-consumer", map[string]any{
+		"description":  stripped,
+		"capabilities": maxCapabilities(),
+	}); err != nil {
+		logger.Debugf("max: allocate-consumer: %v", err)
+		return
+	}
+	logger.Infof("max: sfu leg offered (%d bytes)", len(stripped))
+}
+
 // buildPeerConnection assembles the measured carrier shape: recvonly
 // audio and video plus the "datagram" channel, UDP and TCP ICE with a
 // local TCP mux, and the candidate trickle hooked to the relay.
 func (s *Session) buildPeerConnection(sig *signaling) (*webrtc.PeerConnection, *webrtc.DataChannel, error) {
+	me := &webrtc.MediaEngine{}
+	if err := me.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8, ClockRate: 90000},
+		PayloadType:        96,
+	}, webrtc.RTPCodecTypeVideo); err != nil {
+		return nil, nil, fmt.Errorf("max: video codec: %w", err)
+	}
+	if err := me.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2},
+		PayloadType:        111,
+	}, webrtc.RTPCodecTypeAudio); err != nil {
+		return nil, nil, fmt.Errorf("max: audio codec: %w", err)
+	}
+	// The minimal engine keeps the offer SDP under the relay's ~3.5KB cap:
+	// the default codec set bursts past it and the relay answers
+	// "Invalid message format" (measured 2026-10-18).
 	se := webrtc.SettingEngine{}
 	se.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4, webrtc.NetworkTypeTCP4})
 	if ln, err := net.Listen("tcp", "0.0.0.0:0"); err == nil {
 		se.SetICETCPMux(ice.NewTCPMuxDefault(ice.TCPMuxParams{Listener: ln, ReadBufferSize: 1500}))
 	}
-	api := webrtc.NewAPI(webrtc.WithSettingEngine(se))
+	api := webrtc.NewAPI(webrtc.WithMediaEngine(me), webrtc.WithSettingEngine(se))
 
 	pc, err := api.NewPeerConnection(webrtc.Configuration{ICEServers: s.turn})
 	if err != nil {
@@ -244,6 +307,19 @@ func (s *Session) readLoop(sig *signaling, pc *webrtc.PeerConnection, dc *webrtc
 				s.handlePeerSeen(pc, sig, resp.ParticipantIDs[0])
 			}
 
+		case resp != nil && resp.Notification == "participant-joined":
+			// The SFU pushes this once the peer's signaling is live; the
+			// accept-call list can name a uid whose socket is not up yet
+			// (the joiner registers before it dials), and an offer relayed
+			// that early is dropped - measured as a pair that never meets.
+			peer := resp.ParticipantID
+			if peer == 0 && len(resp.ParticipantIDs) > 0 {
+				peer = resp.ParticipantIDs[0]
+			}
+			if peer != 0 {
+				s.handlePeerSeen(pc, sig, peer)
+			}
+
 		case resp != nil && resp.Error != "":
 			logger.Debugf("max: server error: %s (%s)", resp.Error, resp.Message)
 
@@ -254,6 +330,40 @@ func (s *Session) readLoop(sig *signaling, pc *webrtc.PeerConnection, dc *webrtc
 			}
 			peer := s.peer.Load()
 			switch {
+			case resp != nil && len(resp.Description) > 100:
+				// the SFU's consumer answer (ice-lite) or its producer offer
+				if err := pc.SetRemoteDescription(webrtc.SessionDescription{
+					Type: webrtc.SDPTypeAnswer, SDP: resp.Description,
+				}); err != nil {
+					logger.Debugf("max: sfu remote: %v", err)
+				} else {
+					logger.Infof("max: sfu answer applied (%d bytes)", len(resp.Description))
+				}
+			case resp != nil && resp.Notification == "producer-updated" && resp.Description != "":
+				if err := pc.SetRemoteDescription(webrtc.SessionDescription{
+					Type: webrtc.SDPTypeOffer, SDP: resp.Description,
+				}); err != nil {
+					logger.Debugf("max: producer remote: %v", err)
+					continue
+				}
+				answer, err := pc.CreateAnswer(nil)
+				if err != nil {
+					logger.Debugf("max: producer answer: %v", err)
+					continue
+				}
+				if err := pc.SetLocalDescription(answer); err != nil {
+					logger.Debugf("max: producer local: %v", err)
+					continue
+				}
+				params := map[string]any{"description": stripCandidates(answer.SDP)}
+				if resp.ParticipantID != 0 {
+					params["sessionId"] = resp.ParticipantID
+				}
+				if err := sig.sendCommand("accept-producer", params); err != nil {
+					logger.Debugf("max: accept-producer: %v", err)
+				} else {
+					logger.Infof("max: producer answer sent")
+				}
 			case payload.SDP != nil:
 				if payload.SDP.Type == "answer" {
 					s.handleAnswer(pc, payload.SDP.SDP)
@@ -283,6 +393,9 @@ func (s *Session) handlePeerSeen(pc *webrtc.PeerConnection, sig *signaling, othe
 		return
 	}
 	logger.Infof("max: peer participant %d", other)
+	if s.topology == "SERVER" {
+		return // the SFU legs carry a SERVER room; the participant relay is quiet
+	}
 	if s.selfUID != 0 && s.selfUID > other {
 		return // the lower uid offers; we answer instead
 	}
@@ -296,6 +409,10 @@ func (s *Session) handlePeerSeen(pc *webrtc.PeerConnection, sig *signaling, othe
 		return
 	}
 	stripped := stripCandidates(offer.SDP)
+	if len(stripped) > 3400 {
+		logger.Debugf("max: offer SDP %d bytes is over the relay cap; refusing to send a frame the server drops", len(stripped))
+		return
+	}
 	if err := sig.sendSDPExchange(other, "offer", stripped); err != nil {
 		logger.Debugf("max: offer relay: %v", err)
 		return
