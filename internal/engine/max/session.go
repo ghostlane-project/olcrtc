@@ -1,25 +1,28 @@
 // Package max provides the engine for VK MAX calls (olcrtc carrier).
 //
-// The flow: the auth provider supplies a WebSocket endpoint (already
-// carrying auth, userId, and conversationId as query parameters) and TURN
-// credentials; the engine opens the binary signaling, creates a pion
-// PeerConnection with the SFU's TURN, and carries the tunnel as a VP8
-// video track - the same vp8channel shape the other carriers ride.
+// The measured carrier path: the join endpoint's WebSocket speaks the
+// ok-calls JSON protocol; after accept-call the session offers a recvonly
+// PC (two video transceivers, one audio, the "datagram" datachannel - a
+// shape the counterparty's SDK answers) to the other participant through
+// the transmit-data relay, applies its answer and the trickled ICE, and
+// the tunnel rides the datachannel. Candidates trickle one per relayed
+// frame (the ~3.5KB relay cap), the send side is gated on the SCTP buffer
+// (an ungated pump OOMs), and the PC carries UDP and TCP network types
+// with a local TCP mux for the server's passive ICE-TCP candidate.
 package max
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/pion/interceptor"
+	"github.com/pion/ice/v4"
 	"github.com/pion/webrtc/v4"
-	"github.com/pion/webrtc/v4/pkg/media"
 
 	"github.com/openlibrecommunity/olcrtc/internal/engine"
 	"github.com/openlibrecommunity/olcrtc/internal/logger"
@@ -32,23 +35,32 @@ var (
 	ErrNoEndpoint    = fmt.Errorf("max: no signaling endpoint")
 )
 
+// webrtcCandidate aliases the pion init struct so signaling.go needs no
+// webrtc import of its own.
+type webrtcCandidate = webrtc.ICECandidateInit
+
+// The SCTP buffer ceiling for the send side: an ungated writer drains RAM
+// into the SCTP queue (measured OOM at 9GB); hold at this watermark and
+// let the reader drain it.
+const sctpHighWater = 4 * 1024 * 1024
+
 // Session is one MAX call.
 type Session struct {
 	*engine.Reconnector
 
 	endpoint string
-	cookies  string
-	turn     webrtc.ICEServer
+	turn     []webrtc.ICEServer
 
-	pc    atomic.Pointer[webrtc.PeerConnection]
-	track atomic.Pointer[webrtc.TrackLocalStaticSample]
-	sig   atomic.Pointer[signaling]
+	peer    atomic.Int64 // the other participant's uid, from accept-call
+	selfUID int64
+	pc      atomic.Pointer[webrtc.PeerConnection]
+	dc      atomic.Pointer[webrtc.DataChannel]
+	sig     atomic.Pointer[signaling]
 
 	onData  func([]byte)
 	closed  atomic.Bool
 	closeCh chan struct{}
 	wg      sync.WaitGroup
-	mu      sync.Mutex
 }
 
 // New creates a MAX call session from the auth provider's credentials.
@@ -57,25 +69,23 @@ func New(_ context.Context, cfg engine.Config) (engine.Session, error) {
 	if endpoint == "" {
 		return nil, ErrNoEndpoint
 	}
-
-	// TURN from the credentials.
-	turnURLs := strings.Split(cfg.Extra["turnUrl"], ",")
-	var user, pass string
-	if len(turnURLs) > 0 && turnURLs[0] != "" {
-		user = cfg.Extra["turnUsername"]
-		pass = cfg.Extra["turnCredential"]
+	var servers []webrtc.ICEServer
+	if urls := strings.Split(cfg.Extra["turnUrl"], ","); len(urls) > 0 && urls[0] != "" {
+		servers = append(servers, webrtc.ICEServer{
+			URLs:       urls,
+			Username:   cfg.Extra["turnUsername"],
+			Credential: cfg.Extra["turnCredential"],
+		})
 	}
-	turn := webrtc.ICEServer{
-		URLs:       turnURLs,
-		Username:   user,
-		Credential: pass,
+	if stun := cfg.Extra["stunUrl"]; stun != "" {
+		servers = append(servers, webrtc.ICEServer{URLs: strings.Split(stun, ",")})
 	}
-
 	rec := &engine.Reconnector{}
 	s := &Session{
 		Reconnector: rec,
 		endpoint:    endpoint,
-		turn:        turn,
+		turn:        servers,
+		selfUID:     parseUID(cfg.Extra["userId"]),
 		onData:      cfg.OnData,
 		closeCh:     make(chan struct{}),
 	}
@@ -90,13 +100,11 @@ func New(_ context.Context, cfg engine.Config) (engine.Session, error) {
 	return s, nil
 }
 
-// Connect opens the signaling WebSocket and the peer connection.
+// Connect opens the signaling WebSocket and negotiates the P2P leg.
 func (s *Session) Connect(ctx context.Context) error {
 	if s.closed.Load() {
 		return ErrSessionClosed
 	}
-
-	// Open the signaling WebSocket with the web client's Origin.
 	dialer := protect.NewWebSocketDialer(15*time.Second, nil)
 	header := http.Header{}
 	header.Set("Origin", "https://web.max.ru")
@@ -108,155 +116,248 @@ func (s *Session) Connect(ctx context.Context) error {
 	sig := newSignaling(conn)
 	s.sig.Store(sig)
 
-	// Build the PeerConnection with TURN.
-	api, err := newAPI()
-	if err != nil {
+	// First frame: the connection notification assigns our peerId.
+	msg, _, err := sig.recv()
+	if err != nil || msg == nil {
 		_ = conn.Close()
-		return fmt.Errorf("max: api: %w", err)
+		return fmt.Errorf("max: no connection notification: %v", err)
 	}
-	cfg := webrtc.Configuration{ICEServers: []webrtc.ICEServer{s.turn}}
-	pc, err := api.NewPeerConnection(cfg)
-	if err != nil {
+	var notif connectionNotification
+	if err := parseNotification(msg, &notif); err != nil || notif.PeerID.ID == 0 {
 		_ = conn.Close()
-		return fmt.Errorf("max: peer connection: %w", err)
+		return fmt.Errorf("max: unexpected first frame: %v", err)
+	}
+	if len(s.turn) == 0 && len(notif.ConversationParams.TURN.URLs) > 0 {
+		s.turn = append(s.turn, webrtc.ICEServer{
+			URLs:       notif.ConversationParams.TURN.URLs,
+			Username:   notif.ConversationParams.TURN.Username,
+			Credential: notif.ConversationParams.TURN.Credential,
+		})
+	}
+	logger.Infof("max: joined %s (topology %s) as peer %d",
+		shortConv(notif.Conversation.ID), notif.Conversation.Topology, notif.PeerID.ID)
+
+	pc, dc, err := s.buildPeerConnection(sig)
+	if err != nil {
+		_ = pc.Close()
+		_ = conn.Close()
+		return err
 	}
 	s.pc.Store(pc)
+	s.dc.Store(dc)
 
-	// The tunnel track: VP8 video.
-	track, err := webrtc.NewTrackLocalStaticSample(
-		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8},
-		"olcrtc", "olcrtc",
-	)
+	if err := sig.sendCommand("accept-call", map[string]any{
+		"mediaSettings": map[string]bool{
+			"isAudioEnabled": false, "isVideoEnabled": true,
+			"isScreenSharingEnabled": false, "isFastScreenSharingEnabled": false,
+			"isAudioSharingEnabled": false, "isAnimojiEnabled": false,
+		},
+	}); err != nil {
+		_ = pc.Close()
+		_ = conn.Close()
+		return fmt.Errorf("max: accept-call: %w", err)
+	}
+
+	s.wg.Add(1)
+	go s.readLoop(sig, pc, dc)
+	logger.Infof("max: connected to %s", strings.SplitN(s.endpoint, "?", 2)[0])
+	return nil
+}
+
+// buildPeerConnection assembles the measured carrier shape: recvonly
+// audio and video plus the "datagram" channel, UDP and TCP ICE with a
+// local TCP mux, and the candidate trickle hooked to the relay.
+func (s *Session) buildPeerConnection(sig *signaling) (*webrtc.PeerConnection, *webrtc.DataChannel, error) {
+	se := webrtc.SettingEngine{}
+	se.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4, webrtc.NetworkTypeTCP4})
+	if ln, err := net.Listen("tcp", "0.0.0.0:0"); err == nil {
+		se.SetICETCPMux(ice.NewTCPMuxDefault(ice.TCPMuxParams{Listener: ln, ReadBufferSize: 1500}))
+	}
+	api := webrtc.NewAPI(webrtc.WithSettingEngine(se))
+
+	pc, err := api.NewPeerConnection(webrtc.Configuration{ICEServers: s.turn})
 	if err != nil {
-		_ = pc.Close()
-		_ = conn.Close()
-		return fmt.Errorf("max: track: %w", err)
+		return nil, nil, fmt.Errorf("max: peer connection: %w", err)
 	}
-	s.track.Store(track)
-	if _, err := pc.AddTrack(track); err != nil {
-		_ = pc.Close()
-		_ = conn.Close()
-		return fmt.Errorf("max: add track: %w", err)
+	for i := 0; i < 2; i++ {
+		if _, err := pc.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo,
+			webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly}); err != nil {
+			return nil, nil, fmt.Errorf("max: video transceiver: %w", err)
+		}
 	}
-
-	// Handle the SFU's media.
-	pc.OnTrack(func(remote *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
-		logger.Infof("max: remote track: %s %s", remote.Codec().MimeType, remote.ID())
-		s.wg.Add(1)
-		defer s.wg.Done()
-		buf := make([]byte, 1500)
-		for {
-			n, _, err := remote.Read(buf)
-			if err != nil {
-				return
-			}
-			if s.onData != nil {
-				data := make([]byte, n)
-				copy(data, buf[:n])
-				s.onData(data)
-			}
+	if _, err := pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio,
+		webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly}); err != nil {
+		return nil, nil, fmt.Errorf("max: audio transceiver: %w", err)
+	}
+	dc, err := pc.CreateDataChannel("datagram", nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("max: datachannel: %w", err)
+	}
+	dc.OnMessage(func(m webrtc.DataChannelMessage) {
+		if s.onData != nil {
+			s.onData(m.Data)
 		}
 	})
-
+	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
+		if c == nil {
+			return
+		}
+		peer := s.peer.Load()
+		if peer == 0 {
+			return
+		}
+		init := c.ToJSON()
+		_ = sig.sendCandidate(peer, init)
+	})
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		logger.Debugf("max: pc state: %s", state)
 		if state == webrtc.PeerConnectionStateFailed {
 			s.Reconnect("peer connection failed")
 		}
 	})
-
-	// Read signaling messages: JSON commands, binary SDP, and "ping" strings.
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		for {
-			json, binary, err := sig.recv()
-			if err != nil {
-				if !s.closed.Load() {
-					logger.Debugf("max: signaling read: %v", err)
-					s.Reconnect("signaling closed")
-				}
-				return
-			}
-			if json != nil {
-				s.handleMessage(json)
-			}
-			if binary != nil && binary.Params.Data.SDP != "" {
-				logger.Infof("max: received SDP %s (%d bytes)", binary.Params.Data.Type, len(binary.Params.Data.SDP))
-				if binary.Params.Data.Type == "offer" {
-					s.handleOffer(binary.Params.Data.SDP)
-				}
-			}
-		}
-	}()
-
-	logger.Infof("max: connected to %s", strings.SplitN(s.endpoint, "?", 2)[0])
-	return nil
+	return pc, dc, nil
 }
 
-// handleMessage processes one JSON signaling message from the SFU.
-func (s *Session) handleMessage(msg *sigMessage) {
-	switch msg.Type {
-	case "ping":
-		// Answer the keepalive.
-		if sig := s.sig.Load(); sig != nil {
+// readLoop drives the negotiation: accept-call's response names the other
+// participant, the lower uid offers, and answers, offers and candidates
+// flow through the relay until the datachannel is up.
+func (s *Session) readLoop(sig *signaling, pc *webrtc.PeerConnection, dc *webrtc.DataChannel) {
+	defer s.wg.Done()
+	for {
+		msg, resp, err := sig.recv()
+		if err != nil {
+			if !s.closed.Load() {
+				logger.Debugf("max: signaling read: %v", err)
+				s.Reconnect("signaling closed")
+			}
+			return
+		}
+		if msg == nil {
+			continue
+		}
+		switch {
+		case msg.Type == "ping":
 			_ = sig.sendPong()
-		}
-	case "notification":
-		var n notification
-		if err := json.Unmarshal(msg.Data, &n); err == nil && n.PeerID.ID != 0 {
-			logger.Infof("max: assigned peerId=%d", n.PeerID.ID)
-		}
-	case "offer", "answer":
-		// JSON SDP (fallback path); binary TRANSMIT_DATA is the primary.
-		var sd sdpExchange
-		if err := json.Unmarshal(msg.Data, &sd); err == nil && sd.SDP != "" {
-			if msg.Type == "offer" {
-				s.handleOffer(sd.SDP)
+
+		case resp != nil && resp.Response == "accept-call":
+			if len(resp.ParticipantIDs) > 0 {
+				s.handlePeerSeen(pc, sig, resp.ParticipantIDs[0])
+			}
+
+		case resp != nil && resp.Error != "":
+			logger.Debugf("max: server error: %s (%s)", resp.Error, resp.Message)
+
+		case msg.Data != nil:
+			var payload transmitPayload
+			if err := jsonUnmarshal(msg.Data, &payload); err != nil {
+				continue
+			}
+			peer := s.peer.Load()
+			switch {
+			case payload.SDP != nil:
+				if payload.SDP.Type == "answer" {
+					s.handleAnswer(pc, payload.SDP.SDP)
+				} else if payload.SDP.Type == "offer" {
+					s.handleIncomingOffer(pc, sig, peer, payload.SDP.SDP)
+				}
+			case payload.Candidate != nil && peer != 0:
+				init := webrtc.ICECandidateInit{Candidate: payload.Candidate.Candidate}
+				if payload.Candidate.SDPMid != nil {
+					init.SDPMid = payload.Candidate.SDPMid
+				}
+				if payload.Candidate.SDPMLineIndex != nil {
+					init.SDPMLineIndex = payload.Candidate.SDPMLineIndex
+				}
+				_ = pc.AddICECandidate(init)
 			}
 		}
-	case "response":
-		// Command acknowledged.
-	default:
-		logger.Debugf("max: signal: type=%s", msg.Type)
 	}
 }
 
-// handleOffer answers the SFU's SDP offer.
-func (s *Session) handleOffer(sdp string) {
-	pc := s.pc.Load()
-	if pc == nil {
+// handlePeerSeen records the counterparty and offers once: the lower uid
+// speaks first so a pair of sessions never races. The offer shape is the
+// one the measured SDK answers (recvonly + datachannel), with candidates
+// stripped from the SDP and trickled separately under the relay cap.
+func (s *Session) handlePeerSeen(pc *webrtc.PeerConnection, sig *signaling, other int64) {
+	if !s.peer.CompareAndSwap(0, other) {
 		return
 	}
+	logger.Infof("max: peer participant %d", other)
+	if s.selfUID != 0 && s.selfUID > other {
+		return // the lower uid offers; we answer instead
+	}
+	offer, err := pc.CreateOffer(nil)
+	if err != nil {
+		logger.Debugf("max: offer: %v", err)
+		return
+	}
+	if err := pc.SetLocalDescription(offer); err != nil {
+		logger.Debugf("max: local offer: %v", err)
+		return
+	}
+	stripped := stripCandidates(offer.SDP)
+	if err := sig.sendSDPExchange(other, "offer", stripped); err != nil {
+		logger.Debugf("max: offer relay: %v", err)
+		return
+	}
+	logger.Infof("max: offer relayed to %d (%d bytes SDP)", other, len(stripped))
+}
+
+// handleAnswer applies the peer's answer.
+func (s *Session) handleAnswer(pc *webrtc.PeerConnection, sdp string) {
+	if err := pc.SetRemoteDescription(webrtc.SessionDescription{
+		Type: webrtc.SDPTypeAnswer, SDP: sdp,
+	}); err != nil {
+		logger.Debugf("max: remote answer: %v", err)
+		return
+	}
+	logger.Infof("max: answer applied (%d bytes)", len(sdp))
+}
+
+// handleIncomingOffer answers a peer that offered first.
+func (s *Session) handleIncomingOffer(pc *webrtc.PeerConnection, sig *signaling, peer int64, sdp string) {
 	if err := pc.SetRemoteDescription(webrtc.SessionDescription{
 		Type: webrtc.SDPTypeOffer, SDP: sdp,
 	}); err != nil {
-		logger.Debugf("max: set remote: %v", err)
+		logger.Debugf("max: remote offer: %v", err)
 		return
 	}
 	answer, err := pc.CreateAnswer(nil)
 	if err != nil {
-		logger.Debugf("max: create answer: %v", err)
+		logger.Debugf("max: answer create: %v", err)
 		return
 	}
 	if err := pc.SetLocalDescription(answer); err != nil {
-		logger.Debugf("max: set local: %v", err)
+		logger.Debugf("max: local answer: %v", err)
 		return
 	}
-	// Send the answer back on the signaling as binary TRANSMIT_DATA.
-	sig := s.sig.Load()
-	if sig != nil {
-		_ = sig.sendSDP(3, 0, answer.SDP, "answer")
+	stripped := stripCandidates(answer.SDP)
+	if peer != 0 {
+		if err := sig.sendSDPExchange(peer, "answer", stripped); err != nil {
+			logger.Debugf("max: answer relay: %v", err)
+		}
 	}
+	logger.Infof("max: answered incoming offer (%d bytes)", len(stripped))
 }
 
-// Send writes to the tunnel track.
+// Send writes to the datachannel, holding at the SCTP watermark so the
+// buffer cannot run away.
 func (s *Session) Send(data []byte) error {
-	track := s.track.Load()
-	if track == nil {
+	dc := s.dc.Load()
+	if dc == nil || dc.ReadyState() != webrtc.DataChannelStateOpen {
 		return ErrSessionClosed
 	}
-	return track.WriteSample(media.Sample{Data: data, Duration: time.Millisecond * 20})
+	for dc.BufferedAmount() > sctpHighWater {
+		if s.closed.Load() {
+			return ErrSessionClosed
+		}
+		time.Sleep(2 * time.Millisecond)
+		dc = s.dc.Load()
+		if dc == nil {
+			return ErrSessionClosed
+		}
+	}
+	return dc.Send(data)
 }
 
 // Close ends the session.
@@ -269,41 +370,25 @@ func (s *Session) Close() error {
 		_ = pc.Close()
 	}
 	if sig := s.sig.Load(); sig != nil {
-		_ = sig.conn.Close()
+		_ = sig.close()
 	}
 	s.wg.Wait()
 	return nil
 }
 
-// CanSend reports whether the session can carry data.
+// CanSend reports whether the datachannel carries data.
 func (s *Session) CanSend() bool {
-	return !s.closed.Load() && s.track.Load() != nil
+	dc := s.dc.Load()
+	return !s.closed.Load() && dc != nil && dc.ReadyState() == webrtc.DataChannelStateOpen
 }
 
-// reconnect re-establishes the session.
+// reconnect re-establishes the session on the same credentials.
 func (s *Session) reconnect(ctx context.Context) error {
 	_ = s.Close()
 	s.closed.Store(false)
 	s.closeCh = make(chan struct{})
+	s.peer.Store(0)
 	return s.Connect(ctx)
-}
-
-// newAPI builds a pion API with the default interceptors.
-func newAPI() (*webrtc.API, error) {
-	mediaEngine := &webrtc.MediaEngine{}
-	if err := mediaEngine.RegisterDefaultCodecs(); err != nil {
-		return nil, err
-	}
-	registry := &interceptor.Registry{}
-	if err := webrtc.RegisterDefaultInterceptorsWithOptions(
-		mediaEngine, registry, engine.DefaultInterceptorOptions()...,
-	); err != nil {
-		return nil, err
-	}
-	return webrtc.NewAPI(
-		webrtc.WithMediaEngine(mediaEngine),
-		webrtc.WithInterceptorRegistry(registry),
-	), nil
 }
 
 // Reconnect triggers a reconnection (engine.Session).
@@ -316,10 +401,10 @@ func (s *Session) Reconnect(reason string) {
 	}()
 }
 
-// GetBufferedAmount reports the track's buffered amount.
+// GetBufferedAmount reports the SCTP queue depth.
 func (s *Session) GetBufferedAmount() uint64 {
-	if track := s.track.Load(); track != nil {
-		return 0 // TODO: wire the track's buffered amount
+	if dc := s.dc.Load(); dc != nil {
+		return uint64(dc.BufferedAmount())
 	}
 	return 0
 }
