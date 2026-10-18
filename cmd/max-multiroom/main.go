@@ -43,6 +43,7 @@ func main() {
 	linkFile := flag.String("link-file", "/tmp/max-multi-link.txt", "file with the join link")
 	mode := flag.String("mode", "join", "join: by link + web token; params: session key + conversation id")
 	sessionKey := flag.String("session-key", "", "calls session key (params mode)")
+	stagger := flag.Duration("stagger", 0, "delay between joins (0 = all at once)")
 	conversationID := flag.String("conversation-id", "", "conversation uuid (params mode)")
 	flag.Parse()
 
@@ -95,6 +96,10 @@ func main() {
 	var wg sync.WaitGroup
 	for i := 0; i < *n; i++ {
 		wg.Add(1)
+		idx := i
+		if *stagger > 0 && idx > 0 {
+			time.Sleep(*stagger)
+		}
 		go func(idx int) {
 			defer wg.Done()
 			r := &joinResult{Idx: idx}
@@ -159,8 +164,10 @@ func holdOne(r *joinResult, params *convParams, conversationID string, hold time
 	header := http.Header{}
 	header.Set("Origin", "https://web.max.ru")
 	header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15")
+	// The join answer already carries the full query (conversationId, peerId,
+	// token, userId); only the params-mode endpoint is bare and needs them.
 	wsURL := params.Endpoint
-	if uid := params.TURN.Username; uid != "" {
+	if uid := params.TURN.Username; uid != "" && !strings.Contains(wsURL, "?") {
 		if i := strings.Index(uid, ":"); i > 0 {
 			wsURL += "?userId=" + uid[i+1:] + "&entityType=USER&conversationId=" + conversationID + "&token=" + url.QueryEscape(params.Token)
 		}
