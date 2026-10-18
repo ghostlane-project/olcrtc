@@ -17,24 +17,26 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/pion/webrtc/v4"
 )
 
 const (
-	apiBase         = "https://calls.okcdn.ru"
-	applicationKey  = "CNHIJPLGDIHBABABA"
-	methodAnonLogin = "auth.anonymLogin"
+	apiBase          = "https://calls.okcdn.ru"
+	applicationKey   = "CNHIJPLGDIHBABABA"
+	methodAnonLogin  = "auth.anonymLogin"
 	methodJoinByLink = "vchat.joinConversationByLink"
 )
 
 type joinResult struct {
-	Idx        int
-	UID        string
-	PeerID     int64
-	Endpoint   string
-	WSError    string
-	AliveAt    time.Duration
-	Frames     int
-	Err        string
+	Idx              int
+	OtherParticipant int64
+	UID              string
+	PeerID           int64
+	Endpoint         string
+	WSError          string
+	AliveAt          time.Duration
+	Frames           int
+	Err              string
 }
 
 func main() {
@@ -219,6 +221,7 @@ func holdOne(r *joinResult, params *convParams, conversationID string, hold time
 				break // connection assignment received
 			}
 		}
+
 	}
 	seq++
 	_ = conn.WriteJSON(map[string]any{"command": "accept-call", "sequence": seq})
@@ -232,6 +235,39 @@ func holdOne(r *joinResult, params *convParams, conversationID string, hold time
 			"isAudioSharingEnabled": false, "isAnimojiEnabled": false,
 		},
 	})
+	if os.Getenv("MAX_ALLOC") != "" {
+		seq++
+		_ = conn.WriteJSON(map[string]any{
+			"command":  "allocate-consumer",
+			"sequence": seq,
+			"capabilities": map[string]any{
+				"estimatedPerformanceIndex":              1000,
+				"audioMix":                               true,
+				"consumerUpdate":                         true,
+				"producerNotificationDataChannelVersion": 8,
+				"producerCommandDataChannelVersion":      3,
+				"consumerScreenDataChannelVersion":       1,
+				"producerScreenDataChannelVersion":       1,
+				"asrDataChannelVersion":                  0,
+				"animojiDataChannelVersion":              1,
+				"animojiBackendRender":                   true,
+				"onDemandTracks":                         true,
+				"unifiedPlan":                            true,
+				"singleSession":                          true,
+				"videoTracksCount":                       1,
+				"red":                                    true,
+				"audioShare":                             false,
+				"fastScreenShare":                        false,
+				"videoSuspend":                           true,
+				"simulcast":                              false,
+				"simulcastNativeOrder":                   true,
+				"consumerFastScreenShare":                false,
+				"consumerFastScreenShareQualityOnDemand": false,
+				"transparentAudio":                       false,
+			},
+		})
+		fmt.Println("[alloc] allocate-consumer sent (full capabilities)")
+	}
 
 	// keepalive loop for the rest of the hold window
 	_ = conn.SetReadDeadline(time.Now().Add(hold))
@@ -248,6 +284,24 @@ func holdOne(r *joinResult, params *convParams, conversationID string, hold time
 		r.Frames++
 		if string(data) == "ping" {
 			_ = conn.WriteMessage(websocket.TextMessage, []byte("pong"))
+			continue
+		}
+		var hm map[string]any
+		if json.Unmarshal(data, &hm) == nil {
+			if ids, ok := hm["participantIds"].([]any); ok && len(ids) > 0 && r.OtherParticipant == 0 {
+				r.OtherParticipant = int64(ids[0].(float64))
+				fmt.Printf("[%d] other participant: %d\n", r.Idx, r.OtherParticipant)
+				if os.Getenv("MAX_MEDIA") != "" && mediaOnce.TryClaim() {
+					runMedia(r, conn, params, &seq)
+				}
+			}
+		}
+		if os.Getenv("MAX_DEBUG") != "" {
+			d := string(data)
+			if len(d) > 350 {
+				d = d[:350] + "..."
+			}
+			fmt.Printf("[%d] HOLD FRAME: %s\n", r.Idx, d)
 		}
 	}
 }
@@ -261,7 +315,9 @@ type convParams struct {
 	Endpoint string `json:"endpoint"`
 	Token    string `json:"token"`
 	TURN     struct {
-		Username string `json:"username"`
+		URLs       []string `json:"urls"`
+		Username   string   `json:"username"`
+		Credential string   `json:"credential"`
 	} `json:"turn_server"`
 }
 
@@ -334,12 +390,16 @@ func getConversationParams(sessionKey, conversationID string) (*convParams, erro
 }
 
 func joinByLink(s *anonymSession, joinHash string) (*convParams, error) {
-	body, err := fbDo(methodJoinByLink, url.Values{
+	vals := url.Values{
 		"session_key": {s.SessionKey},
 		"joinLink":    {joinHash},
 		"isVideo":     {"true"},
 		"isAudio":     {"true"},
-	})
+	}
+	if v := os.Getenv("MAX_OBSERVE"); v != "" {
+		vals.Set("observedIds", v)
+	}
+	body, err := fbDo(methodJoinByLink, vals)
 	if err != nil {
 		return nil, err
 	}
@@ -356,4 +416,248 @@ func joinByLink(s *anonymSession, joinHash string) (*convParams, error) {
 func fatal(f string, args ...any) {
 	fmt.Fprintf(os.Stderr, "FATAL: "+f+"\n", args...)
 	os.Exit(1)
+}
+
+// runMedia performs the pion offer/answer exchange through the SFU's
+// transmit-data relay and measures the incoming RTP flow.
+type mediaOnceGuard struct{ done bool }
+
+func (g *mediaOnceGuard) TryClaim() bool {
+	if g.done {
+		return false
+	}
+	g.done = true
+	return true
+}
+
+var mediaOnce mediaOnceGuard
+
+func runMedia(r *joinResult, conn *websocket.Conn, params *convParams, seq *int) {
+	// a minimal engine keeps the offer SDP under the relay's size cap
+	me := &webrtc.MediaEngine{}
+	if err := me.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8, ClockRate: 90000, Channels: 0},
+		PayloadType:        96,
+	}, webrtc.RTPCodecTypeVideo); err != nil {
+		fmt.Printf("[media] codec: %v\n", err)
+		return
+	}
+	api := webrtc.NewAPI(webrtc.WithMediaEngine(me))
+	pc, err := api.NewPeerConnection(webrtc.Configuration{
+		ICEServers: []webrtc.ICEServer{{
+			URLs:       []string{turnURL(params)},
+			Username:   params.TURN.Username,
+			Credential: params.TURN.Credential,
+		}},
+	})
+	if err != nil {
+		fmt.Printf("[media] pc: %v\n", err)
+		return
+	}
+	defer pc.Close()
+	track, err := webrtc.NewTrackLocalStaticSample(
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8, ClockRate: 90000}, "video", "video")
+	if err != nil {
+		fmt.Printf("[media] track: %v\n", err)
+		return
+	}
+	if _, err := pc.AddTrack(track); err != nil {
+		fmt.Printf("[media] addTrack: %v\n", err)
+		return
+	}
+	var received int64
+	var mu sync.Mutex
+	pc.OnTrack(func(t *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
+		buf := make([]byte, 1500)
+		for {
+			n, _, err := t.Read(buf)
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			received += int64(n)
+			mu.Unlock()
+		}
+	})
+	pc.OnConnectionStateChange(func(st webrtc.PeerConnectionState) {
+		fmt.Printf("[media] PC %s\n", st)
+	})
+
+	offer, err := pc.CreateOffer(nil)
+	if err != nil {
+		fmt.Printf("[media] offer: %v\n", err)
+		return
+	}
+	if err := pc.SetLocalDescription(offer); err != nil {
+		fmt.Printf("[media] local: %v\n", err)
+		return
+	}
+	// trim the SDP under the relay's ~3.5KB limit: relayed messages carry
+	// no ICE candidates (they trickle separately) and one codec is enough
+	if os.Getenv("MAX_KEEP_EXT") == "" {
+		trimmed := []string{}
+		for _, ln := range strings.Split(offer.SDP, "\r\n") {
+			if strings.HasPrefix(ln, "a=candidate:") || strings.HasPrefix(ln, "a=end-of-candidates") {
+				continue
+			}
+			trimmed = append(trimmed, ln)
+		}
+		offer.SDP = strings.Join(trimmed, "\r\n")
+	}
+	fmt.Printf("[media] SDP %d bytes\n", len(offer.SDP))
+	if v := os.Getenv("MAX_SDPSIZE"); v != "" {
+		n := 0
+		fmt.Sscan(v, &n)
+		junk := make([]byte, n)
+		for i := range junk {
+			junk[i] = byte('a' + i%26)
+		}
+		offer.SDP = "v=0\n" + string(junk)
+		fmt.Printf("[media] SDPSIZE probe: %d bytes of junk\n", n)
+	} else if os.Getenv("MAX_TINY") != "" {
+		offer.SDP = "v=0\no=- 1 1 IN IP4 127.0.0.1\ns=-\nt=0 0\n"
+		fmt.Println("[media] TINY offer mode (shape vs size probe)")
+	}
+	if os.Getenv("MAX_PRODUCER") != "" {
+		ssrc := ""
+		for _, ln := range strings.Split(offer.SDP, "\r\n") {
+			if strings.HasPrefix(ln, "a=ssrc:") {
+				f := strings.SplitN(strings.TrimPrefix(ln, "a=ssrc:"), " ", 2)
+				ssrc = f[0]
+				break
+			}
+		}
+		*seq++
+		msg3 := map[string]any{
+			"command":     "accept-producer",
+			"sequence":    *seq,
+			"description": offer.SDP,
+			"sessionId":   r.PeerID,
+		}
+		if ssrc != "" {
+			msg3["ssrcs"] = []string{ssrc}
+		}
+		if err := conn.WriteJSON(msg3); err != nil {
+			fmt.Printf("[media] producer send: %v\n", err)
+			return
+		}
+		fmt.Printf("[media] accept-producer sent (ssrc=%s, peer=%d)\n", ssrc, r.PeerID)
+	}
+	if os.Getenv("MAX_SFU") != "" {
+		// negotiate with the SFU itself: our offer rides allocate-consumer
+		*seq++
+		msg2 := map[string]any{
+			"command":      "allocate-consumer",
+			"sequence":     *seq,
+			"description":  offer.SDP,
+			"capabilities": fullCapabilities(),
+		}
+		if err := conn.WriteJSON(msg2); err != nil {
+			fmt.Printf("[media] sfu send: %v\n", err)
+			return
+		}
+		fmt.Printf("[media] allocate-consumer WITH description (%d bytes)\n", len(offer.SDP))
+	} else {
+		*seq++
+		msg := map[string]any{
+			"command":       "transmit-data",
+			"sequence":      *seq,
+			"participantId": r.OtherParticipant,
+			"data": map[string]any{
+				"sdp":            map[string]string{"type": "offer", "sdp": offer.SDP},
+				"animojiVersion": 1,
+			},
+		}
+		if err := conn.WriteJSON(msg); err != nil {
+			fmt.Printf("[media] send: %v\n", err)
+			return
+		}
+		fmt.Printf("[media] offer (%d bytes SDP) sent to participant %d\n", len(offer.SDP), r.OtherParticipant)
+	}
+
+	*seq++
+	_ = conn.WriteJSON(map[string]any{
+		"command":       "transmit-data",
+		"sequence":      *seq,
+		"participantId": r.OtherParticipant,
+		"data":          map[string]any{"candidate": map[string]any{"candidate": ""}},
+	})
+
+	_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	for i := 0; i < 60; i++ {
+		mt, data, err := conn.ReadMessage()
+		if err != nil {
+			fmt.Printf("[media] read: %v\n", err)
+			return
+		}
+		if mt == websocket.TextMessage && string(data) == "ping" {
+			_ = conn.WriteMessage(websocket.TextMessage, []byte("pong"))
+			continue
+		}
+		var m map[string]any
+		if json.Unmarshal(data, &m) != nil {
+			continue
+		}
+		d := string(data)
+		if len(d) > 260 {
+			d = d[:260] + "..."
+		}
+		fmt.Printf("[media] < %s\n", d)
+		if d, ok := m["description"].(string); ok && len(d) > 100 {
+			fmt.Printf("[media] SERVER DESCRIPTION arrived (%d bytes)\n", len(d))
+			if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: d}); err != nil {
+				fmt.Printf("[media] remote: %v\n", err)
+				return
+			}
+			fmt.Println("[media] SFU ANSWER APPLIED, waiting 20s for media...")
+			time.Sleep(20 * time.Second)
+			mu.Lock()
+			total := received
+			mu.Unlock()
+			fmt.Printf("[media] received %d bytes RTP in 20s\n", total)
+			return
+		}
+		if dm, ok := m["data"].(map[string]any); ok {
+			if sdpObj, ok := dm["sdp"].(map[string]any); ok {
+				if s, ok := sdpObj["sdp"].(string); ok && sdpObj["type"] == "answer" {
+					if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: s}); err != nil {
+						fmt.Printf("[media] remote: %v\n", err)
+						return
+					}
+					fmt.Println("[media] ANSWER APPLIED, waiting 20s for media...")
+					time.Sleep(20 * time.Second)
+					mu.Lock()
+					total := received
+					mu.Unlock()
+					fmt.Printf("[media] received %d bytes RTP in 20s (%.1f kbit/s)\n", total, float64(total)*8/20/1000)
+					if total > 100000 {
+						fmt.Println("[media] FLOW: PASS")
+					} else {
+						fmt.Println("[media] FLOW: NO/LOW DATA")
+					}
+					return
+				}
+			}
+		}
+	}
+}
+
+func fullCapabilities() map[string]any {
+	return map[string]any{
+		"estimatedPerformanceIndex": 1000, "audioMix": true, "consumerUpdate": true,
+		"producerNotificationDataChannelVersion": 8, "producerCommandDataChannelVersion": 3,
+		"consumerScreenDataChannelVersion": 1, "producerScreenDataChannelVersion": 1,
+		"asrDataChannelVersion": 0, "animojiDataChannelVersion": 1, "animojiBackendRender": true,
+		"onDemandTracks": true, "unifiedPlan": true, "singleSession": true, "videoTracksCount": 1,
+		"red": true, "audioShare": false, "fastScreenShare": false, "videoSuspend": true,
+		"simulcast": false, "simulcastNativeOrder": true, "consumerFastScreenShare": false,
+		"consumerFastScreenShareQualityOnDemand": false, "transparentAudio": false,
+	}
+}
+
+func turnURL(p *convParams) string {
+	if len(p.TURN.URLs) > 0 {
+		return p.TURN.URLs[0]
+	}
+	return "turn:155.212.199.178:19302"
 }

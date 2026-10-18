@@ -15,7 +15,7 @@ import (
 func main() {
 	_ = os.Stdout
 	tlsCfg := &tls.Config{InsecureSkipVerify: true, NextProtos: []string{"h3"}}
-	conn, err := quic.DialAddr(context.Background(), "videowebrtc.okcdn.ru:23456", tlsCfg, nil)
+	conn, err := quic.DialAddr(context.Background(), "155.212.205.229:23456", tlsCfg, nil)
 	if err != nil {
 		fmt.Println("dial:", err)
 		return

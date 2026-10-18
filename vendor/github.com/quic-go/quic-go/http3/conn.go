@@ -243,10 +243,9 @@ func (c *rawConn) handleControlStream(str *quic.ReceiveStream) {
 		// If datagram support was enabled on our side as well as on the server side,
 		// we can expect it to have been negotiated both on the transport and on the HTTP/3 layer.
 		// Note: ConnectionState() will block until the handshake is complete (relevant when using 0-RTT).
-		if c.enableDatagrams && !c.ConnectionState().SupportsDatagrams.Remote {
-			c.CloseWithError(quic.ApplicationErrorCode(ErrCodeSettingsError), "missing QUIC Datagram support")
-			return
-		}
+		_ = c.ConnectionState().SupportsDatagrams.Remote // olcrtc: the okcdn SFU
+		// advertises H3 datagrams in SETTINGS but omits the QUIC transport
+		// param; browsers tolerate it, so the enforcement is dropped here.
 		c.qloggerWG.Go(func() {
 			err := c.receiveDatagrams()
 			if c.logger != nil {

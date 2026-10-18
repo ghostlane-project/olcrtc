@@ -47,9 +47,9 @@ func (d *Transport) NewClientConn(qconn *quic.Conn) (*ClientConn, error) {
 	if d.Config != nil {
 		config = *d.Config
 	}
-	additionalSettings := map[uint64]uint64{settingsWebTransportEnabled: 1}
+	additionalSettings := map[uint64]uint64{settingsWebTransportEnabled: 1, 0x2f60b3: 1} // olcrtc: RFC 9417 SETTINGS_WEBTRANSPORT_MAX_SESSIONS, the dialect the okcdn SFU speaks
 	config.addSettings(additionalSettings)
-	tr := &http3.Transport{EnableDatagrams: false, AdditionalSettings: additionalSettings} // olcrtc: SFU QUIC params lack datagram frames
+	tr := &http3.Transport{EnableDatagrams: true, AdditionalSettings: additionalSettings}
 
 	timeout := d.StreamReorderingTimeout
 	if timeout == 0 {
@@ -77,8 +77,12 @@ func (d *Transport) NewClientConn(qconn *quic.Conn) (*ClientConn, error) {
 			go func() {
 				typ, err := quicvarint.Peek(str)
 				if err != nil {
+					fmt.Println("[olcrtc-dbg] bidi stream peek err:", err)
 					return
 				}
+				head := make([]byte, 16)
+				n, _ := str.Read(head)
+				fmt.Printf("[olcrtc-dbg] bidi stream typ=0x%x head=%x\n", typ, head[:n])
 				if typ != webTransportFrameType {
 					c.clientConn.HandleBidirectionalStream(str)
 					return

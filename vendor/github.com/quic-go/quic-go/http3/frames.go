@@ -58,12 +58,15 @@ func (p *frameParser) ParseNext(qlogger qlogwriter.Recorder) (frame, error) {
 	for {
 		t, err := quicvarint.Read(r)
 		if err != nil {
+			fmt.Printf("[olcrtc-h3] frame type read failed: %v (after %d bytes)\n", err, r.NumRead)
 			return nil, err
 		}
 		l, err := quicvarint.Read(r)
 		if err != nil {
+			fmt.Printf("[olcrtc-h3] len read failed for type %#x: %v\n", t, err)
 			return nil, err
 		}
+		fmt.Printf("[olcrtc-h3] frame type=%#x len=%d stream=%d\n", t, l, p.streamID)
 
 		switch t {
 		case 0x0: // DATA
