@@ -15,12 +15,12 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/pion/ice/v4"
 	"github.com/pion/webrtc/v4"
-	webrtc_media "github.com/pion/webrtc/v4/pkg/media"
 )
 
 const (
@@ -487,34 +487,43 @@ func runMedia(r *joinResult, conn *websocket.Conn, params *convParams, seq *int)
 	}
 	defer pc.Close()
 
-	// mixed shape: a sendable VP8 track for outbound measurement plus
-	// recvonly audio; the browser answers both
-	outTrack, err := webrtc.NewTrackLocalStaticSample(
-		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8, ClockRate: 90000}, "video", "video")
-	if err != nil {
-		fmt.Printf("[media] track: %v\n", err)
-		return
-	}
-	if _, err := pc.AddTrack(outTrack); err != nil {
-		fmt.Printf("[media] addTrack: %v\n", err)
-		return
+	// the shape the browser answered: recvonly video x2 + audio + a
+	// datachannel m-line; a sendable track makes the browser ignore us
+	for i := 0; i < 2; i++ {
+		_, _ = pc.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo, webrtc.RTPTransceiverInit{
+			Direction: webrtc.RTPTransceiverDirectionRecvonly})
 	}
 	_, _ = pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{
 		Direction: webrtc.RTPTransceiverDirectionRecvonly})
-	go func() {
-		// ~2.5 Mbit/s of VP8-ish payloads: 1200B x 30fps would be slow; pump
-		// 260 packets/s to probe the ceiling
-		frame := make([]byte, 1100)
-		for i := range frame {
-			frame[i] = byte(i)
-		}
-		t := time.NewTicker(4 * time.Millisecond)
-		defer t.Stop()
-		for range t.C {
-			_ = outTrack.WriteSample(webrtc_media.Sample{Data: frame, Duration: 4 * time.Millisecond})
-		}
-	}()
-
+	dc, errDC := pc.CreateDataChannel("datagram", nil)
+	if errDC == nil {
+		var dcRecv int64
+		var dcSent int64
+		dc.OnOpen(func() {
+			fmt.Println("[media] DATACHANNEL OPEN - pumping uplink")
+			go func() {
+				chunk := make([]byte, 16*1024)
+				for {
+					if dc.ReadyState() != webrtc.DataChannelStateOpen {
+						return
+					}
+					if err := dc.Send(chunk); err != nil {
+						return
+					}
+					atomic.AddInt64(&dcSent, int64(len(chunk)))
+				}
+			}()
+		})
+		dc.OnMessage(func(m webrtc.DataChannelMessage) {
+			atomic.AddInt64(&dcRecv, int64(len(m.Data)))
+		})
+		go func() {
+			for i := 0; i < 14; i++ {
+				time.Sleep(5 * time.Second)
+				fmt.Printf("[media] dc: sent=%d recv=%d bytes (t+%ds)\n", atomic.LoadInt64(&dcSent), atomic.LoadInt64(&dcRecv), (i+1)*5)
+			}
+		}()
+	}
 	var received int64
 	var mu sync.Mutex
 	var remoteSet = make(chan struct{}, 1)
