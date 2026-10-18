@@ -260,7 +260,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        provider: [jitsi, telemost, salutejazz, vkcalls, mtslink]
+        provider: [jitsi, telemost, salutejazz, vkcalls, mtslink, max]
     # ai-generated: the `needs` list beyond gate-plan. The gate holds live
     # rooms, so a branch whose unit tests or lint already failed must not
     # take that slot: it cannot merge anyway. Waiting costs the two or three
@@ -305,6 +305,8 @@ jobs:
           GATE_JITSI_HOSTS: ${{ secrets.GATE_JITSI_HOSTS }}
           GATE_VKCALLS_ROOMS: ${{ secrets.GATE_VKCALLS_ROOMS }}
           GATE_MTSLINK_ROOMS: ${{ secrets.GATE_MTSLINK_ROOMS }}
+          GATE_MAX_ROOMS: ${{ secrets.GATE_MAX_ROOMS }}
+          GATE_MAX_KEYS: ${{ secrets.GATE_MAX_KEYS }}
         run: |
           # Every value is masked before any step could print it. Split on
           # line breaks too: a line of a value the mask missed would print.
@@ -330,6 +332,13 @@ jobs:
             mask "$(sed -E 's|^[A-Za-z]+://||; s|[/?#].*||; s|:[0-9]*$||' <<<"$e")"
           done < <(entries "$GATE_JITSI_HOSTS")
           while IFS= read -r e; do mask "$e"; done < <(entries "$GATE_WBSTREAM_TOKEN")
+          # A max entry is a join link whose last segment is the room's hash;
+          # the keys are two calls sessions.
+          while IFS= read -r e; do
+            mask "$e"
+            mask "$(sed -E 's|^[A-Za-z]+://||; s|[?#].*||; s|/+$||; s|.*/||' <<<"$e")"
+          done < <(entries "$GATE_MAX_ROOMS")
+          while IFS= read -r e; do mask "$e"; done < <(entries "$GATE_MAX_KEYS")
 
           # A missing required secret is named here, and every cell that needs
           # it fails in the report with the same reason, so the job still fails:
@@ -342,6 +351,8 @@ jobs:
           }
           require GATE_TELEMOST_ROOMS "a comma-separated pool of Telemost room ids or URLs"
           require GATE_MTSLINK_ROOMS "a comma-separated pool of MTS Link event join links (https://my.mts-link.ru/j/<owner>/<event>) of endless meetings"
+          require GATE_MAX_ROOMS "a comma-separated pool of max join links (https://max.ru/joincall/<hash>)"
+          require GATE_MAX_KEYS "two comma-separated max calls session keys, the server's first (OLCRTC_GATE_MAX_KEYS)"
 
       - uses: actions/checkout@v7
         with:
@@ -362,6 +373,8 @@ jobs:
           OLCRTC_GATE_JITSI_HOSTS: ${{ secrets.GATE_JITSI_HOSTS }}
           OLCRTC_GATE_VKCALLS_ROOMS: ${{ secrets.GATE_VKCALLS_ROOMS }}
           OLCRTC_GATE_MTSLINK_ROOMS: ${{ secrets.GATE_MTSLINK_ROOMS }}
+          OLCRTC_GATE_MAX_ROOMS: ${{ secrets.GATE_MAX_ROOMS }}
+          OLCRTC_GATE_MAX_KEYS: ${{ secrets.GATE_MAX_KEYS }}
         run: |
           go test -count=1 -timeout 25m ./internal/gate -run '^TestGate$' -v \
             -olcrtc.gate -olcrtc.gate-target=local -olcrtc.gate-dir=gate-artifacts/cli \
@@ -381,6 +394,8 @@ jobs:
           OLCRTC_GATE_JITSI_HOSTS: ${{ secrets.GATE_JITSI_HOSTS }}
           OLCRTC_GATE_VKCALLS_ROOMS: ${{ secrets.GATE_VKCALLS_ROOMS }}
           OLCRTC_GATE_MTSLINK_ROOMS: ${{ secrets.GATE_MTSLINK_ROOMS }}
+          OLCRTC_GATE_MAX_ROOMS: ${{ secrets.GATE_MAX_ROOMS }}
+          OLCRTC_GATE_MAX_KEYS: ${{ secrets.GATE_MAX_KEYS }}
         run: |
           go test -count=1 -tags olcrtc_lean -timeout 60m ./internal/gate -run '^TestGate$' -v \
             -olcrtc.gate -olcrtc.gate-target=local -olcrtc.gate-dir=gate-artifacts/mobile \
@@ -401,6 +416,8 @@ jobs:
           OLCRTC_GATE_JITSI_HOSTS: ${{ secrets.GATE_JITSI_HOSTS }}
           OLCRTC_GATE_VKCALLS_ROOMS: ${{ secrets.GATE_VKCALLS_ROOMS }}
           OLCRTC_GATE_MTSLINK_ROOMS: ${{ secrets.GATE_MTSLINK_ROOMS }}
+          OLCRTC_GATE_MAX_ROOMS: ${{ secrets.GATE_MAX_ROOMS }}
+          OLCRTC_GATE_MAX_KEYS: ${{ secrets.GATE_MAX_KEYS }}
         run: |
           go test -count=1 -timeout 15m ./internal/gate -run '^TestGate$' -v \
             -olcrtc.gate -olcrtc.gate-target=local -olcrtc.gate-dir=gate-artifacts/cli-dtls \

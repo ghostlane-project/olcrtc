@@ -28,7 +28,7 @@ func gateVocabulary(t *testing.T, root string) []string {
 			names = append(names, "-"+f.Name)
 		}
 	})
-	names = append(names, envLink, envTelemostRooms, envWBStreamRooms, envJitsiHosts, EnvWBStreamToken,
+	names = append(names, envLink, envTelemostRooms, envWBStreamRooms, envJitsiHosts, EnvWBStreamToken, EnvMaxKeys,
 		envEngineCommit, envEngineRef, envAppVersion, envRunNumber, envRunnerOS, envImageOS, telemostJoinPrefix)
 	names = append(names, localProviders()...) // ai-generated: every provider a default run walks
 	ci, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "ci.yml"))
