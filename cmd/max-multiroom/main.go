@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/pion/ice/v4"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -422,8 +424,10 @@ func fatal(f string, args ...any) {
 	os.Exit(1)
 }
 
-// runMedia performs the pion offer/answer exchange through the SFU's
-// transmit-data relay and measures the incoming RTP flow.
+// runMedia negotiates the consumer leg with the ok-calls SFU: the offer
+// rides allocate-consumer with our candidates inline (the ice-lite server
+// does not trickle first), the server answers with its description, and
+// any further candidates arrive as transmit-data frames.
 type mediaOnceGuard struct{ done bool }
 
 func (g *mediaOnceGuard) TryClaim() bool {
@@ -436,20 +440,40 @@ func (g *mediaOnceGuard) TryClaim() bool {
 
 var mediaOnce mediaOnceGuard
 
-func runMedia(r *joinResult, conn *websocket.Conn, params *convParams, seq *int) {
-	// a minimal engine keeps the offer SDP under the relay's size cap
-	me := &webrtc.MediaEngine{}
-	if err := me.RegisterCodec(webrtc.RTPCodecParameters{
-		RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8, ClockRate: 90000, Channels: 0},
-		PayloadType:        96,
-	}, webrtc.RTPCodecTypeVideo); err != nil {
-		fmt.Printf("[media] codec: %v\n", err)
-		return
+func fullCapabilities() map[string]any {
+	return map[string]any{
+		"estimatedPerformanceIndex": 1000, "audioMix": true, "consumerUpdate": true,
+		"producerNotificationDataChannelVersion": 8, "producerCommandDataChannelVersion": 3,
+		"consumerScreenDataChannelVersion": 1, "producerScreenDataChannelVersion": 1,
+		"asrDataChannelVersion": 0, "animojiDataChannelVersion": 1, "animojiBackendRender": true,
+		"onDemandTracks": true, "unifiedPlan": true, "singleSession": true, "videoTracksCount": 1,
+		"red": true, "audioShare": false, "fastScreenShare": false, "videoSuspend": true,
+		"simulcast": false, "simulcastNativeOrder": true, "consumerFastScreenShare": false,
+		"consumerFastScreenShareQualityOnDemand": false, "transparentAudio": false,
 	}
-	api := webrtc.NewAPI(webrtc.WithMediaEngine(me))
+}
+
+func runMedia(r *joinResult, conn *websocket.Conn, params *convParams, seq *int) {
+	me := &webrtc.MediaEngine{}
+	_ = me.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8, ClockRate: 90000},
+		PayloadType:        96,
+	}, webrtc.RTPCodecTypeVideo)
+	_ = me.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2},
+		PayloadType:        111,
+	}, webrtc.RTPCodecTypeAudio)
+
+	se := webrtc.SettingEngine{}
+	se.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4, webrtc.NetworkTypeTCP4})
+	if ln, err := net.Listen("tcp", "0.0.0.0:0"); err == nil {
+		se.SetICETCPMux(ice.NewTCPMuxDefault(ice.TCPMuxParams{Listener: ln, ReadBufferSize: 1500}))
+	}
+	api := webrtc.NewAPI(webrtc.WithMediaEngine(me), webrtc.WithSettingEngine(se))
+
 	pc, err := api.NewPeerConnection(webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{{
-			URLs:       []string{turnURL(params)},
+			URLs:       params.TURN.URLs,
 			Username:   params.TURN.Username,
 			Credential: params.TURN.Credential,
 		}},
@@ -459,18 +483,19 @@ func runMedia(r *joinResult, conn *websocket.Conn, params *convParams, seq *int)
 		return
 	}
 	defer pc.Close()
-	track, err := webrtc.NewTrackLocalStaticSample(
-		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8, ClockRate: 90000}, "video", "video")
-	if err != nil {
-		fmt.Printf("[media] track: %v\n", err)
-		return
+
+	// consumer shape: recvonly audio + video, plus a data m-line
+	for i := 0; i < 2; i++ {
+		_, _ = pc.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo, webrtc.RTPTransceiverInit{
+			Direction: webrtc.RTPTransceiverDirectionRecvonly})
 	}
-	if _, err := pc.AddTrack(track); err != nil {
-		fmt.Printf("[media] addTrack: %v\n", err)
-		return
-	}
+	_, _ = pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{
+		Direction: webrtc.RTPTransceiverDirectionRecvonly})
+	_, _ = pc.CreateDataChannel("datagram", nil)
+
 	var received int64
 	var mu sync.Mutex
+	var remoteSet = make(chan struct{}, 1)
 	pc.OnTrack(func(t *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 		buf := make([]byte, 1500)
 		for {
@@ -483,9 +508,8 @@ func runMedia(r *joinResult, conn *websocket.Conn, params *convParams, seq *int)
 			mu.Unlock()
 		}
 	})
-	pc.OnConnectionStateChange(func(st webrtc.PeerConnectionState) {
-		fmt.Printf("[media] PC %s\n", st)
-	})
+	pc.OnConnectionStateChange(func(st webrtc.PeerConnectionState) { fmt.Printf("[media] PC %s\n", st) })
+	pc.OnICEConnectionStateChange(func(st webrtc.ICEConnectionState) { fmt.Printf("[media] ICE %s\n", st) })
 
 	offer, err := pc.CreateOffer(nil)
 	if err != nil {
@@ -496,103 +520,46 @@ func runMedia(r *joinResult, conn *websocket.Conn, params *convParams, seq *int)
 		fmt.Printf("[media] local: %v\n", err)
 		return
 	}
-	// trim the SDP under the relay's ~3.5KB limit: relayed messages carry
-	// no ICE candidates (they trickle separately) and one codec is enough
-	if os.Getenv("MAX_KEEP_EXT") == "" {
-		trimmed := []string{}
-		for _, ln := range strings.Split(offer.SDP, "\r\n") {
-			if strings.HasPrefix(ln, "a=candidate:") || strings.HasPrefix(ln, "a=end-of-candidates") {
+	deadline := time.Now().Add(6 * time.Second)
+	for pc.ICEGatheringState() != webrtc.ICEGatheringStateComplete && time.Now().Before(deadline) {
+		time.Sleep(150 * time.Millisecond)
+	}
+	local := pc.LocalDescription()
+	kept := []string{}
+	for _, ln := range strings.Split(local.SDP, "\r\n") {
+		if strings.HasPrefix(ln, "a=candidate:") {
+			if strings.Contains(ln, " tcp ") {
 				continue
 			}
-			trimmed = append(trimmed, ln)
-		}
-		offer.SDP = strings.Join(trimmed, "\r\n")
-	}
-	fmt.Printf("[media] SDP %d bytes\n", len(offer.SDP))
-	if v := os.Getenv("MAX_SDPSIZE"); v != "" {
-		n := 0
-		fmt.Sscan(v, &n)
-		junk := make([]byte, n)
-		for i := range junk {
-			junk[i] = byte('a' + i%26)
-		}
-		offer.SDP = "v=0\n" + string(junk)
-		fmt.Printf("[media] SDPSIZE probe: %d bytes of junk\n", n)
-	} else if os.Getenv("MAX_TINY") != "" {
-		offer.SDP = "v=0\no=- 1 1 IN IP4 127.0.0.1\ns=-\nt=0 0\n"
-		fmt.Println("[media] TINY offer mode (shape vs size probe)")
-	}
-	if os.Getenv("MAX_PRODUCER") != "" {
-		ssrc := ""
-		for _, ln := range strings.Split(offer.SDP, "\r\n") {
-			if strings.HasPrefix(ln, "a=ssrc:") {
-				f := strings.SplitN(strings.TrimPrefix(ln, "a=ssrc:"), " ", 2)
-				ssrc = f[0]
-				break
+			f := strings.Split(ln, " ")
+			if len(f) > 4 && (strings.HasPrefix(f[4], "10.") || strings.HasPrefix(f[4], "172.") || strings.HasPrefix(f[4], "192.168.")) {
+				continue
 			}
 		}
-		*seq++
-		msg3 := map[string]any{
-			"command":     "accept-producer",
-			"sequence":    *seq,
-			"description": offer.SDP,
-			"sessionId":   r.PeerID,
-		}
-		if ssrc != "" {
-			msg3["ssrcs"] = []string{ssrc}
-		}
-		if err := conn.WriteJSON(msg3); err != nil {
-			fmt.Printf("[media] producer send: %v\n", err)
-			return
-		}
-		fmt.Printf("[media] accept-producer sent (ssrc=%s, peer=%d)\n", ssrc, r.PeerID)
+		kept = append(kept, ln)
 	}
-	if os.Getenv("MAX_SFU") != "" {
-		// negotiate with the SFU itself: our offer rides allocate-consumer
-		*seq++
-		msg2 := map[string]any{
-			"command":      "allocate-consumer",
-			"sequence":     *seq,
-			"description":  offer.SDP,
-			"capabilities": fullCapabilities(),
-		}
-		if err := conn.WriteJSON(msg2); err != nil {
-			fmt.Printf("[media] sfu send: %v\n", err)
-			return
-		}
-		fmt.Printf("[media] allocate-consumer WITH description (%d bytes)\n", len(offer.SDP))
-	} else {
-		*seq++
-		msg := map[string]any{
-			"command":       "transmit-data",
-			"sequence":      *seq,
-			"participantId": r.OtherParticipant,
-			"data": map[string]any{
-				"sdp":            map[string]string{"type": "offer", "sdp": offer.SDP},
-				"animojiVersion": 1,
-			},
-		}
-		if err := conn.WriteJSON(msg); err != nil {
-			fmt.Printf("[media] send: %v\n", err)
-			return
-		}
-		fmt.Printf("[media] offer (%d bytes SDP) sent to participant %d\n", len(offer.SDP), r.OtherParticipant)
-	}
+	sdpFull := strings.Join(kept, "\r\n")
 
 	*seq++
-	_ = conn.WriteJSON(map[string]any{
-		"command":       "transmit-data",
-		"sequence":      *seq,
-		"participantId": r.OtherParticipant,
-		"data":          map[string]any{"candidate": map[string]any{"candidate": ""}},
-	})
+	if err := conn.WriteJSON(map[string]any{
+		"command":      "allocate-consumer",
+		"sequence":     *seq,
+		"description":  sdpFull,
+		"capabilities": fullCapabilities(),
+	}); err != nil {
+		fmt.Printf("[media] send: %v\n", err)
+		return
+	}
+	fmt.Printf("[media] allocate-consumer with candidates-in-SDP (%d bytes)\n", len(sdpFull))
 
-	_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
-	for i := 0; i < 60; i++ {
+	// read loop: apply the server answer, then keep applying trickled
+	// candidates and count RTP until the window closes
+	window := time.Now().Add(40 * time.Second)
+	_ = conn.SetReadDeadline(window)
+	for time.Now().Before(window) {
 		mt, data, err := conn.ReadMessage()
 		if err != nil {
-			fmt.Printf("[media] read: %v\n", err)
-			return
+			break
 		}
 		if mt == websocket.TextMessage && string(data) == "ping" {
 			_ = conn.WriteMessage(websocket.TextMessage, []byte("pong"))
@@ -602,60 +569,44 @@ func runMedia(r *joinResult, conn *websocket.Conn, params *convParams, seq *int)
 		if json.Unmarshal(data, &m) != nil {
 			continue
 		}
-		d := string(data)
-		if len(d) > 260 {
-			d = d[:260] + "..."
-		}
-		fmt.Printf("[media] < %s\n", d)
 		if d, ok := m["description"].(string); ok && len(d) > 100 {
-			fmt.Printf("[media] SERVER DESCRIPTION arrived (%d bytes)\n", len(d))
+			_ = os.WriteFile("/tmp/max-sfu-answer.sdp", []byte(d), 0o644)
 			if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: d}); err != nil {
 				fmt.Printf("[media] remote: %v\n", err)
-				return
+				continue
 			}
-			fmt.Println("[media] SFU ANSWER APPLIED, waiting 20s for media...")
-			time.Sleep(20 * time.Second)
-			mu.Lock()
-			total := received
-			mu.Unlock()
-			fmt.Printf("[media] received %d bytes RTP in 20s\n", total)
-			return
+			fmt.Printf("[media] SFU answer applied (%d bytes)\n", len(d))
+			select {
+			case remoteSet <- struct{}{}:
+			default:
+			}
+			continue
 		}
 		if dm, ok := m["data"].(map[string]any); ok {
-			if sdpObj, ok := dm["sdp"].(map[string]any); ok {
-				if s, ok := sdpObj["sdp"].(string); ok && sdpObj["type"] == "answer" {
-					if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: s}); err != nil {
-						fmt.Printf("[media] remote: %v\n", err)
-						return
+			if cand, ok := dm["candidate"].(map[string]any); ok {
+				c, _ := cand["candidate"].(string)
+				if c != "" {
+					mid, _ := cand["sdpMid"].(string)
+					mline := uint16(0)
+					mlinePtr := &mline
+					if v, ok := cand["sdpMLineIndex"].(float64); ok {
+						mline = uint16(v)
 					}
-					fmt.Println("[media] ANSWER APPLIED, waiting 20s for media...")
-					time.Sleep(20 * time.Second)
-					mu.Lock()
-					total := received
-					mu.Unlock()
-					fmt.Printf("[media] received %d bytes RTP in 20s (%.1f kbit/s)\n", total, float64(total)*8/20/1000)
-					if total > 100000 {
-						fmt.Println("[media] FLOW: PASS")
-					} else {
-						fmt.Println("[media] FLOW: NO/LOW DATA")
-					}
-					return
+					_ = pc.AddICECandidate(webrtc.ICECandidateInit{Candidate: c, SDPMid: &mid, SDPMLineIndex: mlinePtr})
+					fmt.Printf("[media] +server candidate %.70s\n", c)
 				}
+				continue
 			}
 		}
 	}
-}
-
-func fullCapabilities() map[string]any {
-	return map[string]any{
-		"estimatedPerformanceIndex": 1000, "audioMix": true, "consumerUpdate": true,
-		"producerNotificationDataChannelVersion": 8, "producerCommandDataChannelVersion": 3,
-		"consumerScreenDataChannelVersion": 1, "producerScreenDataChannelVersion": 1,
-		"asrDataChannelVersion": 0, "animojiDataChannelVersion": 1, "animojiBackendRender": true,
-		"onDemandTracks": true, "unifiedPlan": true, "singleSession": true, "videoTracksCount": 1,
-		"red": true, "audioShare": false, "fastScreenShare": false, "videoSuspend": true,
-		"simulcast": false, "simulcastNativeOrder": true, "consumerFastScreenShare": false,
-		"consumerFastScreenShareQualityOnDemand": false, "transparentAudio": false,
+	mu.Lock()
+	total := received
+	mu.Unlock()
+	fmt.Printf("[media] received %d bytes RTP (%.1f kbit/s over the window)\n", total, float64(total)*8/40/1000)
+	if total > 100_000 {
+		fmt.Println("[media] FLOW: PASS")
+	} else {
+		fmt.Println("[media] FLOW: NO/LOW DATA")
 	}
 }
 
