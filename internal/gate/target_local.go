@@ -28,6 +28,12 @@ import (
 // shows in no process list and no test log (amendment A2).
 const EnvWBStreamToken = "OLCRTC_GATE_WBSTREAM_TOKEN"
 
+// EnvMaxKeys names the variable the max pair's two calls sessions come
+// from: exactly two comma-separated session keys, the server's first.
+// Like the WB token, the entry reads them into LocalOptions - never a
+// flag - and they join the run's secrets, scrubbed from every log.
+const EnvMaxKeys = "OLCRTC_GATE_MAX_KEYS"
+
 var (
 	// ErrLocalOptions is a local target asked for a plan it cannot run: a
 	// name it does not know, a provider left with no transport, a transport
@@ -37,6 +43,12 @@ var (
 	ErrPairNotCarried = errors.New("pair not carried by the target")
 	// ErrNoWBStreamToken fails every wbstream pair of a run without the
 	// token: a guest cannot be the first participant of an idle WB room.
+	// ErrNoMaxKeys fails every max pair of a run without both session keys:
+	// the two engine sides are two identities, or the SFU's same-uid dedup
+	// tears the pair apart (measured: a newer join of one identity Byes the
+	// older's signaling socket).
+	ErrNoMaxKeys = errors.New("max: " + EnvMaxKeys +
+		" must hold two comma-separated calls session keys, the server's first")
 	ErrNoWBStreamToken = errors.New("wbstream: " + EnvWBStreamToken +
 		" is not set (WB refuses a guest as the first participant of an idle room)")
 	// ErrServerExited is a server that ended before it joined its room.
@@ -60,6 +72,7 @@ const (
 	providerVKCalls    = "vkcalls"
 	providerWBStream   = "wbstream"
 	providerSaluteJazz = "salutejazz"
+	providerMAX        = "max"
 
 	transportData  = "datachannel"
 	transportVideo = "videochannel"
@@ -99,7 +112,7 @@ const (
 // and answers every join of ours 401, so its cells can only fail. It is still
 // carried, for the day that changes, and walked when named.
 func localProviders() []string {
-	return []string{providerJitsi, providerTelemost, providerMTSLink, providerSaluteJazz, providerVKCalls}
+	return []string{providerJitsi, providerTelemost, providerMTSLink, providerSaluteJazz, providerVKCalls, providerMAX}
 }
 
 // transportsOf is which transports a provider carries (amendment A1, the
@@ -128,6 +141,12 @@ func transportsOf(provider string) []string {
 		return []string{transportVP8}
 	case providerSaluteJazz:
 		return []string{transportData}
+	case providerMAX:
+		// The measured lane: the P2P pair's datagram datachannel carried
+		// 2.7-5.7 Mbit/s up and 777 kbit/s down through the room's SFU
+		// relay; a sendable media track the counterparty never answers,
+		// so no video transport (2026-10-18 carrier design, section 4).
+		return []string{transportData}
 	default:
 		return nil
 	}
@@ -148,10 +167,16 @@ type LocalOptions struct {
 	// WBStreamToken is the WB account token the server joins with; the
 	// client stays a guest, as the app is. From EnvWBStreamToken.
 	WBStreamToken string
-	RunNumber     int
-	Providers     []string
-	Transports    []string
-	DNS           string // default 8.8.8.8:53
+	// MaxRooms is the pool of max join links (max.ru/joincall/<hash>),
+	// created by the account browser the way the gates' other pools are.
+	MaxRooms []string
+	// MaxKeys are the pair's two calls session keys (server, client), from
+	// EnvMaxKeys; both sides join under identities of their own.
+	MaxKeys    []string
+	RunNumber  int
+	Providers  []string
+	Transports []string
+	DNS        string // default 8.8.8.8:53
 	// DTLSProfile is the dtls.profile every server and client of the run
 	// handshakes with; empty (or off) is the stock handshake.
 	DTLSProfile string
@@ -346,7 +371,8 @@ func (t *LocalTarget) endpoint(ctx context.Context, p Pair) (Endpoint, error) {
 	}
 	// VP8FPS and VP8Batch are the app's vp8channel numbers.
 	return Endpoint{Provider: p.Provider, Transport: p.Transport, Room: room, Key: key, Channel: channel,
-		DNS: t.opts.DNS, VP8FPS: 60, VP8Batch: 64, DTLSProfile: t.opts.DTLSProfile}, nil
+		ClientToken: t.clientToken(p.Provider),
+		DNS:         t.opts.DNS, VP8FPS: 60, VP8Batch: 64, DTLSProfile: t.opts.DTLSProfile}, nil
 }
 
 // room is where the pair's server goes: a fresh room on a Jitsi host that
@@ -381,6 +407,14 @@ func (t *LocalTarget) room(ctx context.Context, provider string) (string, error)
 			return "", fmt.Errorf("wbstream: %w: the entry names no room id", ErrPoolRoom)
 		}
 		return id, nil
+	case providerMAX:
+		// The pool entries are the join links the provider reads
+		// (max.ru/joincall/<hash>), taken verbatim.
+		link, err := PoolRoom(t.opts.MaxRooms, t.opts.RunNumber)
+		if err != nil {
+			return "", fmt.Errorf("max: %w", err)
+		}
+		return link, nil
 	case providerVKCalls:
 		// The pool entries are the join links the provider validates
 		// (vk.ru/vk.com /call/join/<id>), taken verbatim.
@@ -404,10 +438,26 @@ func (t *LocalTarget) room(ctx context.Context, provider string) (string, error)
 
 // token is the account token the provider's server joins with, if any.
 func (t *LocalTarget) token(provider string) string {
-	if provider != providerWBStream {
+	switch provider {
+	case providerWBStream:
+		return t.opts.WBStreamToken
+	case providerMAX:
+		if len(t.opts.MaxKeys) > 0 {
+			return t.opts.MaxKeys[0]
+		}
+		return ""
+	default:
 		return ""
 	}
-	return t.opts.WBStreamToken
+}
+
+// clientToken is the CLIENT side's provider token; only the max pair runs
+// one (its second identity).
+func (t *LocalTarget) clientToken(provider string) string {
+	if provider == providerMAX && len(t.opts.MaxKeys) > 1 {
+		return t.opts.MaxKeys[1]
+	}
+	return ""
 }
 
 // secrets is what a server's log and errors lose before they leave: the
@@ -415,6 +465,7 @@ func (t *LocalTarget) token(provider string) string {
 // from a secret too, in every form a log writes them (see hostForms).
 func (t *LocalTarget) secrets(ep Endpoint) []string {
 	out := append(ep.Secrets(), t.opts.WBStreamToken)
+	out = append(out, t.opts.MaxKeys...)
 	if len(jitsiHostList(t.opts.JitsiHosts)) > 0 {
 		out = append(out, hostForms(t.jitsiHosts)...) // ai-generated: bare and lowercased too
 	}

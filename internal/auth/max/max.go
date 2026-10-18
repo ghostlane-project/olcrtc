@@ -70,9 +70,16 @@ func (p Provider) Issue(ctx context.Context, cfg auth.Config) (auth.Credentials,
 	}
 	client := protect.NewHTTPClient(resolver)
 
-	session, err := anonymLogin(ctx, client, cfg.Token, cfg.Name)
-	if err != nil {
-		return auth.Credentials{}, fmt.Errorf("max: anonymous login: %w", err)
+	// The gate and the provisioner hand out long-lived calls sessions
+	// (session keys, 20h+) as the token; a browser-issued calls token
+	// (auth_token, "An_..") goes through the anonymLogin exchange instead.
+	session := &anonymSession{SessionKey: cfg.Token}
+	if isCallsToken(cfg.Token) {
+		exchanged, err := anonymLogin(ctx, client, cfg.Token, cfg.Name)
+		if err != nil {
+			return auth.Credentials{}, fmt.Errorf("max: anonymous login: %w", err)
+		}
+		session = exchanged
 	}
 
 	// A room link names the call to join; without one a fresh group call is
@@ -95,6 +102,13 @@ func (p Provider) Issue(ctx context.Context, cfg auth.Config) (auth.Credentials,
 		return auth.Credentials{}, fmt.Errorf("max: conversation params: %w", err)
 	}
 
+	// The engine's pair rule (the lower uid offers) needs our uid; the
+	// join answer's endpoint query carries it, so both token shapes are
+	// covered without a second API call.
+	selfUID := session.UID
+	if m := uidFromEndpoint(params.Endpoint); m != "" && (selfUID == "" || selfUID == cfg.Name) {
+		selfUID = m
+	}
 	extra := map[string]string{
 		"sessionId":      conversationID,
 		"sessionKey":     session.SessionKey,
@@ -103,7 +117,7 @@ func (p Provider) Issue(ctx context.Context, cfg auth.Config) (auth.Credentials,
 		"turnUsername":   params.TURN.Username,
 		"turnCredential": params.TURN.Credential,
 		"stunUrl":        strings.Join(params.STUN.URLs, ","),
-		"userId":         session.UID,
+		"userId":         selfUID,
 	}
 	if params.WTEndpoint != "" {
 		extra["wtEndpoint"] = params.WTEndpoint
@@ -217,5 +231,23 @@ func joinByLink(ctx context.Context, client *http.Client, s *anonymSession, join
 	return &p, nil
 }
 
-// unused guards against import pruning while the engine is not yet written.
+// isCallsToken says the token is a browser-issued calls auth_token (the
+// anonymLogin exchange) rather than a ready session key.
+func isCallsToken(token string) bool {
+	return strings.HasPrefix(token, "An_") || strings.HasPrefix(token, "$")
+}
+
+// uidFromEndpoint reads userId= out of the join endpoint's query.
+func uidFromEndpoint(endpoint string) string {
+	i := strings.Index(endpoint, "userId=")
+	if i < 0 {
+		return ""
+	}
+	v := endpoint[i+len("userId="):]
+	if j := strings.IndexAny(v, "&?#"); j >= 0 {
+		v = v[:j]
+	}
+	return v
+}
+
 var _ = strconv.Itoa

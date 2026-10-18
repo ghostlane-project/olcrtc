@@ -178,6 +178,23 @@ func SaluteJazzRoom(ctx context.Context) (string, error) {
 	return room, nil
 }
 
+// maxKeys splits the two comma-separated calls session keys, trimmed;
+// anything but two is left empty so the pairs fail naming EnvMaxKeys
+// instead of half-joining under one identity.
+func maxKeys(v string) []string {
+	parts := strings.Split(v, ",")
+	if len(parts) != 2 {
+		return nil
+	}
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+		if parts[i] == "" {
+			return nil
+		}
+	}
+	return parts
+}
+
 // PoolRoom takes the entry of a pre-made pool the run number lands on, so
 // runs in sequence take turns. Runs at the same time can still land in one
 // room (a pool of one always puts them there): the workflow's concurrency

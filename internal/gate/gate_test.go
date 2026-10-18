@@ -36,6 +36,7 @@ const (
 	envWBStreamRooms = "OLCRTC_GATE_WBSTREAM_ROOMS"
 	envVKCallsRooms  = "OLCRTC_GATE_VKCALLS_ROOMS"
 	envMTSLinkRooms  = "OLCRTC_GATE_MTSLINK_ROOMS"
+	envMaxRooms      = "OLCRTC_GATE_MAX_ROOMS"
 	envJitsiHosts    = "OLCRTC_GATE_JITSI_HOSTS"
 	envEngineCommit  = "OLCRTC_GATE_ENGINE_COMMIT"
 	envEngineRef     = "OLCRTC_GATE_ENGINE_REF"
@@ -94,6 +95,8 @@ var (
 		"VK Calls room pool, comma-separated join links; else "+envVKCallsRooms)
 	gateMTSLink = flag.String("olcrtc.gate-mtslink-rooms", "",
 		"MTS Link room pool, comma-separated event join links; else "+envMTSLinkRooms)
+	gateMaxRooms = flag.String("olcrtc.gate-max-rooms", "",
+		"max room pool, comma-separated join links (max.ru/joincall/<hash>); else "+envMaxRooms)
 	gateJitsiHosts = flag.String("olcrtc.gate-jitsi-hosts", "",
 		"comma-separated Jitsi hosts to use instead of the instance list; else "+envJitsiHosts)
 	gateInstances = flag.String("olcrtc.gate-jitsi-instances", instancesFile,
@@ -360,6 +363,10 @@ func localTarget(t *testing.T, root, dtlsProfile string, dry bool) (*LocalTarget
 		WBStreamRooms: listOf(*gateWBStream, os.Getenv(envWBStreamRooms)),
 		VKCallsRooms:  listOf(*gateVKCalls, os.Getenv(envVKCallsRooms)),
 		MTSLinkRooms:  listOf(*gateMTSLink, os.Getenv(envMTSLinkRooms)),
+		MaxRooms:      listOf(*gateMaxRooms, os.Getenv(envMaxRooms)),
+		// ai-generated: trimmed as the WB token is, one stray line break
+		// and the pair joins under half a key.
+		MaxKeys: maxKeys(os.Getenv(EnvMaxKeys)),
 		// ai-generated: trimmed, as the CI's require step reads it: a line
 		// break stored after the token would reach the server's YAML.
 		WBStreamToken: strings.TrimSpace(os.Getenv(EnvWBStreamToken)),
