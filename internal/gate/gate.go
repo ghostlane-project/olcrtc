@@ -43,6 +43,10 @@ type Endpoint struct {
 	// DTLSProfile is the DTLS ClientHello profile both ends handshake with
 	// (dtls.profile), empty for the stock handshake. Not a secret.
 	DTLSProfile string
+	// ClientToken is a provider token for the CLIENT side alone (the max
+	// pair runs two identities: the server joins with its own token, the
+	// client with this one); empty when the client is a guest.
+	ClientToken string
 	// ServerLog is the raw log of the server behind this endpoint, for a
 	// target that runs one; empty for the link target, whose server is a
 	// fleet node. A failed cell is read for what the relay did to it (see

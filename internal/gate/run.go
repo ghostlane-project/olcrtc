@@ -186,7 +186,8 @@ func openPair(ctx context.Context, o Options, pair Pair, dir string) (Endpoint, 
 // a provider's refusal or the network may pass, a plan without a room, a
 // token or the pair never will.
 func retryable(err error) bool {
-	return !errors.Is(err, ErrNoWBStreamToken) && !errors.Is(err, ErrPoolRoom) && !errors.Is(err, ErrPairNotCarried)
+	return !errors.Is(err, ErrNoWBStreamToken) && !errors.Is(err, ErrNoMaxKeys) &&
+		!errors.Is(err, ErrPoolRoom) && !errors.Is(err, ErrPairNotCarried)
 }
 
 // providerRefused says whether a client failed on its provider's refusal (auth,

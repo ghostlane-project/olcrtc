@@ -77,8 +77,9 @@ func (mobileClient) Start(ctx context.Context, ep Endpoint) (*Tunnel, error) {
 // configureMobile hands the endpoint to the runtime with the app's numbers:
 // vp8channel at the endpoint's rate and batch (the app's when it names
 // none), every other transport at the runtime's defaults, which the app
-// leaves alone too. The pair's channel is the one setting the app does not
-// make; the SOCKS port is set just before the start.
+// leaves alone too. The pair's channel and the client's provider token (the
+// max pair's second identity) are the settings the app does not make; the
+// SOCKS port is set just before the start.
 func configureMobile(rt *mobile.Runtime, ep Endpoint) error {
 	steps := []struct {
 		name string
@@ -99,6 +100,7 @@ func configureMobile(rt *mobile.Runtime, ep Endpoint) error {
 		}
 	}
 	rt.SetChannel(ep.Channel)
+	rt.SetProviderToken(ep.ClientToken)
 	rt.SetDeviceID("gate-mobile")
 	return nil
 }

@@ -45,12 +45,13 @@ go test -count=1 -tags olcrtc_lean -timeout 45m ./internal/gate -run '^TestGate$
 | `-olcrtc.gate` | выключен | запуск гейта |
 | `-olcrtc.gate-target` | `local` | `local`: дочерний сервер на каждую пару; `link`: сервер за ссылкой `olcrtc://` |
 | `-olcrtc.gate-dir` | `gate-artifacts` | куда пишутся отчёт и очищенные логи; относительный путь считается от корня модуля |
-| `-olcrtc.gate-providers` | `jitsi,telemost,mtslink,salutejazz,vkcalls` | провайдеры локальной цели, по очереди. `wbstream` поддерживается, но в умолчание не входит: сервис 10.10.2026 закрыл бету для всех, кроме своих сотрудников, и на каждый вход отвечает 401, поэтому он идёт только когда назван |
+| `-olcrtc.gate-providers` | `jitsi,telemost,mtslink,salutejazz,vkcalls,max` | провайдеры локальной цели, по очереди. `wbstream` поддерживается, но в умолчание не входит: сервис 10.10.2026 закрыл бету для всех, кроме своих сотрудников, и на каждый вход отвечает 401, поэтому он идёт только когда назван |
 | `-olcrtc.gate-transports` | `datachannel,seichannel,vp8channel` | транспорты локальной цели, см. [Пары](#пары); `videochannel` запускается, только если его назвать |
 | `-olcrtc.gate-clients` | свой для сборки | `cli` в обычной сборке, `mobile` в сборке `olcrtc_lean`, один вариант на процесс |
 | `-olcrtc.gate-telemost-rooms` | пусто | пул Telemost; иначе `OLCRTC_GATE_TELEMOST_ROOMS` |
 | `-olcrtc.gate-vkcalls-rooms` | пусто | пул VK Calls, ссылки на комнаты; иначе `OLCRTC_GATE_VKCALLS_ROOMS` |
 | `-olcrtc.gate-mtslink-rooms` | пусто | пул MTS Link, ссылки на вход в мероприятие; иначе `OLCRTC_GATE_MTSLINK_ROOMS` |
+| `-olcrtc.gate-max-rooms` | пусто | пул max, ссылки на вход (max.ru/joincall/&#x200b;*); иначе `OLCRTC_GATE_MAX_ROOMS` |
 | `-olcrtc.gate-wbstream-rooms` | пусто | пул WB Stream; иначе `OLCRTC_GATE_WBSTREAM_ROOMS` |
 | `-olcrtc.gate-jitsi-hosts` | пусто | хосты Jitsi вместо списка инстансов; иначе `OLCRTC_GATE_JITSI_HOSTS` |
 | `-olcrtc.gate-jitsi-instances` | `docs/jitsi.instances.yaml` | список инстансов Jitsi; относительный путь считается от корня модуля |
@@ -70,6 +71,8 @@ go test -count=1 -tags olcrtc_lean -timeout 45m ./internal/gate -run '^TestGate$
 | `OLCRTC_GATE_TELEMOST_ROOMS` | пул Telemost, если его флаг пуст |
 | `OLCRTC_GATE_VKCALLS_ROOMS` | пул VK Calls, если его флаг пуст |
 | `OLCRTC_GATE_MTSLINK_ROOMS` | пул MTS Link, если его флаг пуст |
+| `OLCRTC_GATE_MAX_ROOMS` | пул max, если его флаг пуст |
+| `OLCRTC_GATE_MAX_KEYS` | две calls-сессии пары max через запятую, первой - серверная; две стороны движка - две личности, иначе дедуп SFU по uid разрывает пару |
 | `OLCRTC_GATE_WBSTREAM_ROOMS` | пул WB Stream, если его флаг пуст |
 | `OLCRTC_GATE_WBSTREAM_TOKEN` | токен аккаунта WB Stream для локального сервера; флага у него нет |
 | `OLCRTC_GATE_JITSI_HOSTS` | хосты Jitsi, если их флаг пуст |
@@ -109,6 +112,8 @@ go test -count=1 -tags olcrtc_lean -timeout 45m ./internal/gate -run '^TestGate$
 |---|---|---|---|
 | `GATE_TELEMOST_ROOMS` | да | `OLCRTC_GATE_TELEMOST_ROOMS` | пул Telemost: id или URL комнат |
 | `GATE_MTSLINK_ROOMS` | да | `OLCRTC_GATE_MTSLINK_ROOMS` | пул MTS Link: ссылки на вход (https://my.mts-link.ru/j/<owner>/<event>) в постоянные встречи. В дефолтном обходе с 11.10.2026, после live-валидации движка |
+| `GATE_MAX_ROOMS` | да | `OLCRTC_GATE_MAX_ROOMS` | пул max: ссылки на вход (max.ru/joincall/*), создаёт браузер аккаунта. Читается, когда провайдер `max` назван в `-olcrtc.gate-providers`; в дефолтном обходе с 18.10.2026, после живого замера carrier'а |
+| `GATE_MAX_KEYS` | да | `OLCRTC_GATE_MAX_KEYS` | две calls-сессии пары max (первой — серверная). Живут 20+ часов; обновляются как прочие аккаунтные секреты |
 | `GATE_WBSTREAM_ROOMS` | нет | `OLCRTC_GATE_WBSTREAM_ROOMS` | пул WB Stream: id или URL комнат. Читается, когда `wbstream` назван в `-olcrtc.gate-providers` |
 | `GATE_WBSTREAM_TOKEN` | нет | `OLCRTC_GATE_WBSTREAM_TOKEN` | access token аккаунта WB Stream, читается вместе с пулом |
 | `GATE_JITSI_HOSTS` | нет | `OLCRTC_GATE_JITSI_HOSTS` | хосты Jitsi; пусто - список инстансов |
@@ -128,6 +133,7 @@ go test -count=1 -tags olcrtc_lean -timeout 45m ./internal/gate -run '^TestGate$
 | `vkcalls` | `vp8channel`, `videochannel` (SFU не мостит data между гостями) |
 | `mtslink` | `vp8channel` (SFU не передаёт data между гостями и пересылает VP9 и H264, но не VP8: `vp8channel` одевает свои кадры в VP9, остальные видеотранспорты публикуют то, что он не берёт) |
 | `salutejazz` | `datachannel` (Сбер пускает гостя только в data-каналы комнаты, никогда в медиадорожку) |
+| `max` | `datachannel` (канал «datagram» P2P-пары - замеренная полоса: 2,7-5,7 Мбит/с вверх, 777 кбит/с вниз через SFU-relay комнаты; на медиадорожку от нас собеседник не отвечает, поэтому видеотранспортов нет) |
 
 По умолчанию `-olcrtc.gate-transports` запускает `datachannel`, `seichannel` и `vp8channel`, те из них, что несёт хоть один провайдер. `videochannel` запускается, только если его назвать: он шлёт один фрагмент в 256 байт на кадр при 30 fps, около 7,5 KiB/s, так что одна большая загрузка S0 на 10 MiB не уложилась бы в 5 мин ячейки. Список, заданный в командной строке, берётся как есть: неизвестное имя, транспорт, которого нет в сборке (в lean-сборке нет `videochannel`) или который не несёт ни один провайдер, и провайдер, оставшийся без транспортов, - ошибки плана. У цели link одна пара - пара ссылки.
 

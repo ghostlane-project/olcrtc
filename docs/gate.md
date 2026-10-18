@@ -45,12 +45,13 @@ go test -count=1 -tags olcrtc_lean -timeout 45m ./internal/gate -run '^TestGate$
 | `-olcrtc.gate` | off | run the gate |
 | `-olcrtc.gate-target` | `local` | `local`: a child server per pair; `link`: the server behind an `olcrtc://` link |
 | `-olcrtc.gate-dir` | `gate-artifacts` | where the report and the scrubbed logs go; a relative path is taken from the module root |
-| `-olcrtc.gate-providers` | `jitsi,telemost,mtslink,salutejazz,vkcalls` | providers of the local target, run one after another. `wbstream` is carried and left out of the default: the service closed its beta to its own staff on 2026-10-10 and answers every join 401, so it runs only when named |
+| `-olcrtc.gate-providers` | `jitsi,telemost,mtslink,salutejazz,vkcalls,max` | providers of the local target, run one after another. `wbstream` is carried and left out of the default: the service closed its beta to its own staff on 2026-10-10 and answers every join 401, so it runs only when named |
 | `-olcrtc.gate-transports` | `datachannel,seichannel,vp8channel` | transports of the local target, see [Pairs](#pairs); `videochannel` runs only when named |
 | `-olcrtc.gate-clients` | the build's own | `cli` in a default build, `mobile` in an `olcrtc_lean` one, one flavour per process |
 | `-olcrtc.gate-telemost-rooms` | empty | Telemost pool; else `OLCRTC_GATE_TELEMOST_ROOMS` |
 | `-olcrtc.gate-vkcalls-rooms` | empty | VK Calls pool, join links; else `OLCRTC_GATE_VKCALLS_ROOMS` |
 | `-olcrtc.gate-mtslink-rooms` | empty | MTS Link pool, event join links; else `OLCRTC_GATE_MTSLINK_ROOMS` |
+| `-olcrtc.gate-max-rooms` | empty | max pool, join links (max.ru/joincall/&#x200b;*); else `OLCRTC_GATE_MAX_ROOMS` |
 | `-olcrtc.gate-wbstream-rooms` | empty | WB Stream pool; else `OLCRTC_GATE_WBSTREAM_ROOMS` |
 | `-olcrtc.gate-jitsi-hosts` | empty | Jitsi hosts used instead of the instance list; else `OLCRTC_GATE_JITSI_HOSTS` |
 | `-olcrtc.gate-jitsi-instances` | `docs/jitsi.instances.yaml` | the Jitsi instance list; a relative path is taken from the module root |
@@ -70,6 +71,8 @@ The environment:
 | `OLCRTC_GATE_TELEMOST_ROOMS` | Telemost pool, when its flag is empty |
 | `OLCRTC_GATE_VKCALLS_ROOMS` | VK Calls pool, when its flag is empty |
 | `OLCRTC_GATE_MTSLINK_ROOMS` | MTS Link pool, when its flag is empty |
+| `OLCRTC_GATE_MAX_ROOMS` | max pool, when its flag is empty |
+| `OLCRTC_GATE_MAX_KEYS` | the max pair's two calls session keys, comma-separated, the server's first; the two engine sides are two identities, or the SFU's same-uid dedup tears the pair apart |
 | `OLCRTC_GATE_WBSTREAM_ROOMS` | WB Stream pool, when its flag is empty |
 | `OLCRTC_GATE_WBSTREAM_TOKEN` | WB Stream account token of the local server; it has no flag |
 | `OLCRTC_GATE_JITSI_HOSTS` | Jitsi hosts, when their flag is empty |
@@ -113,6 +116,8 @@ Secrets of the engine repository (Settings > Secrets and variables > Actions) fo
 | `GATE_WBSTREAM_TOKEN` | no | `OLCRTC_GATE_WBSTREAM_TOKEN` | WB Stream account access token, read with the pool |
 | `GATE_JITSI_HOSTS` | no | `OLCRTC_GATE_JITSI_HOSTS` | Jitsi hosts; empty means the instance list |
 | `GATE_VKCALLS_ROOMS` | no | `OLCRTC_GATE_VKCALLS_ROOMS` | VK Calls pool: room URLs (https://vk.ru/call/join/<id>). Read when the `vkcalls` provider is named in `-olcrtc.gate-providers`; it is in the default walk since 2026-09-28, after the engine's live validation (19 Mbit/s both ways, S0-S7) |
+| `GATE_MAX_ROOMS` | yes | `OLCRTC_GATE_MAX_ROOMS` | max pool: join links (max.ru/joincall/*), created by the account browser. Read when the `max` provider is named in `-olcrtc.gate-providers`; in the default walk since 2026-10-18, after the live carrier measurement |
+| `GATE_MAX_KEYS` | yes | `OLCRTC_GATE_MAX_KEYS` | the max pair's two calls session keys (the server's first). Live 20h+; refreshed the way the other account secrets are |
 
 The job's first step masks every entry, the room id an entry's URL ends in, each Jitsi host as given and bare, and the token; then it names each required secret that is not set. The cells that need a missing secret fail in the report with the same reason, so the job fails, while the other providers still run. The secrets reach `go test` through step `env` only, never argv or script text. Set a secret from standard input (`gh secret set GATE_WBSTREAM_TOKEN`), never on the command line, and never commit a room, a link, a key or a token.
 
@@ -127,6 +132,7 @@ The local target crosses the providers with the transports in the order given an
 | `wbstream` | `vp8channel`, `videochannel`, `seichannel` (WB guests cannot publish data) |
 | `vkcalls` | `vp8channel`, `videochannel` (the SFU bridges no data between guests) |
 | `mtslink` | `vp8channel` (the SFU relays no data between guests and forwards VP9 and H264, never VP8: `vp8channel` dresses its frames as VP9 for it, the other video transports publish what it does not take) |
+| `max` | `datachannel` (the P2P pair's datagram channel is the measured lane: 2.7-5.7 Mbit/s up, 777 kbit/s down through the room's SFU relay; the counterparty answers no sendable media track, so no video transport) |
 | `salutejazz` | `datachannel` (Sber admits a guest to the room's data channels only, never to a media track) |
 
 Left at its default, `-olcrtc.gate-transports` runs `datachannel`, `seichannel` and `vp8channel`, those of them some provider carries. `videochannel` runs only when named: it sends one 256-byte fragment a frame at 30 fps, about 7.5 KiB/s, so S0's 10 MiB pull alone would outlast the cell's 5 min. A list given on the command line is taken as it is: an unknown name, a transport this build does not link (the lean build has no `videochannel`) or no provider carries, and a provider left with none are plan errors. The link target has one pair, the link's.
