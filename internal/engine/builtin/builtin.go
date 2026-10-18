@@ -14,6 +14,7 @@ import (
 
 	"github.com/openlibrecommunity/olcrtc/internal/auth"
 	authJitsi "github.com/openlibrecommunity/olcrtc/internal/auth/jitsi"
+	authMax "github.com/openlibrecommunity/olcrtc/internal/auth/max"
 	authMtsLink "github.com/openlibrecommunity/olcrtc/internal/auth/mtslink"
 	authSaluteJazz "github.com/openlibrecommunity/olcrtc/internal/auth/salutejazz"
 	authTelemost "github.com/openlibrecommunity/olcrtc/internal/auth/telemost"
@@ -22,6 +23,7 @@ import (
 	"github.com/openlibrecommunity/olcrtc/internal/engine"
 	"github.com/openlibrecommunity/olcrtc/internal/engine/goolom"
 	engineJitsi "github.com/openlibrecommunity/olcrtc/internal/engine/jitsi"
+	engineMax "github.com/openlibrecommunity/olcrtc/internal/engine/max"
 	engineMtsLink "github.com/openlibrecommunity/olcrtc/internal/engine/mtslink"
 	engineSaluteJazz "github.com/openlibrecommunity/olcrtc/internal/engine/salutejazz"
 	engineVKCalls "github.com/openlibrecommunity/olcrtc/internal/engine/vkcalls"
@@ -119,12 +121,14 @@ func RegisterDefaults() {
 	engine.Register("salutejazz", engineSaluteJazz.New)
 	engine.Register("vkcalls", engineVKCalls.New)
 	engine.Register("mtslink", engineMtsLink.New)
+	engine.Register("max", engineMax.New)
 	register("wbstream", authWBStream.Provider{})
 	register("telemost", authTelemost.Provider{})
 	register("jitsi", authJitsi.Provider{})
 	register("salutejazz", authSaluteJazz.New())
 	register("vkcalls", authVKCalls.New())
 	register("mtslink", authMtsLink.New())
+	register("max", authMax.Provider{})
 	register("none", nil)
 }
 
