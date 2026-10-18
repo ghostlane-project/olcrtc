@@ -20,6 +20,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/pion/ice/v4"
 	"github.com/pion/webrtc/v4"
+	webrtc_media "github.com/pion/webrtc/v4/pkg/media"
 )
 
 const (
@@ -486,18 +487,38 @@ func runMedia(r *joinResult, conn *websocket.Conn, params *convParams, seq *int)
 	}
 	defer pc.Close()
 
-	// consumer shape: recvonly audio + video, plus a data m-line
-	for i := 0; i < 2; i++ {
-		_, _ = pc.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo, webrtc.RTPTransceiverInit{
-			Direction: webrtc.RTPTransceiverDirectionRecvonly})
+	// mixed shape: a sendable VP8 track for outbound measurement plus
+	// recvonly audio; the browser answers both
+	outTrack, err := webrtc.NewTrackLocalStaticSample(
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8, ClockRate: 90000}, "video", "video")
+	if err != nil {
+		fmt.Printf("[media] track: %v\n", err)
+		return
+	}
+	if _, err := pc.AddTrack(outTrack); err != nil {
+		fmt.Printf("[media] addTrack: %v\n", err)
+		return
 	}
 	_, _ = pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{
 		Direction: webrtc.RTPTransceiverDirectionRecvonly})
-	_, _ = pc.CreateDataChannel("datagram", nil)
+	go func() {
+		// ~2.5 Mbit/s of VP8-ish payloads: 1200B x 30fps would be slow; pump
+		// 260 packets/s to probe the ceiling
+		frame := make([]byte, 1100)
+		for i := range frame {
+			frame[i] = byte(i)
+		}
+		t := time.NewTicker(4 * time.Millisecond)
+		defer t.Stop()
+		for range t.C {
+			_ = outTrack.WriteSample(webrtc_media.Sample{Data: frame, Duration: 4 * time.Millisecond})
+		}
+	}()
 
 	var received int64
 	var mu sync.Mutex
 	var remoteSet = make(chan struct{}, 1)
+	var wmu sync.Mutex
 	pc.OnTrack(func(t *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 		buf := make([]byte, 1500)
 		for {
@@ -513,13 +534,268 @@ func runMedia(r *joinResult, conn *websocket.Conn, params *convParams, seq *int)
 	pc.OnConnectionStateChange(func(st webrtc.PeerConnectionState) { fmt.Printf("[media] PC %s\n", st) })
 	pc.OnICEConnectionStateChange(func(st webrtc.ICEConnectionState) { fmt.Printf("[media] ICE %s\n", st) })
 
-	offer, err := pc.CreateOffer(nil)
-	if err != nil {
-		fmt.Printf("[media] offer: %v\n", err)
+	if os.Getenv("MAX_P2P") != "" && r.OtherParticipant != 0 {
+		// P2P leg: offer the live browser through the transmit-data relay,
+		// trickle our candidates the same way, apply their answer verbatim
+		fmt.Printf("[media] P2P offer to participant %d\n", r.OtherParticipant)
+		pc.OnICECandidate(func(c *webrtc.ICECandidate) {
+			if c == nil {
+				return
+			}
+			ci := c.ToJSON()
+			if ci.Candidate == "" {
+				return
+			}
+			wmu.Lock()
+			*seq++
+			_ = conn.WriteJSON(map[string]any{
+				"command":       "transmit-data",
+				"sequence":      *seq,
+				"participantId": r.OtherParticipant,
+				"data": map[string]any{"candidate": map[string]any{
+					"candidate": ci.Candidate, "sdpMid": ci.SDPMid, "sdpMLineIndex": ci.SDPMLineIndex,
+				}},
+			})
+			wmu.Unlock()
+		})
+		offerP, err := pc.CreateOffer(nil)
+		if err != nil {
+			fmt.Printf("[media] p2p offer create: %v\n", err)
+			return
+		}
+		if err := pc.SetLocalDescription(offerP); err != nil {
+			fmt.Printf("[media] p2p local: %v\n", err)
+			return
+		}
+		*seq++
+		if err := conn.WriteJSON(map[string]any{
+			"command":       "transmit-data",
+			"sequence":      *seq,
+			"participantId": r.OtherParticipant,
+			"data": map[string]any{
+				"sdp":            map[string]string{"type": "offer", "sdp": offerP.SDP},
+				"animojiVersion": 1,
+			},
+		}); err != nil {
+			fmt.Printf("[media] p2p offer send: %v\n", err)
+			return
+		}
+		fmt.Printf("[media] P2P offer relayed (%d bytes SDP)\n", len(offerP.SDP))
+		window := time.Now().Add(60 * time.Second)
+		_ = conn.SetReadDeadline(window)
+		for time.Now().Before(window) {
+			mt, data, err := conn.ReadMessage()
+			if err != nil {
+				break
+			}
+			if mt == websocket.TextMessage && string(data) == "ping" {
+				_ = conn.WriteMessage(websocket.TextMessage, []byte("pong"))
+				continue
+			}
+			var m map[string]any
+			if json.Unmarshal(data, &m) != nil {
+				continue
+			}
+			if dm, ok := m["data"].(map[string]any); ok {
+				if sdpObj, ok := dm["sdp"].(map[string]any); ok {
+					if s, ok := sdpObj["sdp"].(string); ok {
+						typ, _ := sdpObj["type"].(string)
+						if typ == "answer" {
+							if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: s}); err != nil {
+								fmt.Printf("[media] p2p remote: %v\n", err)
+								continue
+							}
+							fmt.Printf("[media] P2P ANSWER APPLIED (%d bytes)\n", len(s))
+							_ = os.WriteFile("/tmp/max-p2p-answer.sdp", []byte(s), 0o644)
+						}
+					}
+				}
+				if cand, ok := dm["candidate"].(map[string]any); ok {
+					c, _ := cand["candidate"].(string)
+					if c != "" {
+						mid, _ := cand["sdpMid"].(string)
+						mline := uint16(0)
+						if v, ok := cand["sdpMLineIndex"].(float64); ok {
+							mline = uint16(v)
+						}
+						_ = pc.AddICECandidate(webrtc.ICECandidateInit{Candidate: c, SDPMid: &mid, SDPMLineIndex: &mline})
+						fmt.Printf("[media] +their candidate %.75s\n", c)
+					}
+				}
+			}
+		}
+		mu.Lock()
+		total := received
+		mu.Unlock()
+		fmt.Printf("[media] P2P received %d bytes RTP in 60s (%.1f kbit/s)\n", total, float64(total)*8/60/1000)
+		if total > 100_000 {
+			fmt.Println("[media] FLOW: PASS")
+		} else {
+			fmt.Println("[media] FLOW: NO/LOW DATA")
+		}
 		return
 	}
-	if err := pc.SetLocalDescription(offer); err != nil {
-		fmt.Printf("[media] local: %v\n", err)
+	*seq++
+	if err := conn.WriteJSON(map[string]any{
+		"command":      "allocate-consumer",
+		"sequence":     *seq,
+		"capabilities": fullCapabilities(),
+	}); err != nil {
+		fmt.Printf("[media] null allocate: %v\n", err)
+		return
+	}
+	fmt.Println("[media] caps-only allocate sent; awaiting the server offer")
+
+	// wait for the server's offer before touching the local description
+	gotOffer := ""
+	offerDeadline := time.Now().Add(25 * time.Second)
+	_ = conn.SetReadDeadline(offerDeadline)
+	for gotOffer == "" && time.Now().Before(offerDeadline) {
+		mt, data, err := conn.ReadMessage()
+		if err != nil {
+			break
+		}
+		if mt == websocket.TextMessage && string(data) == "ping" {
+			_ = conn.WriteMessage(websocket.TextMessage, []byte("pong"))
+			continue
+		}
+		var m map[string]any
+		if json.Unmarshal(data, &m) != nil {
+			continue
+		}
+		if d, ok := m["description"].(string); ok && len(d) > 100 {
+			gotOffer = d
+			_ = os.WriteFile("/tmp/max-server-offer.sdp", []byte(d), 0o644)
+		}
+	}
+	if gotOffer == "" {
+		// rooms with a live publisher answer an explicit offer instead:
+		// fall through to offering ourselves
+		fmt.Println("[media] no server offer - creating our own offer")
+		offer2, err := pc.CreateOffer(nil)
+		if err != nil {
+			fmt.Printf("[media] offer create: %v\n", err)
+			return
+		}
+		if err := pc.SetLocalDescription(offer2); err != nil {
+			fmt.Printf("[media] offer local: %v\n", err)
+			return
+		}
+		gd := time.Now().Add(6 * time.Second)
+		for pc.ICEGatheringState() != webrtc.ICEGatheringStateComplete && time.Now().Before(gd) {
+			time.Sleep(150 * time.Millisecond)
+		}
+		l2 := pc.LocalDescription()
+		k2 := []string{}
+		for _, ln := range strings.Split(l2.SDP, "\r\n") {
+			if strings.HasPrefix(ln, "a=candidate:") {
+				if strings.Contains(ln, " tcp ") {
+					continue
+				}
+				f := strings.Split(ln, " ")
+				if len(f) > 4 && (strings.HasPrefix(f[4], "10.") || strings.HasPrefix(f[4], "172.") || strings.HasPrefix(f[4], "192.168.")) {
+					continue
+				}
+			}
+			k2 = append(k2, ln)
+		}
+		*seq++
+		if err := conn.WriteJSON(map[string]any{
+			"command":      "allocate-consumer",
+			"sequence":     *seq,
+			"description":  strings.Join(k2, "\r\n"),
+			"capabilities": fullCapabilities(),
+		}); err != nil {
+			fmt.Printf("[media] offer send: %v\n", err)
+			return
+		}
+		fmt.Println("[media] explicit offer sent; awaiting answer")
+		ansDeadline := time.Now().Add(25 * time.Second)
+		_ = conn.SetReadDeadline(ansDeadline)
+		for time.Now().Before(ansDeadline) {
+			mt, data, err := conn.ReadMessage()
+			if err != nil {
+				break
+			}
+			if mt == websocket.TextMessage && string(data) == "ping" {
+				_ = conn.WriteMessage(websocket.TextMessage, []byte("pong"))
+				continue
+			}
+			var m map[string]any
+			if json.Unmarshal(data, &m) != nil {
+				continue
+			}
+			if d, ok := m["description"].(string); ok && len(d) > 100 {
+				if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: d}); err != nil {
+					fmt.Printf("[media] remote answer: %v\n", err)
+					continue
+				}
+				fmt.Printf("[media] ANSWER APPLIED (%d bytes)\n", len(d))
+				_ = os.WriteFile("/tmp/max-sfu-answer.sdp", []byte(d), 0o644)
+				break
+			}
+		}
+		// skip the standard answer-send path: local description already set
+		local := pc.LocalDescription()
+		sdpFull := ""
+		_ = local
+		_ = sdpFull
+		*seq++
+		_ = conn.WriteJSON(map[string]any{"command": "report-perf-stat", "sequence": *seq})
+		// jump into the measurement window
+		window := time.Now().Add(40 * time.Second)
+		_ = conn.SetReadDeadline(window)
+		for time.Now().Before(window) {
+			mt, data, err := conn.ReadMessage()
+			if err != nil {
+				break
+			}
+			if mt == websocket.TextMessage && string(data) == "ping" {
+				_ = conn.WriteMessage(websocket.TextMessage, []byte("pong"))
+				continue
+			}
+			var m map[string]any
+			if json.Unmarshal(data, &m) != nil {
+				continue
+			}
+			if dm, ok := m["data"].(map[string]any); ok {
+				if cand, ok := dm["candidate"].(map[string]any); ok {
+					c, _ := cand["candidate"].(string)
+					if c != "" {
+						mid, _ := cand["sdpMid"].(string)
+						mline := uint16(0)
+						if v, ok := cand["sdpMLineIndex"].(float64); ok {
+							mline = uint16(v)
+						}
+						_ = pc.AddICECandidate(webrtc.ICECandidateInit{Candidate: c, SDPMid: &mid, SDPMLineIndex: &mline})
+						fmt.Printf("[media] +candidate %.70s\n", c)
+					}
+				}
+			}
+		}
+		mu.Lock()
+		total := received
+		mu.Unlock()
+		fmt.Printf("[media] received %d bytes RTP (%.1f kbit/s)\n", total, float64(total)*8/40/1000)
+		if total > 100_000 {
+			fmt.Println("[media] FLOW: PASS")
+		} else {
+			fmt.Println("[media] FLOW: NO/LOW DATA")
+		}
+		return
+	}
+	fmt.Printf("[media] server offer arrived (%d bytes) - answering\n", len(gotOffer))
+	if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: gotOffer}); err != nil {
+		fmt.Printf("[media] remote offer: %v\n", err)
+		return
+	}
+	ans, err := pc.CreateAnswer(nil)
+	if err != nil {
+		fmt.Printf("[media] answer create: %v\n", err)
+		return
+	}
+	if err := pc.SetLocalDescription(ans); err != nil {
+		fmt.Printf("[media] answer local: %v\n", err)
 		return
 	}
 	deadline := time.Now().Add(6 * time.Second)
@@ -553,7 +829,7 @@ func runMedia(r *joinResult, conn *websocket.Conn, params *convParams, seq *int)
 		fmt.Printf("[media] send: %v\n", err)
 		return
 	}
-	fmt.Printf("[media] allocate-consumer with candidates-in-SDP (%d bytes)\n", len(sdpFull))
+	fmt.Printf("[media] consumer ANSWER sent (%d bytes)\n", len(sdpFull))
 
 	// read loop: apply the server answer, then keep applying trickled
 	// candidates and count RTP until the window closes
