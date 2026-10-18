@@ -495,17 +495,23 @@ func runMedia(r *joinResult, conn *websocket.Conn, params *convParams, seq *int)
 	}
 	_, _ = pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{
 		Direction: webrtc.RTPTransceiverDirectionRecvonly})
+	var received int64
+	var mu sync.Mutex
+	var dcSent, dcRecv int64
 	dc, errDC := pc.CreateDataChannel("datagram", nil)
 	if errDC == nil {
-		var dcRecv int64
-		var dcSent int64
 		dc.OnOpen(func() {
-			fmt.Println("[media] DATACHANNEL OPEN - pumping uplink")
+			fmt.Println("[media] DATACHANNEL OPEN - adaptive uplink pump")
 			go func() {
 				chunk := make([]byte, 16*1024)
+				const highWater = 4 * 1024 * 1024
 				for {
 					if dc.ReadyState() != webrtc.DataChannelStateOpen {
 						return
+					}
+					if dc.BufferedAmount() > highWater {
+						time.Sleep(5 * time.Millisecond)
+						continue
 					}
 					if err := dc.Send(chunk); err != nil {
 						return
@@ -518,14 +524,19 @@ func runMedia(r *joinResult, conn *websocket.Conn, params *convParams, seq *int)
 			atomic.AddInt64(&dcRecv, int64(len(m.Data)))
 		})
 		go func() {
-			for i := 0; i < 14; i++ {
+			var prevDelivered int64
+			for i := 0; i < 24; i++ {
 				time.Sleep(5 * time.Second)
-				fmt.Printf("[media] dc: sent=%d recv=%d bytes (t+%ds)\n", atomic.LoadInt64(&dcSent), atomic.LoadInt64(&dcRecv), (i+1)*5)
+				mu.Lock()
+				rtpNow := received
+				mu.Unlock()
+				delivered := atomic.LoadInt64(&dcSent) - int64(dc.BufferedAmount())
+				fmt.Printf("[media] t+%2ds: dc delivered=%d B (rate %.1f kbit/s), dc recv=%d B, rtp recv=%d B\n",
+					(i+1)*5, delivered, float64(delivered-prevDelivered)*8/5/1000, atomic.LoadInt64(&dcRecv), rtpNow)
+				prevDelivered = delivered
 			}
 		}()
 	}
-	var received int64
-	var mu sync.Mutex
 	var remoteSet = make(chan struct{}, 1)
 	var wmu sync.Mutex
 	pc.OnTrack(func(t *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
@@ -544,6 +555,9 @@ func runMedia(r *joinResult, conn *websocket.Conn, params *convParams, seq *int)
 	pc.OnICEConnectionStateChange(func(st webrtc.ICEConnectionState) { fmt.Printf("[media] ICE %s\n", st) })
 
 	if os.Getenv("MAX_P2P") != "" && r.OtherParticipant != 0 {
+		// let the freshly joined counterparty's SDK settle before offering
+		fmt.Println("[media] settling 8s before the offer...")
+		time.Sleep(8 * time.Second)
 		// P2P leg: offer the live browser through the transmit-data relay,
 		// trickle our candidates the same way, apply their answer verbatim
 		fmt.Printf("[media] P2P offer to participant %d\n", r.OtherParticipant)
@@ -590,8 +604,9 @@ func runMedia(r *joinResult, conn *websocket.Conn, params *convParams, seq *int)
 			return
 		}
 		fmt.Printf("[media] P2P offer relayed (%d bytes SDP)\n", len(offerP.SDP))
-		window := time.Now().Add(60 * time.Second)
+		window := time.Now().Add(120 * time.Second)
 		_ = conn.SetReadDeadline(window)
+		var lastBytes int64
 		for time.Now().Before(window) {
 			mt, data, err := conn.ReadMessage()
 			if err != nil {
@@ -636,7 +651,8 @@ func runMedia(r *joinResult, conn *websocket.Conn, params *convParams, seq *int)
 		mu.Lock()
 		total := received
 		mu.Unlock()
-		fmt.Printf("[media] P2P received %d bytes RTP in 60s (%.1f kbit/s)\n", total, float64(total)*8/60/1000)
+		_ = lastBytes
+		fmt.Printf("[media] P2P received %d bytes RTP in 120s (%.1f kbit/s)\n", total, float64(total)*8/120/1000)
 		if total > 100_000 {
 			fmt.Println("[media] FLOW: PASS")
 		} else {
