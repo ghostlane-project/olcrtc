@@ -52,6 +52,7 @@ type Session struct {
 	turn     []webrtc.ICEServer
 
 	peer     atomic.Int64 // the other participant's uid, from accept-call
+	offered  atomic.Bool  // the relay offer left exactly once, on a live peer
 	selfUID  int64
 	topology string // DIRECT rides the participant relay, SERVER the SFU legs
 	pc       atomic.Pointer[webrtc.PeerConnection]
@@ -303,8 +304,12 @@ func (s *Session) readLoop(sig *signaling, pc *webrtc.PeerConnection, dc *webrtc
 			_ = sig.sendPong()
 
 		case resp != nil && resp.Response == "accept-call":
+			// Only record: the list can name a uid whose socket is not up
+			// yet (the joiner registers before it dials) and an offer
+			// relayed that early is dropped - the offer waits for the
+			// participant-joined push, which fires on a live socket.
 			if len(resp.ParticipantIDs) > 0 {
-				s.handlePeerSeen(pc, sig, resp.ParticipantIDs[0])
+				s.peer.Store(resp.ParticipantIDs[0])
 			}
 
 		case resp != nil && resp.Notification == "participant-joined":
@@ -317,6 +322,20 @@ func (s *Session) readLoop(sig *signaling, pc *webrtc.PeerConnection, dc *webrtc
 				peer = resp.ParticipantIDs[0]
 			}
 			if peer != 0 {
+				s.handlePeerSeen(pc, sig, peer) // fires on a live socket: this one may offer
+			}
+
+		case resp != nil && resp.Notification == "registered-peer":
+			// The peer's registration push: the other side's signaling and
+			// media registration are up, the measured moment an offer
+			// meets a live receiver (the SDK's own join marker rides this
+			// frame too).
+			peer := resp.ParticipantID
+			if peer == 0 && len(resp.ParticipantIDs) > 0 {
+				peer = resp.ParticipantIDs[0]
+			}
+			if peer != 0 {
+				logger.Debugf("max: registered-peer %d", peer)
 				s.handlePeerSeen(pc, sig, peer)
 			}
 
@@ -389,7 +408,8 @@ func (s *Session) readLoop(sig *signaling, pc *webrtc.PeerConnection, dc *webrtc
 // one the measured SDK answers (recvonly + datachannel), with candidates
 // stripped from the SDP and trickled separately under the relay cap.
 func (s *Session) handlePeerSeen(pc *webrtc.PeerConnection, sig *signaling, other int64) {
-	if !s.peer.CompareAndSwap(0, other) {
+	s.peer.Store(other)
+	if !s.offered.CompareAndSwap(false, true) {
 		return
 	}
 	logger.Infof("max: peer participant %d", other)
