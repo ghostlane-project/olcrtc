@@ -1,48 +1,71 @@
 // Package max provides the engine for VK MAX calls. The signaling rides
-// a JSON WebSocket (not the main messaging protocol's binary MessagePack —
-// the calls endpoint speaks plain JSON frames).
+// two protocols on the same WebSocket (wss://videowebrtc.okcdn.ru/ws2):
+// JSON text frames for control commands (accept-call, change-media-settings)
+// and binary MessagePack frames for the SDP exchange (TRANSMIT_DATA), the
+// same binary protocol the ok-calls SDK speaks.
 package max
 
 import (
+	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+	msgpack "github.com/vmihailenco/msgpack/v5"
 )
 
-// sigMessage is one JSON frame on the calls WebSocket.
+const (
+	// protoVersion is the binary protocol's version byte.
+	protoVersion = 10
+	// headerSize is the binary header: version, cmd, seq(2), opcode(2), chunks, len(3).
+	headerSize = 10
+	// cmdSignaling is the command byte for signaling messages.
+	cmdSignaling = 1
+	// opTransmitData is the opcode for TRANSMIT_DATA (carries SDP).
+	opTransmitData = 6
+)
+
+// sigMessage is one JSON control frame.
 type sigMessage struct {
-	Type string          `json:"type,omitempty"`
-	Data json.RawMessage `json:"data,omitempty"`
+	Type     string          `json:"type,omitempty"`
+	Command  string          `json:"command,omitempty"`
+	Sequence int             `json:"sequence,omitempty"`
+	Data     json.RawMessage `json:"data,omitempty"`
 }
 
-// notification is the SFU's initial assignment (peerId, TURN, limits).
+// transmitData is the binary TRANSMIT_DATA payload: the SDP exchange.
+type transmitData struct {
+	Name   string `msgpack:"name"`
+	Params struct {
+		ParticipantID int `msgpack:"participantId"`
+		Data          struct {
+			SDP  string `msgpack:"sdp"`
+			Type string `msgpack:"type"`
+		} `msgpack:"data"`
+	} `msgpack:"params"`
+}
+
+// notification is the SFU's initial assignment.
 type notification struct {
 	Stamp  int64 `json:"stamp"`
 	PeerID struct {
 		ID int64 `json:"id"`
 	} `json:"peerId"`
-	Endpoint           string `json:"endpoint"`
-	ConversationParams struct {
-		TURN struct {
-			URLs       []string `json:"urls"`
-			Username   string   `json:"username"`
-			Credential string   `json:"credential"`
-		} `json:"turn"`
-	} `json:"conversationParams"`
 }
 
-// sdpMessage carries an offer or answer.
-type sdpMessage struct {
-	Type string `json:"type"`
-	SDP  string `json:"sdp"`
+// sdpExchange carries one SDP offer or answer.
+type sdpExchange struct {
+	Type string `json:"type" msgpack:"type"`
+	SDP  string `json:"sdp" msgpack:"sdp"`
 }
 
-// signaling is the JSON WebSocket connection to the SFU.
+// signaling is the dual-protocol WebSocket connection to the SFU.
 type signaling struct {
 	conn *websocket.Conn
 	mu   sync.Mutex
+	seq  int
 }
 
 // newSignaling wraps an open WebSocket.
@@ -50,28 +73,79 @@ func newSignaling(conn *websocket.Conn) *signaling {
 	return &signaling{conn: conn}
 }
 
-// send writes one JSON message.
-func (s *signaling) send(v any) error {
+// sendJSON writes one JSON control command.
+func (s *signaling) sendJSON(v any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.conn.WriteJSON(v)
 }
 
-// sendPing keeps the connection alive (the SFU sends "ping" strings; we
-// send them back the same way).
-func (s *signaling) sendPing() error {
+// sendBinary writes one binary TRANSMIT_DATA message.
+func (s *signaling) sendBinary(participantID int, sdp, sdpType string) error {
+	td := transmitData{}
+	td.Name = "transmit-data"
+	td.Params.ParticipantID = participantID
+	td.Params.Data.SDP = sdp
+	td.Params.Data.Type = sdpType
+
+	payload, err := msgpack.Marshal(td)
+	if err != nil {
+		return fmt.Errorf("pack: %w", err)
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.conn.WriteMessage(websocket.TextMessage, []byte("ping"))
+	s.seq++
+	msg := make([]byte, headerSize+len(payload))
+	msg[0] = protoVersion
+	msg[1] = cmdSignaling
+	binary.BigEndian.PutUint16(msg[2:4], uint16(s.seq))
+	binary.BigEndian.PutUint16(msg[4:6], opTransmitData)
+	msg[6] = 0 // chunks
+	msg[7] = byte(len(payload) >> 16)
+	msg[8] = byte(len(payload) >> 8)
+	msg[9] = byte(len(payload))
+	copy(msg[headerSize:], payload)
+	return s.conn.WriteMessage(websocket.BinaryMessage, msg)
 }
 
-// recv reads the next JSON message.
-func (s *signaling) recv() (*sigMessage, error) {
-	var msg sigMessage
-	if err := s.conn.ReadJSON(&msg); err != nil {
-		return nil, err
+// sendPong answers the SFU's raw-text keepalive.
+func (s *signaling) sendPong() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.conn.WriteMessage(websocket.TextMessage, []byte("pong"))
+}
+
+// recv reads the next message (JSON text or binary).
+func (s *signaling) recv() (*sigMessage, *transmitData, error) {
+	msgType, data, err := s.conn.ReadMessage()
+	if err != nil {
+		return nil, nil, err
 	}
-	return &msg, nil
+	switch msgType {
+	case websocket.TextMessage:
+		var msg sigMessage
+		if err := json.Unmarshal(data, &msg); err != nil {
+			// Raw "ping" string
+			if string(data) == "ping" {
+				return &sigMessage{Type: "ping"}, nil, nil
+			}
+			return nil, nil, nil
+		}
+		return &msg, nil, nil
+	case websocket.BinaryMessage:
+		if len(data) < headerSize {
+			return nil, nil, fmt.Errorf("short binary frame: %d", len(data))
+		}
+		opcode := binary.BigEndian.Uint16(data[4:6])
+		payload := data[headerSize:]
+		var td transmitData
+		if err := msgpack.Unmarshal(payload, &td); err != nil {
+			return nil, nil, fmt.Errorf("unpack opcode=%d: %w", opcode, err)
+		}
+		return nil, &td, nil
+	}
+	return nil, nil, nil
 }
 
 // setDeadline bounds the next read.

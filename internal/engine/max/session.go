@@ -165,13 +165,12 @@ func (s *Session) Connect(ctx context.Context) error {
 		}
 	})
 
-	// Read signaling messages in the background. The SFU sends "ping"
-	// strings (not JSON) for keepalive — both shapes are handled.
+	// Read signaling messages: JSON commands, binary SDP, and "ping" strings.
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
 		for {
-			msg, err := sig.recv()
+			json, binary, err := sig.recv()
 			if err != nil {
 				if !s.closed.Load() {
 					logger.Debugf("max: signaling read: %v", err)
@@ -179,7 +178,15 @@ func (s *Session) Connect(ctx context.Context) error {
 				}
 				return
 			}
-			s.handleMessage(msg)
+			if json != nil {
+				s.handleMessage(json)
+			}
+			if binary != nil && binary.Params.Data.SDP != "" {
+				logger.Infof("max: received SDP %s (%d bytes)", binary.Params.Data.Type, len(binary.Params.Data.SDP))
+				if binary.Params.Data.Type == "offer" {
+					s.handleOffer(binary.Params.Data.SDP)
+				}
+			}
 		}
 	}()
 
@@ -190,27 +197,28 @@ func (s *Session) Connect(ctx context.Context) error {
 // handleMessage processes one JSON signaling message from the SFU.
 func (s *Session) handleMessage(msg *sigMessage) {
 	switch msg.Type {
+	case "ping":
+		// Answer the keepalive.
+		if sig := s.sig.Load(); sig != nil {
+			_ = sig.sendPong()
+		}
 	case "notification":
 		var n notification
 		if err := json.Unmarshal(msg.Data, &n); err == nil && n.PeerID.ID != 0 {
 			logger.Infof("max: assigned peerId=%d", n.PeerID.ID)
 		}
-	case "ping":
-		// The SFU's keepalive; answer on the signaling's write loop.
 	case "offer", "answer":
-		var sd sdpMessage
+		// JSON SDP (fallback path); binary TRANSMIT_DATA is the primary.
+		var sd sdpExchange
 		if err := json.Unmarshal(msg.Data, &sd); err == nil && sd.SDP != "" {
-			if sd.Type == "offer" || msg.Type == "offer" {
+			if msg.Type == "offer" {
 				s.handleOffer(sd.SDP)
 			}
 		}
-	case "candidate":
-		// ICE candidate; the pion connection handles them through the
-		// trickle ICE that the SDP exchange carries.
-	case "error":
-		logger.Debugf("max: signal error: %s", string(msg.Data))
+	case "response":
+		// Command acknowledged.
 	default:
-		logger.Debugf("max: signal: type=%s data=%.80s", msg.Type, string(msg.Data))
+		logger.Debugf("max: signal: type=%s", msg.Type)
 	}
 }
 
@@ -235,10 +243,10 @@ func (s *Session) handleOffer(sdp string) {
 		logger.Debugf("max: set local: %v", err)
 		return
 	}
-	// Send the answer back on the signaling.
+	// Send the answer back on the signaling as binary TRANSMIT_DATA.
 	sig := s.sig.Load()
 	if sig != nil {
-		_ = sig.send(sdpMessage{Type: "answer", SDP: answer.SDP})
+		_ = sig.sendBinary(0, answer.SDP, "answer")
 	}
 }
 
