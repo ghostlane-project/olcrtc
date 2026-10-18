@@ -396,6 +396,10 @@ func joinByLink(s *anonymSession, joinHash string) (*convParams, error) {
 		"isVideo":     {"true"},
 		"isAudio":     {"true"},
 	}
+	if v := os.Getenv("MAX_PROTO"); v != "" {
+		vals.Set("protocolVersion", v)
+		vals.Set("capabilities", "203F")
+	}
 	if v := os.Getenv("MAX_OBSERVE"); v != "" {
 		vals.Set("observedIds", v)
 	}

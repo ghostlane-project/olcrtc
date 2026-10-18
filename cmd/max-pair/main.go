@@ -105,6 +105,30 @@ func main() {
 	}); err != nil {
 		fatal("allocate-consumer: %v", err)
 	}
+	// first try to remove the dead zombie seat so we become the only
+	// (master) participant; the SDK's remove-participant command
+	sides[0].seq++
+	_ = sides[0].send(map[string]any{
+		"command":       "remove-participant",
+		"sequence":      sides[0].seq,
+		"participantId": 1125900270173683,
+		"ban":           true,
+	})
+	fmt.Println("remove-participant (zombie) sent")
+
+	// the room is P2P (DIRECT); flip it to SERVER (SFU) so the producer
+	// transport gets allocated - same call the SDK's master client makes
+	sides[0].seq++
+	if err := sides[0].send(map[string]any{
+		"command":  "switch-topology",
+		"sequence": sides[0].seq,
+		"topology": "SERVER",
+		"force":    true,
+	}); err != nil {
+		fmt.Printf("switch-topology: %v\n", err)
+	} else {
+		fmt.Println("switch-topology SERVER sent")
+	}
 	fmt.Println("allocate-consumer (caps) sent; waiting for producer-updated")
 
 	deadline := time.Now().Add(45 * time.Second)
@@ -432,6 +456,13 @@ func (s *side) readLoop(out chan<- sdpMsg) {
 					continue
 				}
 				var m map[string]any
+				if json.Unmarshal(plain, &m) == nil {
+					if conv, ok := m["conversation"].(map[string]any); ok {
+						if topo, ok := conv["topology"].(string); ok {
+							fmt.Printf("[side%d] room topology: %s\n", s.idx, topo)
+						}
+					}
+				}
 				if json.Unmarshal(plain, &m) != nil {
 					d := text
 					if len(d) > 300 {
@@ -452,6 +483,7 @@ func (s *side) readLoop(out chan<- sdpMsg) {
 					if notif == "consumer-answered" {
 						typ = "answer"
 					}
+					_ = typ
 					fmt.Printf("[side%d] notification=%q sessionId=%q description=%dB\n", s.idx, notif, sess, len(d))
 					out <- sdpMsg{side: s.idx, typ: typ, sdp: d, sessionId: sess}
 					continue
