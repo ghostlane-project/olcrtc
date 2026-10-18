@@ -8,6 +8,8 @@ import (
 	"bytes"
 	"compress/flate"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
 	"flag"
 	"fmt"
@@ -19,6 +21,22 @@ import (
 
 	"github.com/quic-go/webtransport-go"
 )
+
+// okcdnTrust pins the SFU's served chain (HARICA -> Hellenic 2015), which
+// this container's CA bundle predates.
+func okcdnTrust() *tls.Config {
+	pool := x509.NewCertPool()
+	pem, err := os.ReadFile("/root/okcdn-chain.pem")
+	if err != nil {
+		fmt.Println("okcdnTrust: chain file missing:", err)
+	}
+	if ok := pool.AppendCertsFromPEM(pem); !ok {
+		fmt.Println("okcdnTrust: no certs parsed from chain")
+	}
+	return &tls.Config{RootCAs: pool}
+}
+
+var _ = okcdnTrust // keep the pinned trust referenced
 
 func main() {
 	peerID := flag.String("peer-id", "", "peer id from the join answer")
@@ -52,7 +70,7 @@ func main() {
 	target := *wtBase + "?" + q.Encode()
 	fmt.Printf("dialing %s\n", target)
 
-	dialer := &webtransport.Transport{}
+	dialer := &webtransport.Transport{TLSClientConfig: okcdnTrust()}
 	resp, sess, err := dialer.Dial(context.Background(), target, nil)
 	if err != nil {
 		fatal("dial: %v (resp=%v)", err, resp)

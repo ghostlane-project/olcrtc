@@ -7,6 +7,8 @@ import (
 	"bytes"
 	"compress/flate"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
 	"encoding/json"
 	"flag"
@@ -22,6 +24,22 @@ import (
 	"github.com/pion/webrtc/v4"
 	"github.com/quic-go/webtransport-go"
 )
+
+// okcdnTrust pins the SFU's served chain (HARICA -> Hellenic 2015), which
+// this container's CA bundle predates.
+func okcdnTrust() *tls.Config {
+	pool := x509.NewCertPool()
+	pem, err := os.ReadFile("/root/okcdn-chain.pem")
+	if err != nil {
+		fmt.Println("okcdnTrust: chain file missing:", err)
+	}
+	if ok := pool.AppendCertsFromPEM(pem); !ok {
+		fmt.Println("okcdnTrust: no certs parsed from chain")
+	}
+	return &tls.Config{RootCAs: pool}
+}
+
+var _ = okcdnTrust // keep the pinned trust referenced
 
 const (
 	apiBase         = "https://calls.okcdn.ru"
@@ -167,25 +185,32 @@ type sdpMsg struct {
 }
 
 type side struct {
-	idx    int
-	peerID int64
-	sess   *anonymSession
-	params *convParams
-	pc     *webrtc.PeerConnection
-	wt     *webtransport.Session
-	stream *webtransport.Stream
+	idx     int
+	peerID  int64
+	sess    *anonymSession
+	params  *convParams
+	pc      *webrtc.PeerConnection
+	wt      *webtransport.Session
+	stream  *webtransport.Stream
 	writeMu sync.Mutex
-	seq    int
-	state  atomicBool
-	recvN  atomicInt64
+	seq     int
+	state   atomicBool
+	recvN   atomicInt64
 }
 
 type atomicBool struct{ v int32 }
+
 func (b *atomicBool) Store(v bool) {
-	if v { b.v = 1 } else { b.v = 0 }
+	if v {
+		b.v = 1
+	} else {
+		b.v = 0
+	}
 }
 func (b *atomicBool) Load() bool { return b.v == 1 }
+
 type atomicInt64 struct{ v int64 }
+
 func (i *atomicInt64) Add(n int64) { i.v += n }
 func (i *atomicInt64) load() int64 { return i.v }
 
@@ -251,7 +276,7 @@ func newSide(idx int, callsToken, joinHash string) (*side, error) {
 	q.Set("peerId", fmt.Sprint(s.peerID))
 	wtURL := s.params.WTEndpoint + "?" + q.Encode()
 	fmt.Printf("[side%d] WT %s\n", idx, wtURL)
-	d := &webtransport.Transport{}
+	d := &webtransport.Transport{TLSClientConfig: okcdnTrust()}
 	_, sess, err := d.Dial(context.Background(), wtURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("wt dial: %w", err)
