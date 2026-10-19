@@ -10,6 +10,7 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/github/license/ghostlane-project/olcrtc?color=b5f23d&labelColor=07080d" alt="License: Apache-2.0"></a>
   <img src="https://img.shields.io/github/go-mod/go-version/ghostlane-project/olcrtc/proofkit?label=go&color=b5f23d&labelColor=07080d" alt="Go version">
+  <a href="https://opencollective.com/ghostlane"><img src="https://img.shields.io/badge/funding-Open_Collective-b5f23d?labelColor=07080d&logo=opencollective&logoColor=white" alt="Funding: Open Collective"></a>
 </p>
 
 <p align="center"><a href="readme.ru.md">RU</a> / <b>EN</b></p>
@@ -44,6 +45,10 @@ project's governance, funding policy and community documents live:
 The engine is under active maintenance: changes are exercised by a release gate
 that moves real traffic through real relays before anything ships, and the
 report of that run is published with every application release.
+
+The engine is funded together with the application, through
+[Open Collective](https://opencollective.com/ghostlane): Open Source Collective holds the
+money as fiscal host, and every contribution and every expense is public there.
 
 ## This fork
 

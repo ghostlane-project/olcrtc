@@ -10,6 +10,7 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/github/license/ghostlane-project/olcrtc?color=b5f23d&labelColor=07080d" alt="License: Apache-2.0"></a>
   <img src="https://img.shields.io/github/go-mod/go-version/ghostlane-project/olcrtc/proofkit?label=go&color=b5f23d&labelColor=07080d" alt="Go version">
+  <a href="https://opencollective.com/ghostlane"><img src="https://img.shields.io/badge/funding-Open_Collective-b5f23d?labelColor=07080d&logo=opencollective&logoColor=white" alt="Funding: Open Collective"></a>
 </p>
 
 <p align="center"><b>RU</b> / <a href="readme.md">EN</a></p>
@@ -24,6 +25,14 @@ app -> SOCKS5 -> olcrtc cnc -> WebRTC/SFU сервис -> olcrtc srv -> инте
 ```
 
 > **Важно:** проверяйте, что нужный сервис видеозвонков есть в белых списках и работает в вашей сети. Если нет - используйте другой.
+
+## Проект
+
+Движок развивается и финансируется вместе с приложением
+[Ghostlane](https://github.com/ghostlane-project/ghostlane), через
+[Open Collective](https://opencollective.com/ghostlane): деньги держит Open Source Collective
+как фискальный хост, каждый приход и расход там публичен. Правила - в
+[FUNDING.md](https://github.com/ghostlane-project/ghostlane/blob/main/FUNDING.md).
 
 ## Этот форк
 
