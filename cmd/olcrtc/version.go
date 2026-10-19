@@ -5,11 +5,19 @@ import (
 	"io"
 	"os"
 	"runtime/debug"
+	"strconv"
 )
 
-// shortRevision is how much of a commit the version line names, as Go's
-// pseudo-versions do.
-const shortRevision = 12
+const (
+	// shortRevision is how much of a commit the version line names, as Go's
+	// pseudo-versions do.
+	shortRevision = 12
+	// develVersion is what Go stamps for a build that knew no module version.
+	develVersion = "(devel)"
+	// The build settings Go records from the checkout a binary was built in.
+	vcsRevisionKey = "vcs.revision"
+	vcsModifiedKey = "vcs.modified"
+)
 
 //nolint:gochecknoglobals // Tests read what -version prints.
 var versionOut io.Writer = os.Stdout
@@ -46,31 +54,35 @@ func buildVersion() string {
 //
 // ai-generated: this function.
 func describeBuild(mainVersion string, settings []debug.BuildSetting) string {
-	if mainVersion != "" && mainVersion != "(devel)" {
+	if mainVersion != "" && mainVersion != develVersion {
 		return mainVersion
 	}
 
-	var revision, modified string
+	var (
+		revision string
+		modified bool
+	)
+
 	for _, s := range settings {
 		switch s.Key {
-		case "vcs.revision":
+		case vcsRevisionKey:
 			revision = s.Value
-		case "vcs.modified":
-			modified = s.Value
+		case vcsModifiedKey:
+			modified, _ = strconv.ParseBool(s.Value)
 		}
 	}
 
 	if revision == "" {
-		return "(devel)"
+		return develVersion
 	}
 
 	if len(revision) > shortRevision {
 		revision = revision[:shortRevision]
 	}
 
-	if modified == "true" {
-		return "(devel) " + revision + ", modified"
+	if modified {
+		return develVersion + " " + revision + ", modified"
 	}
 
-	return "(devel) " + revision
+	return develVersion + " " + revision
 }

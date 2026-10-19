@@ -20,18 +20,18 @@ func TestDescribeBuildNamesTheVersionTheBinaryWasBuiltFrom(t *testing.T) {
 		want     string
 	}{
 		{"a clean checkout of a tag", "v0.12.0",
-			[]debug.BuildSetting{{Key: "vcs.revision", Value: rev}, {Key: "vcs.modified", Value: "false"}},
+			[]debug.BuildSetting{{Key: vcsRevisionKey, Value: rev}, {Key: vcsModifiedKey, Value: "false"}},
 			"v0.12.0"},
 		{"past a tag: the pseudo-version already names the commit", "v0.12.1-0.20261019030000-b6cb4c417d17+dirty",
-			[]debug.BuildSetting{{Key: "vcs.revision", Value: rev}, {Key: "vcs.modified", Value: "true"}},
+			[]debug.BuildSetting{{Key: vcsRevisionKey, Value: rev}, {Key: vcsModifiedKey, Value: "true"}},
 			"v0.12.1-0.20261019030000-b6cb4c417d17+dirty"},
-		{"no module version, a commit", "(devel)",
-			[]debug.BuildSetting{{Key: "vcs.revision", Value: rev}, {Key: "vcs.modified", Value: "false"}},
+		{"no module version, a commit", develVersion,
+			[]debug.BuildSetting{{Key: vcsRevisionKey, Value: rev}, {Key: vcsModifiedKey, Value: "false"}},
 			"(devel) b6cb4c417d17"},
-		{"no module version, a commit with changes", "(devel)",
-			[]debug.BuildSetting{{Key: "vcs.revision", Value: rev}, {Key: "vcs.modified", Value: "true"}},
+		{"no module version, a commit with changes", develVersion,
+			[]debug.BuildSetting{{Key: vcsRevisionKey, Value: rev}, {Key: vcsModifiedKey, Value: "true"}},
 			"(devel) b6cb4c417d17, modified"},
-		{"nothing stamped at all", "", nil, "(devel)"},
+		{"nothing stamped at all", "", nil, develVersion},
 	} {
 		if got := describeBuild(tc.version, tc.settings); got != tc.want {
 			t.Errorf("%s: describeBuild(%q) = %q, want %q", tc.name, tc.version, got, tc.want)
