@@ -58,16 +58,6 @@ var knownFailures = []KnownFailure{ //nolint:gochecknoglobals // edited by hand 
 		Why: "liveness close, throughput and on-top latency on a slow Sber leg"},
 	{Cell: "engine-linux/salutejazz/datachannel/*/S3", Issue: issues + "49",
 		Why: "upload throughput and on-top latency on a slow Sber leg"},
-	// ai-generated: the mtslink entry, #63. Five gate legs in a row on
-	// 2026-10-17 afternoon, five different network-shaped failures - a dead
-	// final pull, UDP associates answered REP=4, a client whose peer
-	// connection never assembled, connect tails 5-18 s over the bound - while
-	// the same tree passed the carrier at 03:00 UTC and every other carrier
-	// stayed green beside it. The MTS SFU (or its pace on the pool room after
-	// a day of gate joins) is unstable for the runners; the cells still run
-	// and report under their issue.
-	{Cell: "engine-linux/mtslink/vp8channel/*/*", Issue: issues + "63",
-		Why: "the carrier's leg to the runners fails in shifting ways (since 2026-10-17 afternoon)"},
 }
 
 // knownFailure is the entry of the list a cell id matches, the first one if
