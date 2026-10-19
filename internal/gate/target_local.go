@@ -108,11 +108,16 @@ const (
 
 // localProviders is the providers a default run walks, in order
 // (-olcrtc.gate-providers). It is every provider the local target carries
-// but WB Stream: the service closed its beta to its own staff on 2026-10-10
-// and answers every join of ours 401, so its cells can only fail. It is still
-// carried, for the day that changes, and walked when named.
+// but three, whose cells can only fail today. WB Stream closed its beta to
+// its own staff on 2026-10-10 and answers every join of ours 401. Telemost's
+// relay has cut every published track to a trickle since about 2026-10-01
+// (#58), and the platform stopped handing out its lines on 2026-10-18. The
+// MAX account the gate's pair signs in with is locked (2026-10-19). Each is
+// still carried, for the day that changes, and walked when named.
+//
+// ai-generated: Telemost and MAX left out of the default walk.
 func localProviders() []string {
-	return []string{providerJitsi, providerTelemost, providerMTSLink, providerSaluteJazz, providerVKCalls, providerMAX}
+	return []string{providerJitsi, providerMTSLink, providerSaluteJazz, providerVKCalls}
 }
 
 // transportsOf is which transports a provider carries (amendment A1, the

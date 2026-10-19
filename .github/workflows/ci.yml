@@ -260,7 +260,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        provider: [jitsi, telemost, salutejazz, vkcalls, mtslink, max]
+        # Telemost and MAX are out of the default walk (internal/gate localProviders):
+        # Telemost's relay cuts every published track to a trickle (#58), and the MAX
+        # account the pair signs in with is locked (2026-10-19). Put each back here
+        # and in localProviders together, the day it works again.
+        provider: [jitsi, salutejazz, vkcalls, mtslink]
     # ai-generated: the `needs` list beyond gate-plan. The gate holds live
     # rooms, so a branch whose unit tests or lint already failed must not
     # take that slot: it cannot merge anyway. Waiting costs the two or three
