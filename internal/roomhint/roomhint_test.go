@@ -22,3 +22,15 @@ func TestSplit(t *testing.T) {
 		}
 	}
 }
+
+// ai-generated: a mode handed in by a caller is held to the words a link's hint is.
+func TestModeKeepsOnlyTheModesThisPackageKnows(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{ICEUDP, ICEUDP}, {ICETCP, ICETCP}, {ICEBoth, ICEBoth},
+		{"", ICEDefault}, {"TCP", ICEDefault}, {"sideways", ICEDefault}, {"tcp ", ICEDefault},
+	} {
+		if got := Mode(tc.in); got != tc.want {
+			t.Errorf("Mode(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

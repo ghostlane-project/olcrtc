@@ -409,3 +409,31 @@ func TestIssuePassesTheLinksICEHintToTheEngine(t *testing.T) {
 		t.Fatal("a plain link asks for no ICE mode")
 	}
 }
+
+// ai-generated: a link without a hint takes the ICE mode its caller's side asks for
+// (auth.Config.DefaultICE): the client side asks for TCP, a server for nothing. A
+// hint on the link wins, and a default that names no mode is no default.
+func TestALinkWithoutAHintTakesTheCallersDefaultICE(t *testing.T) {
+	_, srv := newGateway(t)
+	issueWith := func(link, def string) auth.Credentials {
+		t.Helper()
+		creds, err := Provider{gateway: srv.URL}.Issue(context.Background(),
+			auth.Config{RoomURL: link, Name: "a", DefaultICE: def})
+		if err != nil {
+			t.Fatalf("Issue(%q, default %q): %v", link, def, err)
+		}
+		return creds
+	}
+	if got := issueWith(testLink, "tcp").Extra["ice"]; got != "tcp" {
+		t.Fatalf("no hint, default tcp: Extra[ice] = %q, want tcp", got)
+	}
+	if got := issueWith(testLink+"?ice=udp", "tcp").Extra["ice"]; got != "udp" {
+		t.Fatalf("the link's hint wins over the default: Extra[ice] = %q, want udp", got)
+	}
+	if _, ok := issueWith(testLink, "").Extra["ice"]; ok {
+		t.Fatal("no hint and no default ask for no ICE mode")
+	}
+	if _, ok := issueWith(testLink, "sideways").Extra["ice"]; ok {
+		t.Fatal("a default that names no mode is no default")
+	}
+}

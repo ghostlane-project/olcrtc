@@ -259,7 +259,7 @@ func (s *Session) newAPI() (*webrtc.API, error) {
 	ice := s.ice
 	s.mu.Unlock()
 	if types := iceNetworkTypes(ice); types != nil {
-		logger.Infof("mtslink: ICE over %s, as the room link asks", ice)
+		logger.Infof("mtslink: ICE over %s, as the room link or this side asks", ice)
 		settings.SetNetworkTypes(types)
 	}
 	registry := &interceptor.Registry{}

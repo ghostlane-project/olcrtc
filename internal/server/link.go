@@ -20,11 +20,7 @@ func (s *Server) bringUpLink(ctx context.Context, cfg Config, cancel context.Can
 		URL: cfg.URL, Token: cfg.Token, ProviderToken: cfg.ProviderToken,
 		ChannelID: cfg.ChannelID, DNSServer: s.dnsServer, DTLSProfile: cfg.DTLSProfile,
 		Options: cfg.TransportOptions, Traffic: cfg.Traffic,
-	}, tunnelcore.LinkRoleConfig{
-		OnData: s.onData, OnPeerData: s.onPeerData, Resolver: s.resolver,
-		OnDatagram: s.onDatagram, OnPeerDatagram: s.onPeerDatagram,
-		ProxyAddr: s.socksProxyAddr, ProxyPort: s.socksProxyPort,
-	})
+	}, s.linkRole())
 	ln, err := transport.New(ctx, cfg.Transport, linkCfg)
 	if err != nil {
 		return fmt.Errorf("failed to create transport: %w", err)
@@ -409,5 +405,18 @@ func (s *Server) shutdown() {
 	s.closeSession()
 	if s.ln != nil {
 		_ = s.ln.Close()
+	}
+}
+
+// linkRole is the server side's part of its link. It asks for no ICE mode: a
+// server joins from a datacenter over UDP, and a room link's hint is for the
+// client side alone (roomhint).
+//
+// ai-generated: this function (moved out of bringUpLink).
+func (s *Server) linkRole() tunnelcore.LinkRoleConfig {
+	return tunnelcore.LinkRoleConfig{
+		OnData: s.onData, OnPeerData: s.onPeerData, Resolver: s.resolver,
+		OnDatagram: s.onDatagram, OnPeerDatagram: s.onPeerDatagram,
+		ProxyAddr: s.socksProxyAddr, ProxyPort: s.socksProxyPort,
 	}
 }

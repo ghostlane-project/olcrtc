@@ -33,6 +33,9 @@ type LinkRoleConfig struct {
 	ProxyAddr           string
 	ProxyPort           int
 	RequireTargetedPeer bool
+	// DefaultICE is the ICE mode this side asks for where a room link carries no
+	// hint (roomhint): the client side TCP, a server nothing. ai-generated.
+	DefaultICE string
 }
 
 // BuildTransportConfig combines shared link settings with role-specific callbacks.
@@ -57,6 +60,7 @@ func BuildTransportConfig(base LinkConfig, role LinkRoleConfig) transport.Config
 		ProxyAddr:           role.ProxyAddr,
 		ProxyPort:           role.ProxyPort,
 		RequireTargetedPeer: role.RequireTargetedPeer,
+		DefaultICE:          role.DefaultICE,
 		Options:             base.Options,
 		Traffic:             base.Traffic,
 	}

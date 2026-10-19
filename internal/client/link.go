@@ -11,6 +11,7 @@ import (
 	"github.com/openlibrecommunity/olcrtc/internal/handshake"
 	"github.com/openlibrecommunity/olcrtc/internal/logger"
 	"github.com/openlibrecommunity/olcrtc/internal/muxconn"
+	"github.com/openlibrecommunity/olcrtc/internal/roomhint"
 	"github.com/openlibrecommunity/olcrtc/internal/transport"
 	"github.com/openlibrecommunity/olcrtc/internal/tunnelcore"
 )
@@ -56,10 +57,7 @@ func (c *Client) bringUpLink(ctx context.Context, cfg Config, cancel context.Can
 		URL: cfg.URL, Token: cfg.Token, ProviderToken: cfg.ProviderToken,
 		ChannelID: cfg.ChannelID, DNSServer: cfg.DNSServer, DTLSProfile: cfg.DTLSProfile,
 		Options: cfg.TransportOptions, Traffic: cfg.Traffic,
-	}, tunnelcore.LinkRoleConfig{
-		DeviceID: c.deviceID, OnData: c.onData, OnDatagram: c.onDatagram, Resolver: cfg.Resolver,
-		RequireTargetedPeer: true,
-	})
+	}, c.linkRole(cfg))
 	link, err := transport.New(ctx, cfg.Transport, linkCfg)
 	if err != nil {
 		return fmt.Errorf("failed to create link: %w", err)
@@ -834,4 +832,21 @@ func (c *Client) sessionSnapshot() (*smux.Session, string, <-chan struct{}) {
 	c.sessMu.RLock()
 	defer c.sessMu.RUnlock()
 	return c.session, c.sessionID, c.sessionReady
+}
+
+// linkRole is the client side's part of its link: where frames land, the
+// device id, and what the client asks of a carrier that a server does not. A
+// broadcast frame is ignored until a peer addresses this session, and a room
+// link without an ICE hint reaches the relay over TCP: on mobile networks
+// under an allow list UDP to the MTS Link SFU goes dark for seconds at a time,
+// and TCP 443 held for half an hour where UDP held minutes (#60). A link's own
+// hint still wins (roomhint).
+//
+// ai-generated: this function and its DefaultICE.
+func (c *Client) linkRole(cfg Config) tunnelcore.LinkRoleConfig {
+	return tunnelcore.LinkRoleConfig{
+		DeviceID: c.deviceID, OnData: c.onData, OnDatagram: c.onDatagram, Resolver: cfg.Resolver,
+		RequireTargetedPeer: true,
+		DefaultICE:          roomhint.ICETCP,
+	}
 }

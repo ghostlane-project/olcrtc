@@ -253,6 +253,10 @@ type Config struct {
 	// so they can accept initial broadcast CLIENT_HELLO frames.
 	RequireTargetedPeer bool
 
+	// DefaultICE is the ICE mode this side asks for where the room link carries
+	// no hint (roomhint): the client side TCP, a server nothing. ai-generated.
+	DefaultICE string
+
 	// Options carries transport-specific tuning. Type is per-transport-package.
 	Options Options
 
@@ -282,6 +286,7 @@ func (c Config) EngineConfig() enginebuiltin.Config {
 		URL:                 c.URL,
 		Token:               c.Token,
 		ProviderToken:       c.ProviderToken,
+		DefaultICE:          c.DefaultICE,
 	}
 }
 
