@@ -1,5 +1,9 @@
 <!-- If you are an AI agent, please read agents.md -->
 
+<p align="center">
+  <img src="docs/asset/olcrtc-icon.svg" alt="olcRTC" width="112" height="112">
+</p>
+
 <h1 align="center">olcRTC</h1>
 
 <p align="center">
@@ -9,7 +13,9 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/github/license/ghostlane-project/olcrtc?color=b5f23d&labelColor=07080d" alt="License: Apache-2.0"></a>
+  <a href="https://github.com/ghostlane-project/olcrtc/releases"><img src="https://img.shields.io/github/v/release/ghostlane-project/olcrtc?color=b5f23d&labelColor=07080d&label=release" alt="Последний релиз"></a>
   <img src="https://img.shields.io/github/go-mod/go-version/ghostlane-project/olcrtc/proofkit?label=go&color=b5f23d&labelColor=07080d" alt="Go version">
+  <a href="https://github.com/ghostlane-project/olcrtc/actions/workflows/ci.yml"><img src="https://github.com/ghostlane-project/olcrtc/actions/workflows/ci.yml/badge.svg?branch=proofkit" alt="CI"></a>
   <a href="https://opencollective.com/ghostlane"><img src="https://img.shields.io/badge/funding-Open_Collective-b5f23d?labelColor=07080d&logo=opencollective&logoColor=white" alt="Funding: Open Collective"></a>
 </p>
 
@@ -111,6 +117,7 @@ curl -fsSL https://raw.githubusercontent.com/ghostlane-project/olcrtc/proofkit/i
 - [uri.md](docs/uri.ru.md) - формат URI клиента
 - [sub.md](docs/sub.ru.md) - формат подписки
 - [gate.md](docs/gate.ru.md) - release gate: туннель под нагрузкой на настоящих relay и его отчёт
+- [versioning.md](docs/versioning.ru.md) - версии: теги, релизы и какая версия где работает
 
 ## Сборка
 

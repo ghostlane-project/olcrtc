@@ -1,7 +1,11 @@
 name: CI
 
 on:
+  # Branches only: a version tag (docs/versioning.md) names a commit that was
+  # already green when it was merged, and a tag push would otherwise run the
+  # whole matrix and the live gate again on it.
   push:
+    branches: ["**"]
   pull_request:
     branches: ["main", "master"]
   workflow_dispatch:
