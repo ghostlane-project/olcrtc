@@ -52,15 +52,27 @@ func TestMTSLinkRoomIsThePoolsJoinLink(t *testing.T) {
 }
 
 // The default walk is what a release is judged by. WB Stream closed its beta
-// to its own staff on 2026-10-10 and answers every join 401, so it is walked
-// only when named; MTS Link took its place on the fleet and in the walk.
+// to its own staff on 2026-10-10 and answers every join 401, Telemost's relay
+// cuts every published track to a trickle (#58), and the MAX account the
+// gate signs in with is locked (2026-10-19), so each is walked only when
+// named; MTS Link took WB Stream's place on the fleet and in the walk.
 func TestTheDefaultWalkHasMTSLinkAndLeavesWBStreamToBeNamed(t *testing.T) {
 	walk := localProviders()
 	if !slices.Contains(walk, "mtslink") {
 		t.Fatalf("default walk %v lacks mtslink", walk)
 	}
-	if slices.Contains(walk, "wbstream") {
-		t.Fatalf("default walk %v still has wbstream, whose service takes no guest of ours", walk)
+	for _, out := range []string{"wbstream", "telemost", "max"} {
+		if slices.Contains(walk, out) {
+			t.Fatalf("default walk %v still has %s, whose cells can only fail today", walk, out)
+		}
+	}
+	for _, pair := range []Pair{{"telemost", "vp8channel"}, {"max", "datachannel"}} {
+		named, err := NewLocalTarget(LocalOptions{
+			WorkDir: t.TempDir(), Providers: []string{pair.Provider}, Transports: []string{pair.Transport},
+		})
+		if err != nil || !slices.Equal(named.Pairs(), []Pair{pair}) {
+			t.Fatalf("%s named: pairs = %v, err = %v; it is still carried", pair.Provider, named.Pairs(), err)
+		}
 	}
 	named, err := NewLocalTarget(LocalOptions{
 		WorkDir: t.TempDir(), Providers: []string{"wbstream"}, Transports: []string{"vp8channel"},
