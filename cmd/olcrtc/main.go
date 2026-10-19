@@ -2,7 +2,8 @@
 //
 // Usage: olcrtc <config.yaml>
 //
-// All runtime settings come from the YAML file. There are no other CLI flags.
+// All runtime settings come from the YAML file. The one flag is -version,
+// which prints the version the binary was built from (docs/versioning.md).
 package main
 
 import (
@@ -89,6 +90,10 @@ func runWithArgs(args []string) error {
 
 	if len(args) != 1 || args[0] == "-h" || args[0] == "--help" || args[0] == "-help" {
 		return ErrConfigPathRequired
+	}
+
+	if isVersionFlag(args[0]) {
+		return writeVersion(versionOut)
 	}
 
 	cfg, err := loadConfig(args[0])
@@ -184,6 +189,9 @@ func parseFailoverConfig(f configpkg.Failover) (failoverConfig, error) {
 
 func runWithConfig(cfg loadedConfig) error {
 	configureLogging(cfg.debug)
+	// ai-generated: the first line of every run names the build, so a log says
+	// which engine wrote it.
+	logger.Infof("olcrtc %s", buildVersion())
 
 	scfg := session.ApplyDefaults(cfg.scfg)
 
