@@ -65,6 +65,9 @@ type Config struct {
 	// provider so it can act as that account instead of running its guest
 	// flow (e.g. a WB Stream account token). Empty uses the guest flow.
 	ProviderToken string
+	// DefaultICE is the ICE mode for a room link without a hint of its own,
+	// handed to the auth provider (auth.Config.DefaultICE). ai-generated.
+	DefaultICE string
 }
 
 // Factory creates an engine session for a given provider.
@@ -187,13 +190,14 @@ func resolveCredentials(
 	}
 
 	authCfg := auth.Config{
-		RoomURL:   cfg.RoomURL,
-		Name:      cfg.Name,
-		Token:     cfg.ProviderToken,
-		DNSServer: cfg.DNSServer,
-		Resolver:  cfg.Resolver,
-		ProxyAddr: cfg.ProxyAddr,
-		ProxyPort: cfg.ProxyPort,
+		RoomURL:    cfg.RoomURL,
+		Name:       cfg.Name,
+		Token:      cfg.ProviderToken,
+		DNSServer:  cfg.DNSServer,
+		Resolver:   cfg.Resolver,
+		ProxyAddr:  cfg.ProxyAddr,
+		ProxyPort:  cfg.ProxyPort,
+		DefaultICE: cfg.DefaultICE,
 	}
 
 	issue := func(ctx context.Context) (engine.Credentials, error) {

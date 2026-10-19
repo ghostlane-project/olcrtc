@@ -56,6 +56,10 @@ type Config struct {
 	Resolver  protect.Lookup
 	ProxyAddr string
 	ProxyPort int
+	// DefaultICE is the ICE mode a room link without a hint of its own takes
+	// (roomhint: "udp", "tcp" or "both"); empty is the engine's own default.
+	// The client side asks for TCP, a server for nothing. ai-generated.
+	DefaultICE string
 }
 
 // Provider produces engine credentials.

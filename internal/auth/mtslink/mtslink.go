@@ -56,6 +56,11 @@ func (Provider) newClient(cfg auth.Config) *http.Client {
 // guest that is gone leaves nothing behind in the room.
 func (p Provider) Issue(ctx context.Context, cfg auth.Config) (auth.Credentials, error) {
 	room, ice := roomhint.Split(cfg.RoomURL)
+	if ice == roomhint.ICEDefault {
+		// ai-generated: a link that says nothing takes what its side asks for; the
+		// client side asks for TCP, which holds where UDP to the SFU goes dark (#60).
+		ice = roomhint.Mode(cfg.DefaultICE)
+	}
 	event, session, err := parseEventLink(room)
 	if err != nil {
 		return auth.Credentials{}, err

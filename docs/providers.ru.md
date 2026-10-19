@@ -44,7 +44,7 @@
 | `wbstream` | `livekit` | нужен токен WB-аккаунта |
 | `salutejazz` | `salutejazz` | SFU на протоколе LiveKit за TURN Сбера; окно релея на получателя ([#49](https://github.com/ghostlane-project/olcrtc/issues/49)) |
 | `vkcalls` | `vkcalls` | комнаты VK Calls |
-| `mtslink` | `mtslink` | МТС Линк; SFU пересылает VP9/H264, поэтому транспорт линии - `vp8channel` с движком, рядящим кадры в VP9; ссылка комнаты может просить ICE-TCP (`?ice=tcp`, [#60](https://github.com/ghostlane-project/olcrtc/issues/60)) |
+| `mtslink` | `mtslink` | МТС Линк; SFU пересылает VP9/H264, поэтому транспорт линии - `vp8channel` с движком, рядящим кадры в VP9; клиент идёт к SFU по ICE-TCP, если ссылка комнаты не просит иного (`?ice=udp`, `?ice=both`, [#60](https://github.com/ghostlane-project/olcrtc/issues/60)); сервер входит по UDP |
 | `max` | `max` | звонки мессенджера MAX (VK): комната DIRECT (создана без камеры), туннель в data-канале пары; `auth.token` - ключ calls-сессии или calls-токен веб-клиента, комната - ссылка на вход (https://max.ru/joincall/<hash>) |
 | `none` | любой по имени | прямой доступ к движку: engine/URL/token из конфига, по умолчанию `livekit` |
 
