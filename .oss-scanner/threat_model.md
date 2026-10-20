@@ -115,8 +115,17 @@ when olcRTC's own code makes it reachable, and say how.
   everything below runs offline.
 - `go test ./...` runs the suite. CI also runs it with `-race`, with
   `-tags olcrtc_lean` and with `-tags olcrtc_testhooks`; the build cache holds
-  all four. Without an up, non-loopback IPv4 interface the SaluteJazz engine's
-  tests against its fake SFU skip: pion gathers no ICE host candidate on `lo`.
+  all four.
+- The tests that connect two pion peers in one process (`internal/e2e`,
+  `internal/engine` and its `jitsi`, `maxcalls`, `mtslink` and `salutejazz`
+  packages) need an up, non-loopback IPv4 interface, which a sandbox with only
+  `lo` lacks: there they fail after their connect timeouts, and the SaluteJazz
+  ones skip. As root, before `go test`, one dummy interface is enough for the
+  whole suite to pass offline:
+
+  ```sh
+  ip link add pk0 type dummy && ip addr add 10.99.0.1/24 dev pk0 && ip link set pk0 up
+  ```
 - `internal/e2e` runs whole tunnels in one process: a client and a server in an
   in-memory room (`tunnel_test.go`; `multikey_test.go` and
   `multikey_metering_test.go` for a key ring and its counts; `udp_test.go`;
