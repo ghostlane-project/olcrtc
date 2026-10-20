@@ -115,7 +115,8 @@ when olcRTC's own code makes it reachable, and say how.
   everything below runs offline.
 - `go test ./...` runs the suite. CI also runs it with `-race`, with
   `-tags olcrtc_lean` and with `-tags olcrtc_testhooks`; the build cache holds
-  all four.
+  all four. Without an up, non-loopback IPv4 interface the SaluteJazz engine's
+  tests against its fake SFU skip: pion gathers no ICE host candidate on `lo`.
 - `internal/e2e` runs whole tunnels in one process: a client and a server in an
   in-memory room (`tunnel_test.go`; `multikey_test.go` and
   `multikey_metering_test.go` for a key ring and its counts; `udp_test.go`;

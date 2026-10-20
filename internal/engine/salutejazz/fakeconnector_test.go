@@ -3,6 +3,7 @@ package salutejazz
 import (
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -127,6 +128,7 @@ type publishedKey struct {
 
 func newFakeConnector(t *testing.T) (string, *fakeSFU) {
 	t.Helper()
+	requireHostInterface(t)
 	fake := &fakeSFU{
 		rooms:     make(map[string][]*fakePeer),
 		swallowed: make(map[string]bool),
@@ -1215,6 +1217,44 @@ func (p *fakePeer) closePeerConnections() {
 			_ = pc.Close()
 		}
 	}
+}
+
+// requireHostInterface skips a test that joins the fake SFU on a host with no
+// up, non-loopback IPv4 interface. Both sides gather IPv4 host candidates only
+// and pion leaves loopback out (the engine's settings are a real client's), so
+// on such a host neither side has a candidate pair and the join waits out its
+// own deadline, or the package's: a sandbox started with --network none ran
+// this package into its ten-minute timeout.
+//
+// ai-generated: the function.
+func requireHostInterface(t *testing.T) {
+	t.Helper()
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return // cannot tell: let the test run and say what it finds
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp != 0 && iface.Flags&net.FlagLoopback == 0 && hasIPv4(iface) {
+			return
+		}
+	}
+	t.Skip("needs an up, non-loopback IPv4 interface: pion gathers no ICE host candidate on lo")
+}
+
+// hasIPv4 reports whether iface holds an IPv4 address.
+//
+// ai-generated: the function.
+func hasIPv4(iface net.Interface) bool {
+	addrs, err := iface.Addrs()
+	if err != nil {
+		return false
+	}
+	for _, addr := range addrs {
+		if ipnet, ok := addr.(*net.IPNet); ok && ipnet.IP.To4() != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // newFakePC builds the SFU side of a peer connection: no ICE servers, IPv4
