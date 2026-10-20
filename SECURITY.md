@@ -12,8 +12,13 @@ Use GitHub's private vulnerability reporting:
 <https://github.com/ghostlane-project/olcrtc/security/advisories/new>
 
 It is private between you and the maintainers, takes attachments, and becomes a
-published advisory crediting you once a fix ships. If you cannot use it, open an
-issue with no technical detail asking for another channel.
+published advisory crediting you once a fix ships. If you cannot use it, write
+to <securityghostlane@proton.me>, the security contact for olcRTC and
+Ghostlane.
+
+Automated review is welcome on the same terms. What the engine defends, against
+whom, and how we rate severity are in
+[.oss-scanner/threat_model.md](.oss-scanner/threat_model.md).
 
 ## What to include
 
@@ -36,7 +41,8 @@ In scope: this engine, its transports and its handshake, the keys and metering
 it manages, and anything it ships in a release.
 
 Out of scope, though worth telling us about anyway: the meeting services the
-engine speaks to (Jitsi deployments, Yandex Telemost, WB Stream), the operators
+engine speaks to (Jitsi deployments, Yandex Telemost, WB Stream, SaluteJazz, VK
+Calls, MTS Link, MAX), the operators
 of relays you connect through, and the applications that embed this engine other
 than [Ghostlane](https://github.com/ghostlane-project/ghostlane).
 
