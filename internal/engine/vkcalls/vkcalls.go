@@ -87,6 +87,9 @@ type generation struct {
 	command *webrtc.DataChannel
 	notify  *webrtc.DataChannel
 	shape   *ShapeState
+	// view is what Pion's views of this connection's offers settled (#72).
+	// ai-generated: this field.
+	view *viewMemo
 
 	registryMu sync.Mutex
 	registry   Registry
@@ -225,7 +228,15 @@ func (s *Session) waitConnected(ctx context.Context, signal *signalingClient) (n
 // the offer's codecs, the shaped answer passes the transport gate and
 // accept-producer completes the session.
 func (s *Session) negotiate(ctx context.Context, gen *generation, offer string) error { //nolint:gocyclo,cyclop
-	api, err := newWebRTCAPI(offer, s.cfg, s.cfg.Resolver)
+	// Pion negotiates its own view of the offer, one meaning per payload
+	// type (#72); the SFU is answered from the real one.
+	// ai-generated: this block and the view passed below.
+	gen.view = &viewMemo{}
+	view, err := pionView(offer, s.publishCodecs(), gen.view)
+	if err != nil {
+		return err
+	}
+	api, err := newWebRTCAPI(view, s.cfg, s.cfg.Resolver)
 	if err != nil {
 		return err
 	}
@@ -238,7 +249,7 @@ func (s *Session) negotiate(ctx context.Context, gen *generation, offer string) 
 	// The remote description is set before tracks attach: AddTrack then
 	// reuses the offer's publish transceiver instead of opening a fresh one
 	// that would pair with a receive-only section (the worker's proven order).
-	if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offer}); err != nil {
+	if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: view}); err != nil {
 		return fmt.Errorf("vkcalls: set remote description: %w", err)
 	}
 	// The publish slot carries the video transport's track; its SSRC lands in
@@ -302,6 +313,22 @@ func (s *Session) negotiate(ctx context.Context, gen *generation, offer string) 
 	})
 
 	return s.acceptOffer(ctx, gen, offer)
+}
+
+// publishCodecs lists the encoding names of the local video tracks' codecs
+// ("vp8"): the payload types Pion must keep in the publish slot's numbering.
+//
+// ai-generated: this function (#72).
+func (s *Session) publishCodecs() []string {
+	var out []string
+	s.video.RangeVideoTracks(func(track webrtc.TrackLocal, _ bool) {
+		if coded, ok := track.(interface {
+			Codec() webrtc.RTPCodecCapability
+		}); ok {
+			out = append(out, strings.ToLower(strings.TrimPrefix(coded.Codec().MimeType, "video/")))
+		}
+	})
+	return out
 }
 
 // openControlChannels creates the two service data channels the engine
@@ -455,8 +482,14 @@ func (s *Session) reanswer(gen *generation, offer string) error {
 		return ErrSessionClosed
 	}
 	offer = strings.ReplaceAll(offer, "\r\n", "\n")
-	if err := gen.pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offer}); err != nil {
-		return fmt.Errorf("vkcalls: renegotiation remote: %w", err)
+	// ai-generated: this block, Pion's view of the renegotiation offer (#72).
+	view, err := pionView(offer, s.publishCodecs(), gen.view)
+	if err != nil {
+		return err
+	}
+	remote := webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: view}
+	if srdErr := gen.pc.SetRemoteDescription(remote); srdErr != nil {
+		return fmt.Errorf("vkcalls: renegotiation remote: %w", srdErr)
 	}
 	native, err := gen.pc.CreateAnswer(nil)
 	if err != nil {

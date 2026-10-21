@@ -175,6 +175,286 @@ func sectionCodecBlocks(sec section) map[uint8][]string {
 	return out
 }
 
+// pionView is the offer as Pion is given it; the SFU never sees it, the
+// shaped answer is built from the real offer.
+//
+// The SFU does not keep one payload numbering across the bundle: the
+// publish slot names pt=102 red and pt=104 ulpfec while each receive slot
+// names pt=102 VP9 and pt=104 red (#72). Pion keeps one codec per payload
+// type for the whole connection, refuses a clash, labels an incoming stream
+// by its payload type alone and sends a codec at the first payload type it
+// saw. The view therefore puts the publish slot first among the video
+// sections, shows Pion only the codecs we publish there (publish, "vp8")
+// and their rtx, gives every payload type one meaning (claimPayloads) and
+// trims the payload types that lost theirs. Every mid stays. memo, which
+// may be nil, carries the meanings across one connection's renegotiations.
+//
+// ai-generated: this function (#72).
+func pionView(offer string, publish []string, memo *viewMemo) (string, error) {
+	text := strings.ReplaceAll(offer, "\r\n", "\n")
+	sections, err := splitSections(text)
+	if err != nil {
+		return "", err
+	}
+	var header []string
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(line, "m=") {
+			break
+		}
+		if line != "" {
+			header = append(header, line)
+		}
+	}
+	sections = publishSlotFirst(sections)
+	if len(publish) > 0 {
+		for i, sec := range sections {
+			if isPublishSlot(sec) {
+				sections[i] = publishedOnly(sec, publish)
+			}
+		}
+	}
+	claims := claimPayloads(sections, publish, memo)
+	out := header
+	for _, sec := range sections {
+		out = append(out, trimClashes(sec, claims)...)
+	}
+	return strings.Join(out, "\r\n") + "\r\n", nil
+}
+
+// viewMemo is what one connection's views have settled so far: Pion keeps
+// its first meaning of a payload type for good.
+//
+// ai-generated: this type (#72).
+type viewMemo struct {
+	claims map[string]map[uint8]string
+}
+
+// isPublishSlot says whether sec is the video section the SFU receives on.
+//
+// ai-generated: this function (#72).
+func isPublishSlot(sec section) bool {
+	return sec.kind() == kindVideo && sec.direction() == dirRecvOnly
+}
+
+// isPublished says whether an rtpmap encoding is one of publish's codecs.
+//
+// ai-generated: this function (#72).
+func isPublished(name string, publish []string) bool {
+	for _, codec := range publish {
+		if strings.HasPrefix(name, strings.ToLower(codec)+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// publishedOnly trims the publish slot to the codecs we publish and the rtx
+// payloads repairing them; the rest would only claim payload types.
+//
+// ai-generated: this function (#72).
+func publishedOnly(sec section, publish []string) section {
+	names := rtpmapNames(sec)
+	keep := map[uint8]bool{}
+	for pt, name := range names {
+		if isPublished(name, publish) {
+			keep[pt] = true
+		}
+	}
+	for pt, apt := range rtxApts(sec) {
+		if keep[apt] {
+			keep[pt] = true
+		}
+	}
+	drop := map[uint8]bool{}
+	for pt := range names {
+		if !keep[pt] {
+			drop[pt] = true
+		}
+	}
+	return dropPayloads(sec, drop)
+}
+
+// rtxApts maps a section's rtx payload types to the payload they repair.
+//
+// ai-generated: this function (#72).
+func rtxApts(sec section) map[uint8]uint8 {
+	names := rtpmapNames(sec)
+	out := map[uint8]uint8{}
+	for _, line := range sec {
+		m := fmtpLine.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		pt, err := strconv.ParseUint(m[1], 10, 8)
+		if err != nil || !strings.HasPrefix(names[uint8(pt)], "rtx/") {
+			continue
+		}
+		for _, param := range strings.Split(m[2], ";") {
+			if value, ok := strings.CutPrefix(strings.TrimSpace(param), "apt="); ok {
+				if apt, aptErr := strconv.ParseUint(value, 10, 8); aptErr == nil {
+					out[uint8(pt)] = uint8(apt)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// claimPayloads settles which codec each audio and video payload type names
+// for Pion: what memo settled before, then the codecs we publish as the
+// publish slot numbers them, then the other sections in offer order (the SFU
+// forwards to us in their numbering), then the publish slot's other codecs
+// where their payload type is still free. The result goes back to memo.
+//
+// ai-generated: this function (#72).
+func claimPayloads(sections []section, publish []string, memo *viewMemo) map[string]map[uint8]string {
+	claims := map[string]map[uint8]string{kindAudio: {}, kindVideo: {}}
+	if memo != nil {
+		for kind, known := range memo.claims {
+			for pt, name := range known {
+				claims[kind][pt] = name
+			}
+		}
+		defer func() { memo.claims = claims }()
+	}
+	claim := func(sec section, wanted func(string) bool) {
+		known, ok := claims[sec.kind()]
+		if !ok {
+			return
+		}
+		for pt, name := range rtpmapNames(sec) {
+			if _, taken := known[pt]; !taken && wanted(name) {
+				known[pt] = name
+			}
+		}
+	}
+	published := func(name string) bool { return isPublished(name, publish) }
+	everything := func(string) bool { return true }
+	for _, sec := range sections {
+		if isPublishSlot(sec) {
+			claim(sec, published)
+		}
+	}
+	for _, sec := range sections {
+		if !isPublishSlot(sec) {
+			claim(sec, everything)
+		}
+	}
+	for _, sec := range sections {
+		if isPublishSlot(sec) {
+			claim(sec, everything)
+		}
+	}
+	return claims
+}
+
+// publishSlotFirst moves the video publish slot ahead of every other video
+// section, keeping all else in order.
+//
+// ai-generated: this function (#72).
+func publishSlotFirst(sections []section) []section {
+	first, slot := -1, -1
+	for i, sec := range sections {
+		if sec.kind() != kindVideo {
+			continue
+		}
+		if first < 0 {
+			first = i
+		}
+		if sec.direction() == dirRecvOnly {
+			slot = i
+			break
+		}
+	}
+	if slot <= first {
+		return sections
+	}
+	out := make([]section, 0, len(sections))
+	out = append(out, sections[:first]...)
+	out = append(out, sections[slot])
+	out = append(out, sections[first:slot]...)
+	return append(out, sections[slot+1:]...)
+}
+
+// trimClashes drops from an audio or video section the payload types whose
+// claim another codec won.
+//
+// ai-generated: this function (#72).
+func trimClashes(sec section, claims map[string]map[uint8]string) section {
+	known, ok := claims[sec.kind()]
+	if !ok {
+		return sec
+	}
+	drop := map[uint8]bool{}
+	for pt, name := range rtpmapNames(sec) {
+		if winner, claimed := known[pt]; claimed && winner != name {
+			logger.Debugf("vkcalls: mid %s: pt=%d %s yields to %s, hidden from pion", sec.mid(), pt, name, winner)
+			drop[pt] = true
+		}
+	}
+	return dropPayloads(sec, drop)
+}
+
+// dropPayloads removes payload types from a section's m= line and their
+// rtpmap, fmtp and rtcp-fb lines. A section that would be left with none is
+// returned whole: there is nothing to negotiate in it either way.
+//
+// ai-generated: this function (#72).
+func dropPayloads(sec section, drop map[uint8]bool) section {
+	head := strings.Fields(sec[0])
+	if len(drop) == 0 || len(head) < 4 {
+		return sec
+	}
+	kept := head[:3:3]
+	for _, payloadStr := range head[3:] {
+		if pt, err := strconv.ParseUint(payloadStr, 10, 8); err != nil || !drop[uint8(pt)] {
+			kept = append(kept, payloadStr)
+		}
+	}
+	if len(kept) == 3 {
+		return sec
+	}
+	out := section{strings.Join(kept, " ")}
+	for _, line := range sec[1:] {
+		if pt, isCodec := codecLinePayload(line); isCodec && drop[pt] {
+			continue
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
+// rtpmapNames maps a section's payload types to their lowercased rtpmap
+// encoding (name/rate[/channels]), the identity Pion compares codecs by.
+//
+// ai-generated: this function (#72).
+func rtpmapNames(sec section) map[uint8]string {
+	names := map[uint8]string{}
+	for _, line := range sec {
+		if m := rtpmapLine.FindStringSubmatch(line); m != nil {
+			if pt, err := strconv.ParseUint(m[1], 10, 8); err == nil {
+				names[uint8(pt)] = strings.ToLower(strings.TrimPrefix(m[0], "a=rtpmap:"+m[1]+" "))
+			}
+		}
+	}
+	return names
+}
+
+// codecLinePayload returns the payload type an rtpmap, fmtp or rtcp-fb line
+// belongs to.
+//
+// ai-generated: this function (#72).
+func codecLinePayload(line string) (uint8, bool) {
+	for _, prefix := range []string{"a=rtpmap:", "a=fmtp:", "a=rtcp-fb:"} {
+		if rest, ok := strings.CutPrefix(line, prefix); ok {
+			ptStr, _, _ := strings.Cut(rest, " ")
+			pt, err := strconv.ParseUint(ptStr, 10, 8)
+			return uint8(pt), err == nil
+		}
+	}
+	return 0, false
+}
+
 // newWebRTCAPI builds the Pion API for the bundled peer connection: the
 // offer's codecs, DTLS client role (the SDK answers active) and the host's
 // protected networking.

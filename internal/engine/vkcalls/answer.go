@@ -29,6 +29,7 @@ const (
 	kindAudio   = "audio"
 	kindVideo   = "video"
 	dirSendOnly = "sendonly"
+	dirRecvOnly = "recvonly"
 	zeroAddrLn  = "c=IN IP4 0.0.0.0"
 )
 
@@ -253,7 +254,7 @@ func shapeSection(sec section, crypto []string, st *ShapeState, msid, msidStream
 		out = append(out, "a=recvonly", "a=rtcp-mux")
 		out = append(out, codecLines(sec)...)
 		return out, nil
-	case "recvonly":
+	case dirRecvOnly:
 		// Our publish slot. Audio slots keep a stable synthetic SSRC; the
 		// video slot declares the Pion track's real SSRC plainly — the
 		// engine sends no rid headers, so the reference rid/simulcast form
