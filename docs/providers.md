@@ -47,7 +47,7 @@ names each:
 | `salutejazz` | `salutejazz` | LiveKit-protocol SFU behind Sber's TURN; relay window per destination ([#49](https://github.com/ghostlane-project/olcrtc/issues/49)) |
 | `vkcalls` | `vkcalls` | VK Calls rooms |
 | `mtslink` | `mtslink` | MTS Link; the SFU forwards VP9/H264, so the line's transport is `vp8channel` with the engine dressing frames as VP9; a client reaches the SFU over ICE-TCP unless its room link asks otherwise (`?ice=udp`, `?ice=both`, [#60](https://github.com/ghostlane-project/olcrtc/issues/60)); a server joins over UDP |
-| `max` | `max` | calls of the MAX messenger (VK): a DIRECT room (created without a camera), the tunnel on the pair's data channel; `auth.token` is a calls session key or the web client's calls token, the room a join link (https://max.ru/joincall/<hash>) |
+| `max` | `max` | calls of the MAX messenger (VK): a DIRECT room (created without a camera), the tunnel on the pair's data channel; the room is a join link (https://max.ru/joincall/<hash>); `auth.token` comes from the local storage of a browser logged in to MAX: in a Chrome-family browser Ctrl+Shift+C -> Application -> Local Storage -> `web.max.ru` -> the `__oneme_calls_auth_token` field, a correct value starts with `$` (a calls session key works too); the two ends of the tunnel must use different MAX accounts |
 | `none` | any by name | direct engine access: engine/URL/token from the config, `livekit` by default |
 
 ## Setting up an instance
