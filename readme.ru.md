@@ -124,6 +124,7 @@ curl -fsSL https://raw.githubusercontent.com/ghostlane-project/olcrtc/proofkit/i
 ```sh
 mage build   # текущая платформа
 mage cross   # кросс-компиляция
+mage crossFor -platforms=linux/arm64  # только перечисленные платформы (mage 1.16+)
 mage test    # тесты
 mage lint    # golangci-lint
 mage mobile  # gomobile bindings (Android)

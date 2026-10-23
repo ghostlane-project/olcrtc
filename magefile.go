@@ -10,6 +10,7 @@
 //
 //	mage build          # native binary
 //	mage cross          # all platforms
+//	mage crossfor       # listed platforms: -platforms=linux/amd64,... (mage 1.16+)
 //	mage mobile         # Android AAR
 //	mage cgo            # c-shared library
 //
@@ -56,6 +57,14 @@ const (
 //
 //nolint:gochecknoglobals // sentinel error
 var errNotFormatted = errors.New("files were not gofmt-clean")
+
+// crossFor's errors.
+//
+// ai-generated: these two.
+var (
+	errNoPlatforms     = errors.New("no platforms given")
+	errUnknownPlatform = errors.New("unsupported platform")
+)
 
 var (
 	goexe  = mg.GoCmd()
@@ -113,28 +122,24 @@ func Build() error {
 
 // Cross builds olcrtc for all supported platforms.
 func Cross() error {
+	// ai-generated: this body, the list and the loop moved to helpers.
 	mg.Deps(Deps)
+	return buildPlatforms(supportedPlatforms())
+}
 
-	targets := []struct{ os, arch string }{
-		{"linux", "amd64"},
-		{"linux", "arm64"},
-		{"windows", "amd64"},
-		{"darwin", "amd64"},
-		{"darwin", "arm64"},
-		{"freebsd", "amd64"},
-		{"freebsd", "arm64"},
-		{"openbsd", "amd64"},
-		{"openbsd", "arm64"},
+// CrossFor builds olcrtc for the listed platforms only. The list is
+// comma-separated: mage crossFor -platforms=linux/amd64,windows/amd64.
+// Without one it prints the usage and the supported platforms and fails.
+// Needs mage 1.16 or newer.
+func CrossFor(platforms *string) error {
+	// ai-generated: this target.
+	list, err := parsePlatforms(platforms)
+	if err != nil {
+		_, _ = fmt.Fprint(os.Stderr, crossForUsage())
+		return err
 	}
-
-	for _, t := range targets {
-		if err := buildBinary("olcrtc", "./cmd/olcrtc", t.os, t.arch); err != nil {
-			return err
-		}
-	}
-
-	fmt.Printf("✅ built %d platform(s)\n", len(targets))
-	return nil
+	mg.Deps(Deps)
+	return buildPlatforms(list)
 }
 
 // Cgo builds the c-shared library exposed by cmd/olcrtc-cgo.
@@ -384,6 +389,94 @@ func buildBinary(name, pkg, os_, arch string) error {
 
 	args := []string{"build", "-trimpath", "-ldflags", flags, "-o", out, pkg}
 	return sh.RunWithV(env, goexe, args...)
+}
+
+// platform is one GOOS/GOARCH pair olcrtc is built for.
+//
+// ai-generated: this type and its String method.
+type platform struct{ os, arch string }
+
+func (p platform) String() string { return p.os + "/" + p.arch }
+
+// supportedPlatforms lists every platform cross builds, in its order.
+//
+// ai-generated: this function (the list moved out of Cross).
+func supportedPlatforms() []platform {
+	return []platform{
+		{"linux", "amd64"},
+		{"linux", "arm64"},
+		{"windows", "amd64"},
+		{"darwin", "amd64"},
+		{"darwin", "arm64"},
+		{"freebsd", "amd64"},
+		{"freebsd", "arm64"},
+		{"openbsd", "amd64"},
+		{"openbsd", "arm64"},
+	}
+}
+
+// buildPlatforms builds the CLI for each platform in turn.
+//
+// ai-generated: this function (the loop moved out of Cross).
+func buildPlatforms(list []platform) error {
+	for _, p := range list {
+		if err := buildBinary("olcrtc", "./cmd/olcrtc", p.os, p.arch); err != nil {
+			return err
+		}
+	}
+
+	fmt.Printf("✅ built %d platform(s)\n", len(list))
+	return nil
+}
+
+// parsePlatforms reads crossFor's comma-separated list: every entry must be
+// a supported os/arch, empty entries are skipped and repeats dropped.
+//
+// ai-generated: this function.
+func parsePlatforms(platforms *string) ([]platform, error) {
+	if platforms == nil {
+		return nil, errNoPlatforms
+	}
+
+	supported := map[string]platform{}
+	for _, p := range supportedPlatforms() {
+		supported[p.String()] = p
+	}
+
+	var list []platform
+	seen := map[string]bool{}
+	for _, name := range strings.Split(*platforms, ",") {
+		name = strings.TrimSpace(name)
+		if name == "" || seen[name] {
+			continue
+		}
+		p, ok := supported[name]
+		if !ok {
+			return nil, fmt.Errorf("%w: %q", errUnknownPlatform, name)
+		}
+		seen[name] = true
+		list = append(list, p)
+	}
+
+	if len(list) == 0 {
+		return nil, errNoPlatforms
+	}
+	return list, nil
+}
+
+// crossForUsage is how to call crossFor and what it can build.
+//
+// ai-generated: this function.
+func crossForUsage() string {
+	platforms := supportedPlatforms()
+	lines := make([]string, 0, len(platforms)+2)
+	lines = append(lines,
+		"usage: mage crossFor -platforms=os/arch[,os/arch2,os/arch3...]",
+		"Supported platforms:")
+	for _, p := range platforms {
+		lines = append(lines, "  "+p.String())
+	}
+	return strings.Join(lines, "\n") + "\n"
 }
 
 func ensureBuildDir() error {
