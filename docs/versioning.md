@@ -48,6 +48,7 @@ full list.
 
 | Version | Commit | Date | Ships in |
 |---|---|---|---|
+| v0.12.1 | `d15b37ec` | 2026-10-23 | the servers of the ProofKit network, build `metering-v12` |
 | v0.12.0 | `b6cb4c41` | 2026-10-19 | Ghostlane 1.0.467 |
 | v0.11.1 | `bac09891` | 2026-10-12 | Ghostlane 1.0.466 |
 | v0.11.0 | `443c1854` | 2026-10-11 | the servers of the ProofKit network, build `metering-v11` |
