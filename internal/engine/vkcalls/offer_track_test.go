@@ -26,12 +26,12 @@ func TestOfferTrackNegotiates(t *testing.T) {
 		t.Skip("no captured offer")
 	}
 	offer := strings.ReplaceAll(string(raw), "\r\n", "\n")
-	media, err := offerMediaEngine(offer)
+	// ai-generated: this block; the engine hands Pion its view of the offer (#72).
+	view, err := pionView(offer, vp8Publish(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = media
-	api, err := newWebRTCAPI(offer, engine.Config{}, nil)
+	api, err := newWebRTCAPI(view, engine.Config{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +40,7 @@ func TestOfferTrackNegotiates(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pc.Close()
-	if srdErr := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offer}); srdErr != nil {
+	if srdErr := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: view}); srdErr != nil {
 		t.Fatal(srdErr)
 	}
 	track, err := webrtc.NewTrackLocalStaticSample(

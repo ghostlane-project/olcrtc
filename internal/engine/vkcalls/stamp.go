@@ -73,7 +73,7 @@ func publishMid(offer string) string {
 		return ""
 	}
 	for _, sec := range sections {
-		if sec.kind() == kindVideo && sec.direction() == "recvonly" {
+		if sec.kind() == kindVideo && sec.direction() == dirRecvOnly {
 			return sec.mid()
 		}
 	}
