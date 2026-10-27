@@ -447,11 +447,8 @@ func (s *Session) run(gen *generation, connection notification) {
 		select {
 		case note := <-gen.signal.Notifications():
 			switch note.Notification {
-			case "participant-joined", "media-settings-changed":
-				// A camera may appear with either: ask for it by key.
-				if id, err := decimalID(note.ParticipantID); err == nil && id != gen.signal.Self() && gen.noteParticipant(id) {
-					gen.subscribeAll()
-				}
+			case "participant-joined", noteMediaChanged:
+				gen.subscribeParticipant(note)
 			case "producer-updated":
 				if note.Description == "" || note.SessionID == gen.sessionID {
 					continue
@@ -472,6 +469,20 @@ func (s *Session) run(gen *generation, connection notification) {
 			s.reconnectAttempt(gen)
 			return
 		}
+	}
+}
+
+// subscribeParticipant asks for a new participant's camera, and asks again
+// when an already known participant changes media after joining.
+// ai-generated: this function and the call from run.
+func (gen *generation) subscribeParticipant(note notification) {
+	id, err := decimalID(note.ParticipantID)
+	if err != nil || id == gen.signal.Self() {
+		return
+	}
+	fresh := gen.noteParticipant(id)
+	if fresh || note.Notification == noteMediaChanged {
+		gen.subscribeAll()
 	}
 }
 

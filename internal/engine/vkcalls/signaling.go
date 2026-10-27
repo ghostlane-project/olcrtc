@@ -51,6 +51,8 @@ const (
 	fieldPeerID      = "peerId"
 	noteConnection   = "connection"
 	noteTopology     = "topology-changed"
+	// ai-generated: shared notification name for media subscription refresh.
+	noteMediaChanged = "media-settings-changed"
 	frameTypeError   = "error"
 	reasonHungup     = "HUNGUP"
 	topologyServer   = "SERVER"
