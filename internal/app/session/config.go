@@ -6,6 +6,7 @@ import (
 
 	enginebuiltin "github.com/openlibrecommunity/olcrtc/internal/engine/builtin"
 	"github.com/openlibrecommunity/olcrtc/internal/protect"
+	"github.com/openlibrecommunity/olcrtc/internal/server"
 	"github.com/openlibrecommunity/olcrtc/internal/transport"
 	"github.com/openlibrecommunity/olcrtc/internal/transport/datachannel"
 	"github.com/openlibrecommunity/olcrtc/internal/transport/seichannel"
@@ -183,6 +184,12 @@ type Config struct {
 	//
 	// ai-generated: the field (egress hardening).
 	UnsafeAllowPrivateTargets bool
+	// KeyReload, on a server whose keys are in a file, reads that file again
+	// when asked to (server.KeyReload). Not read from YAML: the CLI sets it
+	// for a crypto.keys_file, and nothing else does.
+	//
+	// ai-generated: the field (reload of crypto.keys_file on SIGHUP).
+	KeyReload *server.KeyReload
 }
 
 // RegisterDefaults registers built-in providers and transports.

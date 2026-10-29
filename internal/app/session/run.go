@@ -85,9 +85,13 @@ func runServer(
 	traffic transport.TrafficConfig,
 	opts transport.Options,
 ) error {
-	err := server.Run(ctx, server.Config{
+	keys, err := serverKeys(cfg)
+	if err != nil {
+		return err
+	}
+	err = server.Run(ctx, server.Config{
 		Transport: cfg.Transport, Provider: cfg.Provider, RoomURL: roomURL, ChannelID: cfg.ChannelID,
-		KeyHex: cfg.KeyHex, Keys: cfg.KeysHex, StatsListen: cfg.StatsListen,
+		KeyHex: cfg.KeyHex, Keys: keys, Reload: cfg.KeyReload, StatsListen: cfg.StatsListen,
 		UDPDisabled: cfg.UDPDisabled, UDPMaxFlows: cfg.UDPMaxFlows,
 		DNSServer: cfg.DNSServer, DTLSProfile: engine.DTLSProfile(cfg.DTLSProfile), Resolver: cfg.Resolver,
 		SOCKSProxyAddr: cfg.SOCKSProxyAddr, SOCKSProxyPort: cfg.SOCKSProxyPort,
@@ -107,6 +111,24 @@ func runServer(
 		return fmt.Errorf("server: %w", err)
 	}
 	return nil
+}
+
+// serverKeys is the ring a server starts with. A server whose keys are in a
+// file starts from the file as it is now, so a start after a reload - a
+// lifecycle rotation runs the server again inside the same process - never
+// brings back a key the file has lost since. The read is the one a reload
+// does, and a file that cannot be read stops the run.
+//
+// ai-generated: the whole function (reload of crypto.keys_file on SIGHUP).
+func serverKeys(cfg Config) ([]string, error) {
+	if cfg.KeyReload == nil {
+		return cfg.KeysHex, nil
+	}
+	keys, err := cfg.KeyReload.Read()
+	if err != nil {
+		return nil, fmt.Errorf("server: read keys: %w", err)
+	}
+	return keys, nil
 }
 
 // logTraffic writes a stream's byte counts, and not its destination: an

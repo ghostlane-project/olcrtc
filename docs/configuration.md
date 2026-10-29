@@ -99,6 +99,8 @@ crypto:
     - "aabb...8899"   # a per-user key
 ```
 
+A server whose keys are in `crypto.keys_file` reads the file again on `SIGHUP`, with the same rules as at start, and swaps the ring in place: a new key pairs at once, a connected peer whose key is still in the file keeps running, and a peer whose key was removed is closed. A file that cannot be read, holds a bad key or holds no key stops the server with an error, so that its supervisor starts it again from the file. With inline `crypto.keys` or a single `crypto.key` there is nothing to reload: `SIGHUP` only logs that.
+
 `mode: cnc` forbids listening on a non-loopback address (`0.0.0.0`, LAN IP etc.) unless both `socks.user` and `socks.pass` are set.
 
 The `data` directory must contain files named `names` and `surnames`, one display-name component per line. The embedded dictionaries remain active when `data` is omitted.

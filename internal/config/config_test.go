@@ -586,3 +586,99 @@ func TestApplySettingsDTLSProfileInheritsAndOverrides(t *testing.T) {
 		t.Fatalf("explicit off did not override: %q", off.DTLSProfile)
 	}
 }
+
+// ai-generated: the tests below (a server reads crypto.keys_file again on
+// SIGHUP).
+
+const (
+	reloadKey1 = "0011223344556677889900112233445566778899001122334455667788990011"
+	reloadKey2 = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+	reloadKey3 = "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100"
+)
+
+func writeConfigFile(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// A reload reads the file the start read, with the parser the start used:
+// comments, blank lines and the blanks around a key are no part of a ring.
+func TestReadKeysFileReadsTheFileLoadReadWithTheSameParser(t *testing.T) {
+	dir := t.TempDir()
+	keysFile := filepath.Join(dir, "keys.txt")
+	writeConfigFile(t, keysFile, "# first\n"+reloadKey1+"\n\n"+reloadKey2+"\n")
+	configPath := filepath.Join(dir, "olcrtc.yaml")
+	writeConfigFile(t, configPath, "mode: srv\ncrypto:\n  keys_file: keys.txt\n")
+	file, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if file.KeysPath != keysFile {
+		t.Fatalf("Load named the keys file %q, want %q", file.KeysPath, keysFile)
+	}
+
+	writeConfigFile(t, keysFile, "# second\n\n  "+reloadKey2+"  \n\t\n# a new one\n"+reloadKey3+"\n")
+	got, err := ReadKeysFile(file.KeysPath)
+	if err != nil {
+		t.Fatalf("ReadKeysFile() error = %v", err)
+	}
+	if want := []string{reloadKey2, reloadKey3}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ReadKeysFile() = %v, want %v", got, want)
+	}
+	again, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() after the change error = %v", err)
+	}
+	if start := Apply(again).KeysHex; !reflect.DeepEqual(got, start) {
+		t.Fatalf("a reload read %v where a start reads %v", got, start)
+	}
+}
+
+func TestLoadNamesAKeysFileGivenByAbsolutePath(t *testing.T) {
+	dir := t.TempDir()
+	keysFile := filepath.Join(t.TempDir(), "keys.txt")
+	writeConfigFile(t, keysFile, reloadKey1+"\n")
+	configPath := filepath.Join(dir, "olcrtc.yaml")
+	writeConfigFile(t, configPath, "mode: srv\ncrypto:\n  keys_file: "+keysFile+"\n")
+	file, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if file.KeysPath != keysFile {
+		t.Fatalf("Load named the keys file %q, want %q", file.KeysPath, keysFile)
+	}
+}
+
+func TestLoadNamesNoKeysFileWhenTheKeysAreNotInOne(t *testing.T) {
+	bodies := map[string]string{
+		"single key":  "mode: srv\ncrypto:\n  key: " + reloadKey1 + "\n",
+		"inline keys": "mode: srv\ncrypto:\n  keys:\n    - " + reloadKey1 + "\n    - " + reloadKey2 + "\n",
+	}
+	for name, body := range bodies {
+		t.Run(name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "olcrtc.yaml")
+			writeConfigFile(t, configPath, body)
+			file, err := Load(configPath)
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if file.KeysPath != "" {
+				t.Fatalf("Load named the keys file %q for keys that are not in one", file.KeysPath)
+			}
+		})
+	}
+}
+
+func TestReadKeysFileFailsOnAFileThatIsGoneOrHoldsNoKey(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := ReadKeysFile(filepath.Join(dir, "gone.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("ReadKeysFile(missing) error = %v, want os.ErrNotExist", err)
+	}
+	empty := filepath.Join(dir, "empty.txt")
+	writeConfigFile(t, empty, "# nothing here\n\n   \n")
+	if _, err := ReadKeysFile(empty); !errors.Is(err, ErrCryptoKeyFileEmpty) {
+		t.Fatalf("ReadKeysFile(no keys) error = %v, want %v", err, ErrCryptoKeyFileEmpty)
+	}
+}

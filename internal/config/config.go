@@ -82,6 +82,14 @@ type File struct {
 	Data     string    `yaml:"data"`
 	Debug    bool      `yaml:"debug"`
 	Stats    Stats     `yaml:"stats"`
+
+	// KeysPath is where the top-level crypto.keys_file was read from, a
+	// relative path taken against the config file; empty when the keys are
+	// not in a file. Load fills it, and a server reads the file again from it
+	// on SIGHUP (ReadKeysFile).
+	//
+	// ai-generated: the field (reload of crypto.keys_file on SIGHUP).
+	KeysPath string `yaml:"-"`
 }
 
 // Stats configures the server's loopback /stats listener. It is process-wide
@@ -268,6 +276,10 @@ func loadExternalSecrets(configPath string, file *File) error {
 		return err
 	}
 
+	if file.Crypto.KeysFile != "" {
+		file.KeysPath = keysFilePath(configPath, file.Crypto.KeysFile)
+	}
+
 	file.Crypto = resolved
 
 	if file.Route, err = resolveRoute(configPath, file.Route); err != nil {
@@ -365,13 +377,28 @@ func resolveKeys(configPath string, crypto Crypto) ([]string, error) {
 	return readKeysFile(configPath, crypto.KeysFile)
 }
 
-// readKeysFile reads one key per line; blank lines and # comments are skipped.
-func readKeysFile(configPath, keysFile string) ([]string, error) {
-	keysPath := keysFile
-	if !filepath.IsAbs(keysPath) {
-		keysPath = filepath.Join(filepath.Dir(configPath), keysPath)
+// keysFilePath is where crypto.keys_file is read from: a relative path is
+// taken against the directory of the config file.
+func keysFilePath(configPath, keysFile string) string {
+	if filepath.IsAbs(keysFile) {
+		return keysFile
 	}
 
+	return filepath.Join(filepath.Dir(configPath), keysFile)
+}
+
+func readKeysFile(configPath, keysFile string) ([]string, error) {
+	return ReadKeysFile(keysFilePath(configPath, keysFile))
+}
+
+// ReadKeysFile reads a key ring file, one key per line; blank lines and #
+// comments are skipped. Load reads crypto.keys_file with it, and a server
+// that was started from such a file reads it again with it on SIGHUP, so a
+// reload parses what a start parses.
+//
+// ai-generated: the exported name and the doc, split out of readKeysFile as
+// it was (reload of crypto.keys_file on SIGHUP).
+func ReadKeysFile(keysPath string) ([]string, error) {
 	// #nosec G304 -- keys_file is an explicit path in the user's config file.
 	data, err := os.ReadFile(keysPath)
 	if err != nil {
