@@ -9,7 +9,7 @@ import (
 
 	"github.com/xtaci/smux"
 
-	"github.com/openlibrecommunity/olcrtc/internal/crypto"
+	"github.com/openlibrecommunity/olcrtc/internal/muxconn"
 	"github.com/openlibrecommunity/olcrtc/internal/runtime"
 	"github.com/openlibrecommunity/olcrtc/internal/transport"
 )
@@ -149,8 +149,16 @@ type linkRig struct {
 // touch, and brings it up over link.
 func newLinkRig(t *testing.T, link *linkStub) *linkRig {
 	t.Helper()
+	return newLinkRigOn(t, link, singleRing(newServerTestKeys(t)))
+}
+
+// newLinkRigOn is newLinkRig for a server serving ring.
+//
+// ai-generated: split out of newLinkRig as it was (ring reload on SIGHUP).
+func newLinkRigOn(t *testing.T, link *linkStub, ring *muxconn.RingSource) *linkRig {
+	t.Helper()
 	srv := &Server{
-		ring:         crypto.SingleEntry(newServerTestKeys(t), ""),
+		ring:         ring,
 		meter:        newMeter(),
 		health:       runtime.NewHealthTracker(nil),
 		onClose:      func(string, string) {},

@@ -5,7 +5,6 @@ import (
 	"net"
 	"testing"
 
-	"github.com/openlibrecommunity/olcrtc/internal/crypto"
 	"github.com/openlibrecommunity/olcrtc/internal/transport"
 
 	"github.com/xtaci/smux"
@@ -48,12 +47,12 @@ func TestSwapSessionDiscardsStaleReinstall(t *testing.T) {
 	ln := &peerRoutingStub{}
 	s := &Server{
 		ln:      ln,
-		ring:    crypto.SingleEntry(keys, ""),
+		ring:    singleRing(keys),
 		session: liveData,
 		health:  runtime.NewHealthTracker(nil),
 	}
 	r := &tunnelcore.SessionPair{DataSession: newData, DataConn: muxconn.New(ln, keys)}
-	if ok := s.swapSession(stale, r, r.DataConn.Group()); ok {
+	if ok := s.swapSession(stale, r, r.DataConn.Group(), "reconnect"); ok {
 		t.Fatal("swapSession accepted a stale reinstall that matched no live session")
 	}
 	s.sessMu.RLock()

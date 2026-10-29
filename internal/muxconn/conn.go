@@ -412,11 +412,9 @@ func (c *Conn) open(ciphertext []byte) *[]byte {
 	} else {
 		// Pairing is still open: the first record any ring entry opens
 		// becomes the pin for this conn's whole group (data and control).
-		var matched *crypto.RingEntry
-		pt, matched, err = c.group.ring.TryOpen(*bufPtr, ciphertext, c.aad)
-		if err == nil {
-			c.group.pin(matched)
-		}
+		// ai-generated: the group tries the ring its source holds now, and
+		// pins under the source's lock (ring reload on SIGHUP).
+		pt, err = c.group.pair(*bufPtr, ciphertext, c.aad)
 	}
 	if err != nil {
 		releaseFrameBuf(bufPtr)

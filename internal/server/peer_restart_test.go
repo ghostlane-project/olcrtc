@@ -58,7 +58,7 @@ func newRelayServer(t *testing.T, link *relayLinkStub) *Server {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Server{
-		baseCtx: ctx, ln: link, peerLn: link, ring: cryptopkg.SingleEntry(newServerTestKeys(t), ""),
+		baseCtx: ctx, ln: link, peerLn: link, ring: singleRing(newServerTestKeys(t)),
 		authHook: defaultAuthHook, onOpen: func(string, string, map[string]any) {},
 		onClose: func(string, string) {}, health: runtime.NewHealthTracker(nil),
 		liveness:     peerTestLiveness,
@@ -95,9 +95,20 @@ func (l *clientLinkStub) Send(data []byte) error {
 	return nil
 }
 
+// relayClientPSK is the key a relay client holds unless a test names one.
+const relayClientPSK = "01234567890123456789012345678901"
+
 func newRelayClient(t *testing.T, s *Server, peerID string) *relayClient {
 	t.Helper()
-	keys, err := cryptopkg.NewKeySet([]byte("01234567890123456789012345678901"), cryptopkg.Client)
+	return newRelayClientKeyed(t, s, peerID, relayClientPSK)
+}
+
+// newRelayClientKeyed is newRelayClient for a client that holds psk.
+//
+// ai-generated: split out of newRelayClient as it was (ring reload on SIGHUP).
+func newRelayClientKeyed(t *testing.T, s *Server, peerID, psk string) *relayClient {
+	t.Helper()
+	keys, err := cryptopkg.NewKeySet([]byte(psk), cryptopkg.Client)
 	if err != nil {
 		t.Fatal(err)
 	}
