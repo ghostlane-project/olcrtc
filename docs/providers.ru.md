@@ -45,7 +45,7 @@
 | `salutejazz` | `salutejazz` | SFU на протоколе LiveKit за TURN Сбера; окно релея на получателя ([#49](https://github.com/ghostlane-project/olcrtc/issues/49)) |
 | `vkcalls` | `vkcalls` | комнаты VK Calls |
 | `mtslink` | `mtslink` | МТС Линк; SFU пересылает VP9/H264, поэтому транспорт линии - `vp8channel` с движком, рядящим кадры в VP9; клиент идёт к SFU по ICE-TCP, если ссылка комнаты не просит иного (`?ice=udp`, `?ice=both`, [#60](https://github.com/ghostlane-project/olcrtc/issues/60)); сервер входит по UDP |
-| `max` | `max` | звонки мессенджера MAX (VK): комната DIRECT (создана без камеры), туннель в data-канале пары; `auth.token` - ключ calls-сессии или calls-токен веб-клиента, комната - ссылка на вход (https://max.ru/joincall/<hash>) |
+| `max` | `max` | звонки мессенджера MAX (VK): комната DIRECT (создана без камеры), туннель в data-канале пары; комната - ссылка на вход (https://max.ru/joincall/<hash>); `auth.token` берётся из локального хранилища браузера, залогиненного в MAX: в браузерах семейства Chrome Ctrl+Shift+C -> Application -> Local Storage -> `web.max.ru` -> поле `__oneme_calls_auth_token`, корректное значение начинается с `$` (подойдёт и ключ calls-сессии); по разные стороны туннеля обязательно должны быть разные аккаунты MAX |
 | `none` | любой по имени | прямой доступ к движку: engine/URL/token из конфига, по умолчанию `livekit` |
 
 ## Поднять инстанс

@@ -30,6 +30,9 @@ type fakeAPI struct {
 	calls []map[string]string
 	// refuse makes every call answer this error envelope.
 	refuse map[string]any
+	// loginUID is the uid the login answers; nil is the number 512002791292.
+	// ai-generated: this field.
+	loginUID any
 }
 
 func newFakeAPI(t *testing.T) *fakeAPI {
@@ -51,14 +54,18 @@ func (f *fakeAPI) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	f.mu.Lock()
 	f.calls = append(f.calls, call)
-	refuse := f.refuse
+	// ai-generated: this block, the login's uid as the test sets it.
+	refuse, loginUID := f.refuse, f.loginUID
 	f.mu.Unlock()
+	if loginUID == nil {
+		loginUID = 512002791292
+	}
 	var answer any
 	switch {
 	case refuse != nil:
 		answer = refuse
 	case call["method"] == methodAnonymLogin:
-		answer = map[string]any{"uid": 512002791292, "session_key": testKey, "session_secret_key": "s"}
+		answer = map[string]any{"uid": loginUID, "session_key": testKey, "session_secret_key": "s"}
 	case call["method"] == methodJoinByLink:
 		answer = map[string]any{
 			"endpoint": testEndpoint, "token": "jointoken",
@@ -150,6 +157,42 @@ func TestACallsTokenIsExchangedForASessionFirst(t *testing.T) {
 	}
 	if creds.Extra["userId"] != "512002791292" {
 		t.Fatalf("userId = %q, want the login's uid", creds.Extra["userId"])
+	}
+}
+
+// The live login answers its uid as a quoted decimal string; a number keeps
+// working, and anything else is named.
+//
+// ai-generated: this test.
+func TestALoginUIDMayComeQuoted(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		uid  any
+		want string
+	}{
+		{"number", 512002791292, "512002791292"},
+		{"quoted", "512002791292", "512002791292"},
+		{"not a number", "u512002791292", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeAPI(t)
+			f.loginUID = tc.uid
+			creds, err := Provider{APIBase: f.srv.URL}.Issue(context.Background(), auth.Config{
+				RoomURL: "https://max.ru/joincall/gJKH8SzaJWI37", Token: "$calls_token",
+			})
+			if tc.want == "" {
+				if !errors.Is(err, ErrBadUserID) {
+					t.Fatalf("err = %v, want ErrBadUserID", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if creds.Extra["userId"] != tc.want {
+				t.Fatalf("userId = %q, want %q", creds.Extra["userId"], tc.want)
+			}
+		})
 	}
 }
 
