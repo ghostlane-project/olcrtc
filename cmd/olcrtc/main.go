@@ -26,6 +26,7 @@ import (
 	configpkg "github.com/openlibrecommunity/olcrtc/internal/config"
 	"github.com/openlibrecommunity/olcrtc/internal/logger"
 	"github.com/openlibrecommunity/olcrtc/internal/names"
+	"github.com/openlibrecommunity/olcrtc/internal/server"
 	"github.com/openlibrecommunity/olcrtc/internal/supervisor"
 )
 
@@ -56,6 +57,11 @@ type loadedConfig struct {
 	//
 	// ai-generated: the reload hook (this field and loadProfiles).
 	reload func() ([]supervisor.Profile, error)
+	// keys reads crypto.keys_file again, with the parser the start used; nil
+	// when the keys are not in a file. A server answers SIGHUP with it.
+	//
+	// ai-generated: the field (SIGHUP reloads crypto.keys_file).
+	keys func() ([]string, error)
 }
 
 type failoverConfig struct {
@@ -137,7 +143,19 @@ func loadConfig(path string) (loadedConfig, error) {
 		dataDir:  resolveDataDir(path, file.Data),
 		debug:    file.Debug,
 		reload:   func() ([]supervisor.Profile, error) { return loadProfiles(path) },
+		keys:     keysReader(file.KeysPath),
 	}, nil
+}
+
+// keysReader reads the keys file at keysPath again; nil for no file.
+//
+// ai-generated: the whole function (SIGHUP reloads crypto.keys_file).
+func keysReader(keysPath string) func() ([]string, error) {
+	if keysPath == "" {
+		return nil
+	}
+
+	return func() ([]string, error) { return configpkg.ReadKeysFile(keysPath) }
 }
 
 // loadProfiles re-reads the config file and returns the failover profiles it
@@ -208,7 +226,7 @@ func runWithConfig(cfg loadedConfig) error {
 		return runFailoverSessionMode(cfg.dataDir, profiles, cfg.failover, cfg.reload)
 	}
 
-	return runSessionMode(cfg.dataDir, scfg)
+	return runSessionMode(cfg.dataDir, scfg, cfg.keys)
 }
 
 // prepareProfiles applies the session defaults and tells each client that it
@@ -229,7 +247,7 @@ func prepareProfiles(profiles []supervisor.Profile) []supervisor.Profile {
 	return out
 }
 
-func runSessionMode(dataDir string, scfg session.Config) error {
+func runSessionMode(dataDir string, scfg session.Config, keys func() ([]string, error)) error {
 	if err := session.Validate(scfg); err != nil {
 		return fmt.Errorf("validate config: %w", err)
 	}
@@ -239,8 +257,77 @@ func runSessionMode(dataDir string, scfg session.Config) error {
 	}
 
 	return runManaged(func(ctx context.Context) error {
-		return runSession(ctx, scfg)
+		cfg, stop := withHangupReload(ctx, scfg, keys)
+		defer stop()
+
+		return runSession(ctx, cfg)
 	})
+}
+
+// withHangupReload makes SIGHUP the signal that asks a server to read its
+// keys file again, and returns the config the run starts with and the call
+// that stops listening. The server takes the new ring in place and closes
+// the peers of keys that left (server.KeyReload).
+//
+// A server whose keys are not in a file has nothing to reload: SIGHUP says so
+// and changes nothing. Any other mode keeps the signal's default.
+//
+// ai-generated: the whole function and the three below (SIGHUP reloads
+// crypto.keys_file).
+func withHangupReload(
+	ctx context.Context,
+	scfg session.Config,
+	keys func() ([]string, error),
+) (session.Config, func()) {
+	if scfg.Mode != session.ModeSrv {
+		return scfg, func() {}
+	}
+
+	hups := make(chan os.Signal, 1)
+	signal.Notify(hups, syscall.SIGHUP)
+
+	stop := func() { signal.Stop(hups) }
+
+	if keys == nil {
+		go ignoreHangups(ctx, hups)
+
+		return scfg, stop
+	}
+
+	requests := make(chan struct{}, 1)
+	go forwardHangups(ctx, hups, requests)
+
+	scfg.KeyReload = &server.KeyReload{Read: keys, Request: requests}
+
+	return scfg, stop
+}
+
+// forwardHangups turns each SIGHUP into a reload request. A signal that comes
+// while a request still waits is that request: signals do not queue.
+func forwardHangups(ctx context.Context, hups <-chan os.Signal, requests chan<- struct{}) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-hups:
+			select {
+			case requests <- struct{}{}:
+			default:
+			}
+		}
+	}
+}
+
+// ignoreHangups answers each SIGHUP of a server with nothing to reload.
+func ignoreHangups(ctx context.Context, hups <-chan os.Signal) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-hups:
+			logger.Info("SIGHUP: nothing to reload, the keys are not in crypto.keys_file")
+		}
+	}
 }
 
 func runFailoverSessionMode(

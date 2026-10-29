@@ -220,7 +220,7 @@ func (s *Server) getOrCreatePeerControlSession(peerID string) *peerSession {
 			s.sessMu.Unlock()
 			return nil
 		}
-		peer = newPeerSession(peerID, true, muxconn.NewPinGroup(s.ring))
+		peer = newPeerSession(peerID, true, muxconn.NewPinGroupFrom(s.ring))
 	}
 	conn := muxconn.NewPeerControlUnboundGrouped(s.ln, peer.group, peerID)
 	if conn == nil {
@@ -398,11 +398,17 @@ func (s *Server) peerSessionIn(peerID string, carried *muxconn.PinGroup) *peerSe
 		return nil
 	}
 	group := carried
+	// ai-generated: a pin whose key a reload has taken out of the ring is not
+	// carried; the reload's walk sees the sessions in the map, and this one
+	// is added to it below, under the same lock (ring reload on SIGHUP).
+	if group != nil && pinnedOutside(group, s.ring.Ring()) {
+		group = nil
+	}
 	if peer != nil {
 		group = peer.group
 	}
 	if group == nil {
-		group = muxconn.NewPinGroup(s.ring)
+		group = muxconn.NewPinGroupFrom(s.ring)
 	}
 	conn := muxconn.NewPeerGrouped(s.peerLn, group, peerID)
 	session, err := tunnelcore.NewSession(conn, tunnelcore.ServerRole, runtime.SmuxConfigFor(s.ln))

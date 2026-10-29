@@ -69,7 +69,7 @@ func (s *Server) bringUpLink(ctx context.Context, cfg Config, cancel context.Can
 }
 
 func (s *Server) installSession() {
-	group := muxconn.NewPinGroup(s.ring)
+	group := muxconn.NewPinGroupFrom(s.ring)
 	pair, err := tunnelcore.NewSessionPairGrouped(s.ln, group, tunnelcore.ServerRole)
 	if pair == nil {
 		logger.Warnf("smux server init failed: %v", err)
@@ -93,7 +93,7 @@ func (s *Server) installControlSession(ctx context.Context) {
 		s.installPeerControlPlane(peerControl)
 		return
 	}
-	group := muxconn.NewPinGroup(s.ring)
+	group := muxconn.NewPinGroupFrom(s.ring)
 	conn, session, err := tunnelcore.NewControlSessionGrouped(s.ln, group, tunnelcore.ServerRole)
 	if err != nil {
 		logger.Warnf("control smux server init failed (peer-routing): %v", err)
@@ -167,6 +167,15 @@ func (s *Server) handleReconnect(ctx context.Context) {
 }
 
 func (s *Server) reinstallSession(ctx context.Context, dead *smux.Session) {
+	s.reinstallSessionFor(ctx, dead, "reconnect")
+}
+
+// reinstallSessionFor is reinstallSession, reporting the session it replaces
+// closed for reason.
+//
+// ai-generated: split out of reinstallSession as it was, for the reason (ring
+// reload on SIGHUP).
+func (s *Server) reinstallSessionFor(ctx context.Context, dead *smux.Session, reason string) {
 	if s.peerLn != nil {
 		s.reinstallPeerRouting(ctx)
 		return
@@ -195,7 +204,7 @@ func (s *Server) reinstallSession(ctx context.Context, dead *smux.Session) {
 	s.sessMu.RUnlock()
 	// A fresh group per generation: the peer that comes back may hold
 	// another key than the one that left.
-	group := muxconn.NewPinGroup(s.ring)
+	group := muxconn.NewPinGroupFrom(s.ring)
 	replacement, err := tunnelcore.NewSessionPairGrouped(s.ln, group, tunnelcore.ServerRole)
 	if replacement == nil {
 		logger.Warnf("smux server re-init failed: %v", err)
@@ -204,7 +213,7 @@ func (s *Server) reinstallSession(ctx context.Context, dead *smux.Session) {
 	if err != nil {
 		logger.Warnf("control smux server re-init failed: %v", err)
 	}
-	if !s.swapSession(dead, replacement, group) {
+	if !s.swapSession(dead, replacement, group, reason) {
 		return
 	}
 	if replacement.HasIsolatedControl() {
@@ -282,7 +291,12 @@ func (s *Server) staleReinstall(dead *smux.Session) bool {
 	return dead != nil && dead != s.session && dead != s.controlSess
 }
 
-func (s *Server) swapSession(dead *smux.Session, replacement *tunnelcore.SessionPair, group *muxconn.PinGroup) bool {
+func (s *Server) swapSession(
+	dead *smux.Session,
+	replacement *tunnelcore.SessionPair,
+	group *muxconn.PinGroup,
+	reason string,
+) bool {
 	s.sessMu.Lock()
 	if s.peerLn != nil {
 		s.sessMu.Unlock()
@@ -315,8 +329,8 @@ func (s *Server) swapSession(dead *smux.Session, replacement *tunnelcore.Session
 		_ = oldControl.Close()
 	}
 	if oldSessionID != "" {
-		s.onClose(oldSessionID, "reconnect")
-		s.trackPeerClose(oldSessionID, "reconnect")
+		s.onClose(oldSessionID, reason)
+		s.trackPeerClose(oldSessionID, reason)
 	}
 	s.closeAllUDPFlows()
 	return true

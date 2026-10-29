@@ -453,6 +453,28 @@ func (s *Server) closeAllUDPFlows() {
 	}
 }
 
+// closePeerUDPFlows ends the relay flows of peerID. A flow is fed by its
+// target, not by the peer, and answers under the key that opened it: a peer
+// whose key is gone must not go on receiving what its target sends.
+//
+// ai-generated: the whole method (ring reload on SIGHUP).
+func (s *Server) closePeerUDPFlows(peerID string) {
+	var ended []*serverUDPFlow
+	s.udpMu.Lock()
+	for key, flow := range s.udpFlows {
+		if key.peerID == peerID {
+			ended = append(ended, flow)
+			delete(s.udpFlows, key)
+		}
+	}
+	s.udpMu.Unlock()
+	for _, flow := range ended {
+		if flow != nil {
+			s.finishUDPFlow(flow)
+		}
+	}
+}
+
 func (s *Server) finishUDPFlow(flow *serverUDPFlow) {
 	flow.closeOnce.Do(func() {
 		_ = flow.conn.Close()

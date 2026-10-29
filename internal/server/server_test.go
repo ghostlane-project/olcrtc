@@ -62,6 +62,12 @@ func newServerTestKeys(t *testing.T) *cryptopkg.KeySet {
 	return keys
 }
 
+// singleRing is the ring of a server that serves one key and does not
+// reload it: the source a stock config gets.
+func singleRing(keys *cryptopkg.KeySet) *muxconn.RingSource {
+	return muxconn.NewRingSource(cryptopkg.SingleEntry(keys, ""))
+}
+
 // testSmuxCfg is the data-plane smux config the production path builds for a
 // plain (non control-plane) transport.
 func testSmuxCfg() *smux.Config {
@@ -311,7 +317,7 @@ func TestShutdownClosesLinkAndConn(t *testing.T) {
 	ln := &serverLinkStub{}
 	s := &Server{
 		ln:   ln,
-		ring: cryptopkg.SingleEntry(keys, ""),
+		ring: singleRing(keys),
 		conn: muxconn.New(ln, keys),
 	}
 	s.shutdown()
@@ -448,7 +454,7 @@ func TestReinstallSessionFiresOnClose(t *testing.T) {
 	}
 	s := &Server{
 		ln:        &serverLinkStub{},
-		ring:      cryptopkg.SingleEntry(keys, ""),
+		ring:      singleRing(keys),
 		sessionID: "sid-123",
 		deviceID:  "dev-123",
 		onClose:   func(sid, reason string) { got.sid = sid; got.reason = reason },
@@ -574,7 +580,7 @@ func TestStartControlLoopResetsPeerBeforeReinstall(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Server{
 		ln:      ln,
-		ring:    cryptopkg.SingleEntry(keys, ""),
+		ring:    singleRing(keys),
 		conn:    muxconn.New(ln, keys),
 		session: serverSess,
 		health:  runtime.NewHealthTracker(nil),
@@ -744,7 +750,7 @@ func TestReinstallSessionClosesOldConnBeforeSwap(t *testing.T) {
 	}
 	s := &Server{
 		ln:           ln,
-		ring:         cryptopkg.SingleEntry(keys, ""),
+		ring:         singleRing(keys),
 		conn:         conn,
 		session:      sess,
 		onClose:      func(string, string) {},
@@ -929,7 +935,7 @@ func TestPeerSessionConcurrentAccess(t *testing.T) {
 	ln := &serverLinkStub{}
 	s := &Server{
 		ln:           ln,
-		ring:         cryptopkg.SingleEntry(keys, ""),
+		ring:         singleRing(keys),
 		onClose:      func(string, string) {},
 		health:       runtime.NewHealthTracker(nil),
 		peerSessions: make(map[string]*peerSession),
@@ -1121,7 +1127,7 @@ func TestServeSingleWakesOnSessionInstall(t *testing.T) {
 	keys := newServerTestKeys(t)
 	s := &Server{
 		ln:           &serverLinkStub{},
-		ring:         cryptopkg.SingleEntry(keys, ""),
+		ring:         singleRing(keys),
 		sessionID:    "sid-serve",
 		resolver:     net.DefaultResolver,
 		onClose:      func(string, string) {},

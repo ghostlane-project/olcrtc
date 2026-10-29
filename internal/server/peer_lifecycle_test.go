@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/openlibrecommunity/olcrtc/internal/crypto"
 	"github.com/openlibrecommunity/olcrtc/internal/handshake"
 	"github.com/openlibrecommunity/olcrtc/internal/muxconn"
 	"github.com/openlibrecommunity/olcrtc/internal/runtime"
@@ -33,7 +32,7 @@ func newPeerLifecycleServer(t *testing.T) (*Server, func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	link := &peerControlRoutingStub{}
 	s := &Server{
-		baseCtx: ctx, ln: link, peerLn: link, ring: crypto.SingleEntry(newServerTestKeys(t), ""),
+		baseCtx: ctx, ln: link, peerLn: link, ring: singleRing(newServerTestKeys(t)),
 		authHook: defaultAuthHook, onOpen: func(string, string, map[string]any) {},
 		onClose: func(string, string) {}, health: runtime.NewHealthTracker(nil),
 		peerSessions: make(map[string]*peerSession), peerStats: make(map[string]peerStat),

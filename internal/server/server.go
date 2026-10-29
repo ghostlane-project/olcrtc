@@ -57,12 +57,15 @@ type Server struct {
 	baseCtx context.Context //nolint:containedctx // server-lifetime context for reconnect goroutines
 	ln      transport.Transport
 	peerLn  transport.PeerTransport
-	// ring holds every key a peer may pair under; group is the pin group of
-	// the current single-link session generation (nil in peer routing).
-	ring  *crypto.KeyRing
+	// ring holds every key a peer may pair under, replaced in place by a key
+	// ring reload (reload.go); group is the pin group of the current
+	// single-link session generation (nil in peer routing).
+	ring  *muxconn.RingSource
 	group *muxconn.PinGroup
 	pair  *tunnelcore.SessionPair
 	conn  *muxconn.Conn
+	// reloadMu serves one key ring reload at a time (reload.go).
+	reloadMu sync.Mutex
 
 	controlConn *muxconn.Conn
 	session     *smux.Session
@@ -137,6 +140,9 @@ type Config struct {
 	// that opens a peer's first record is pinned for that peer. Empty means
 	// the single KeyHex.
 	Keys []string
+	// Reload, when set, lets the running server take a new key ring in place:
+	// see KeyReload. ai-generated: the field (ring reload on SIGHUP).
+	Reload *KeyReload
 	// StatsListen, when set, serves GET /stats on this loopback address with
 	// per-key byte totals. Empty disables the listener.
 	StatsListen string
@@ -194,7 +200,7 @@ func Run(ctx context.Context, cfg Config) error {
 		onTraffic = func(string, string, uint64, uint64) {}
 	}
 	s := &Server{
-		ring: ring, authHook: hook, onOpen: onOpen, onClose: onClose, onTraffic: onTraffic,
+		ring: muxconn.NewRingSource(ring), authHook: hook, onOpen: onOpen, onClose: onClose, onTraffic: onTraffic,
 		dnsServer: cfg.DNSServer, resolver: tunnelcore.Resolver(cfg.Resolver, cfg.DNSServer),
 		socksProxyAddr: cfg.SOCKSProxyAddr, socksProxyPort: cfg.SOCKSProxyPort,
 		socksProxyUser: cfg.SOCKSProxyUser, socksProxyPass: cfg.SOCKSProxyPass,
@@ -214,15 +220,18 @@ func Run(ctx context.Context, cfg Config) error {
 	if cfg.StatsListen != "" {
 		s.serveStats(runCtx, cfg.StatsListen)
 	}
+	// ai-generated: a reload that fails ends the run with its error, whatever
+	// the run was doing (ring reload on SIGHUP).
+	reloads := s.startKeyReloads(runCtx, cfg.Reload, cancel)
 	if err := s.bringUpLink(runCtx, cfg, cancel); err != nil {
-		return err
+		return reloads.failure(err)
 	}
 	go func() {
 		<-runCtx.Done()
 		s.closeSession()
 	}()
 	s.serve(runCtx)
-	return nil
+	return reloads.failure(nil)
 }
 
 // serveStats exposes per-key byte totals on a loopback endpoint an operator's
