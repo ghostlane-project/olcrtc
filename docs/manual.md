@@ -131,6 +131,7 @@ cd olcrtc
 ```sh
 mage build   # current platform
 mage cross   # all platforms at once (if you build for another machine)
+mage crossFor -platforms=linux/arm64   # only the listed platforms (mage 1.16+)
 ```
 
 The result is in `build/`:
@@ -365,6 +366,13 @@ mage cross
 ls build/
 ```
 
+Or only the ones you need; `mage crossFor` with no list prints the supported
+platforms (needs mage 1.16+):
+
+```sh
+mage crossFor -platforms=linux/arm64
+```
+
 ### 3. Stop the old process
 
 If you started it manually in a terminal - stop it with `Ctrl+C`.
@@ -426,6 +434,7 @@ Service names depend on how you created them. The configs do not need to change 
 ```sh
 mage build    # build for the current platform
 mage cross    # build for all platforms
+mage crossFor -platforms=linux/arm64  # build for the listed platforms (mage 1.16+)
 mage mobile   # build the Android AAR
 mage clean    # remove build/
 ```

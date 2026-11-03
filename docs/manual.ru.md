@@ -131,6 +131,7 @@ cd olcrtc
 ```sh
 mage build   # текущая платформа
 mage cross   # все платформы сразу (если собираешь для другой машины)
+mage crossFor -platforms=linux/arm64   # только перечисленные платформы (mage 1.16+)
 ```
 
 Результат в `build/`:
@@ -365,6 +366,13 @@ mage cross
 ls build/
 ```
 
+Или только нужные; `mage crossFor` без списка выводит поддерживаемые
+платформы (нужен mage 1.16+):
+
+```sh
+mage crossFor -platforms=linux/arm64
+```
+
 ### 3. Остановить старый процесс
 
 Если запускал вручную в терминале - останови его через `Ctrl+C`.
@@ -426,6 +434,7 @@ sudo systemctl restart olcrtc-client
 ```sh
 mage build    # собрать для текущей платформы
 mage cross    # собрать для всех платформ
+mage crossFor -platforms=linux/arm64  # собрать для перечисленных платформ (mage 1.16+)
 mage mobile   # собрать Android AAR
 mage clean    # удалить build/
 ```

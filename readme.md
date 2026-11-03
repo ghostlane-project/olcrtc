@@ -139,6 +139,7 @@ Full instructions are in [docs/fast.md](docs/fast.md) and [docs/manual.md](docs/
 ```sh
 mage build   # current platform
 mage cross   # cross-compilation
+mage crossFor -platforms=linux/arm64  # only the listed platforms (mage 1.16+)
 mage test    # tests
 mage lint    # golangci-lint
 mage mobile  # gomobile bindings (Android)
