@@ -467,6 +467,8 @@ func newWebRTCAPI(offer string, cfg engine.Config, resolver protect.Lookup) (*we
 	if roleErr := settings.SetAnsweringDTLSRole(webrtc.DTLSRoleClient); roleErr != nil {
 		return nil, fmt.Errorf("vkcalls: dtls role: %w", roleErr)
 	}
+	// ai-generated (net.ice_local_ip): the options go through the session's
+	// Pion().Options, which adds the DTLS profile and the local IP.
 	apply, err := engine.NewPionSettings(cfg.Pion().Options(engine.PionSettingsOptions{
 		Resolver:         resolver,
 		LoggerFactory:    logger.NewPionLoggerFactory(),

@@ -59,7 +59,7 @@ func BuildTransportConfig(base LinkConfig, role LinkRoleConfig) transport.Config
 		OnPeerDatagram:      role.OnPeerDatagram,
 		DNSServer:           base.DNSServer,
 		DTLSProfile:         base.DTLSProfile,
-		ICELocalIP:          base.ICELocalIP,
+		ICELocalIP:          base.ICELocalIP, // ai-generated (net.ice_local_ip)
 		Resolver:            Resolver(role.Resolver, base.DNSServer),
 		ProxyAddr:           role.ProxyAddr,
 		ProxyPort:           role.ProxyPort,

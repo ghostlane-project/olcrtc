@@ -15,8 +15,13 @@ import (
 
 // newWebRTCAPI builds a pion API with IPv4-only ICE and default
 // interceptors, over the host's protected networking.
+//
+// ai-generated (net.ice_local_ip): the signature takes the session's
+// PionSession, and the options are built through pion.Options.
 func newWebRTCAPI(resolver protect.Lookup, pion engine.PionSession) (*webrtc.API, error) {
 	settingEngine := webrtc.SettingEngine{}
+	// ai-generated (net.ice_local_ip): the options go through the session's
+	// Pion().Options, which adds the DTLS profile and the local IP.
 	apply, err := engine.NewPionSettings(pion.Options(engine.PionSettingsOptions{
 		Resolver:         resolver,
 		LoggerFactory:    logger.NewPionLoggerFactory(),

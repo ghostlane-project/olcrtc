@@ -50,13 +50,15 @@ func NewPionSettings(opts PionSettingsOptions) (PionSettings, error) {
 		return nil, err
 	}
 	var protectedNet *protect.ProtectedNet
-	if UsesProtectedNet(opts.Resolver) {
+	if UsesProtectedNet(opts.Resolver) { // ai-generated: the condition moved into UsesProtectedNet
 		var err error
 		protectedNet, err = protect.NewProtectedNet(opts.Resolver)
 		if err != nil {
 			return nil, fmt.Errorf("protected net: %w", err)
 		}
 	}
+	// ai-generated (net.ice_local_ip): the LocalIP term; a local IP alone
+	// needs the hook that sets the ICE filter.
 	if opts.LoggerFactory == nil && !opts.IPv4Only && !opts.LocalIP.IsValid() && protectedNet == nil {
 		// A chosen DTLS profile still has to reach SDK-owned settings, so only
 		// the stock profile keeps the nil hook.
@@ -80,6 +82,8 @@ func networkSettings(opts PionSettingsOptions, protectedNet *protect.ProtectedNe
 		if opts.IPv4Only {
 			settings.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
 		}
+		// ai-generated (net.ice_local_ip): the filter, IPv4-only and/or the
+		// one local IP; nil keeps pion gathering on every address.
 		if filter := iceIPFilter(opts); filter != nil {
 			settings.SetIPFilter(filter)
 		}

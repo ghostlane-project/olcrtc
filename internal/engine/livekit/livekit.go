@@ -308,6 +308,8 @@ func New(_ context.Context, cfg engine.Config) (engine.Session, error) {
 		lksdk.WithConnectHTTPClient(httpClient),
 		lksdk.WithWebSocketDialer(&wsDialer),
 	}
+	// ai-generated (net.ice_local_ip): the options go through the session's
+	// Pion().Options, which adds the DTLS profile and the local IP.
 	applySettings, err := engine.NewPionSettings(cfg.Pion().Options(engine.PionSettingsOptions{
 		Resolver:    cfg.Resolver,
 		ProxyDialer: true,

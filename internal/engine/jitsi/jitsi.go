@@ -188,7 +188,7 @@ func New(_ context.Context, cfg engine.Config) (engine.Session, error) {
 		room:                room,
 		name:                name,
 		resolver:            cfg.Resolver,
-		pion:                cfg.Pion(),
+		pion:                cfg.Pion(), // ai-generated (net.ice_local_ip)
 		httpClient:          protect.NewHTTPClient(cfg.Resolver),
 		onData:              cfg.OnData,
 		onPeerData:          cfg.OnPeerData,

@@ -198,6 +198,8 @@ func newAPI(cfg engine.Config) (*webrtc.API, error) {
 		return nil, fmt.Errorf("max: audio codec: %w", err)
 	}
 	settings := webrtc.SettingEngine{}
+	// ai-generated (net.ice_local_ip): the options go through the session's
+	// Pion().Options, which adds the DTLS profile and the local IP.
 	apply, err := engine.NewPionSettings(cfg.Pion().Options(engine.PionSettingsOptions{
 		Resolver: cfg.Resolver, LoggerFactory: logger.NewPionLoggerFactory(),
 		IPv4Only: true, DisableMulticast: true,

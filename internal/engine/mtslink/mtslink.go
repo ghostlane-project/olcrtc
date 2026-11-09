@@ -242,6 +242,8 @@ func (s *Session) newAPI() (*webrtc.API, error) {
 	}
 
 	settings := webrtc.SettingEngine{}
+	// ai-generated (net.ice_local_ip): the options go through the session's
+	// Pion().Options, which adds the DTLS profile and the local IP.
 	apply, err := engine.NewPionSettings(s.cfg.Pion().Options(engine.PionSettingsOptions{
 		Resolver:         s.cfg.Resolver,
 		LoggerFactory:    logger.NewPionLoggerFactory(),

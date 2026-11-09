@@ -114,8 +114,13 @@ func (s *Session) shouldRequestVideo() bool {
 }
 
 // newSettingEngine builds the pion settings shared with the other engines.
+//
+// ai-generated (net.ice_local_ip): the signature takes the session's
+// PionSession, and the options are built through pion.Options.
 func newSettingEngine(resolver protect.Lookup, pion engine.PionSession) (webrtc.SettingEngine, error) {
 	settings := webrtc.SettingEngine{}
+	// ai-generated (net.ice_local_ip): the options go through the session's
+	// Pion().Options, which adds the DTLS profile and the local IP.
 	apply, err := engine.NewPionSettings(pion.Options(engine.PionSettingsOptions{
 		Resolver:         resolver,
 		LoggerFactory:    logger.NewPionLoggerFactory(),
@@ -134,8 +139,10 @@ func newSettingEngine(resolver protect.Lookup, pion engine.PionSession) (webrtc.
 // newConferenceAPI builds the conference PeerConnection API.
 //
 // ai-generated: the media engine and the interceptor registry.
+//
+// ai-generated (net.ice_local_ip): the PionSession parameter.
 func newConferenceAPI(resolver protect.Lookup, pion engine.PionSession) (*webrtc.API, error) {
-	settings, err := newSettingEngine(resolver, pion)
+	settings, err := newSettingEngine(resolver, pion) // ai-generated (net.ice_local_ip): the PionSession
 	if err != nil {
 		return nil, err
 	}
@@ -217,7 +224,7 @@ func (s *Session) negotiatePC(ctx context.Context, jSess *j.Session, sctpBridge 
 }
 
 func (s *Session) newConferencePeerConnection(jSess *j.Session) (*webrtc.PeerConnection, error) {
-	api, err := newConferenceAPI(s.resolver, s.pion)
+	api, err := newConferenceAPI(s.resolver, s.pion) // ai-generated (net.ice_local_ip)
 	if err != nil {
 		return nil, err
 	}

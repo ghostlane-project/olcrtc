@@ -286,7 +286,7 @@ func (c Config) EngineConfig() enginebuiltin.Config {
 		DNSServer:           c.DNSServer,
 		Resolver:            c.Resolver,
 		DTLSProfile:         c.DTLSProfile,
-		ICELocalIP:          c.ICELocalIP,
+		ICELocalIP:          c.ICELocalIP, // ai-generated (net.ice_local_ip)
 		ProxyAddr:           c.ProxyAddr,
 		ProxyPort:           c.ProxyPort,
 		RequireTargetedPeer: c.RequireTargetedPeer,

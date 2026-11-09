@@ -314,7 +314,7 @@ func New(_ context.Context, cfg engine.Config) (engine.Session, error) {
 		telemetryReferer: telemetryReferer,
 		refresh:          cfg.Refresh,
 		resolver:         cfg.Resolver,
-		pion:             cfg.Pion(),
+		pion:             cfg.Pion(), // ai-generated (net.ice_local_ip)
 		onData:           cfg.OnData,
 		closeCh:          make(chan struct{}),
 		keepAliveCh:      make(chan struct{}),

@@ -453,7 +453,7 @@ func New(_ context.Context, cfg engine.Config) (engine.Session, error) {
 	s := &Session{
 		name:           cfg.Name,
 		resolver:       cfg.Resolver,
-		pion:           cfg.Pion(),
+		pion:           cfg.Pion(), // ai-generated (net.ice_local_ip)
 		refresh:        cfg.Refresh,
 		onData:         cfg.OnData,
 		onPeerData:     cfg.OnPeerData,
@@ -483,7 +483,7 @@ func New(_ context.Context, cfg engine.Config) (engine.Session, error) {
 // once the publisher lane is open, which is when the session can carry
 // bytes.
 func (s *Session) Connect(ctx context.Context) error {
-	api, err := newWebRTCAPI(s.resolver, s.pion)
+	api, err := newWebRTCAPI(s.resolver, s.pion) // ai-generated (net.ice_local_ip)
 	if err != nil {
 		return err
 	}
