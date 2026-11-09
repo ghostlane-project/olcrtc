@@ -60,8 +60,11 @@ type Config struct {
 	// DTLSProfile selects a fixed ClientHello profile for this session;
 	// empty keeps the stock Pion handshake. Validated before dialing.
 	DTLSProfile DTLSProfile
-	// ICELocalIP, when valid, is the one local address ICE gathers on
-	// (net.ice_local_ip); carriers pass it on through Pion().Options.
+	// ICELocalIP, when valid, is net.ice_local_ip, the address ICE gathers on:
+	// host candidates and the bases of the UDP reflexive and relay ones; TCP and
+	// TLS TURN are dialed by the routing table. What it bounds is the number of
+	// TURN allocations.
+	// Carriers pass it on through Pion().Options.
 	// ai-generated: the field (net.ice_local_ip).
 	ICELocalIP netip.Addr
 	ProxyAddr  string

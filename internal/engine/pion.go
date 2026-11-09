@@ -22,8 +22,10 @@ type PionSettingsOptions struct {
 	// DTLSProfile selects a fixed ClientHello profile for this session; empty or
 	// "off" keeps the stock Pion handshake. Validated before any dialing.
 	DTLSProfile DTLSProfile
-	// LocalIP, when valid, is the one local address ICE gathers on: host
-	// candidates and the bases of the reflexive and relay ones (net.ice_local_ip).
+	// LocalIP, when valid, is net.ice_local_ip, the address ICE gathers on: host
+	// candidates and the bases of the UDP reflexive and relay ones; TCP and TLS
+	// TURN are dialed by the routing table. What it bounds is the number of TURN
+	// allocations.
 	// The zero value gathers on every address, as before.
 	//
 	// ai-generated: the field (net.ice_local_ip).

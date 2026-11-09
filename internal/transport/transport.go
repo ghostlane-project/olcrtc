@@ -247,8 +247,11 @@ type Config struct {
 	ProxyAddr      string
 	ProxyPort      int
 	DTLSProfile    engine.DTLSProfile
-	// ICELocalIP is the one local address ICE gathers on (net.ice_local_ip);
-	// the zero value gathers on every address. ai-generated.
+	// ICELocalIP is net.ice_local_ip, the address ICE gathers on: host
+	// candidates and the bases of the UDP reflexive and relay ones; TCP and TLS
+	// TURN are dialed by the routing table. What it bounds is the number of TURN
+	// allocations.
+	// The zero value gathers on every address. ai-generated.
 	ICELocalIP netip.Addr
 
 	// RequireTargetedPeer makes single-peer engines ignore broadcast frames

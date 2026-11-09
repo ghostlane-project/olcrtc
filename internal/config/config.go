@@ -151,9 +151,11 @@ type Crypto struct {
 type Net struct {
 	Transport string `yaml:"transport"` // datachannel, videochannel, seichannel, vp8channel
 	DNS       string `yaml:"dns"`
-	// ICELocalIP is the one local address a server's ICE gathers on: host
-	// candidates and the bases of the reflexive and relay ones. Empty, the
-	// default, gathers on every address.
+	// ICELocalIP is, for a server, the address ICE gathers on: host candidates
+	// and the bases of the UDP reflexive and relay ones; TCP and TLS TURN are
+	// dialed by the routing table. What it bounds is the number of TURN
+	// allocations.
+	// Empty, the default, gathers on every address.
 	//
 	// ai-generated: the field (net.ice_local_ip).
 	ICELocalIP string `yaml:"ice_local_ip"`
