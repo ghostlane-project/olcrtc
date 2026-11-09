@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"slices"
 	"sync"
 	"time"
@@ -246,6 +247,12 @@ type Config struct {
 	ProxyAddr      string
 	ProxyPort      int
 	DTLSProfile    engine.DTLSProfile
+	// ICELocalIP is net.ice_local_ip, the address ICE gathers on: host
+	// candidates and the bases of the UDP reflexive and relay ones; TCP and TLS
+	// TURN are dialed by the routing table. What it bounds is the number of TURN
+	// allocations.
+	// The zero value gathers on every address. ai-generated.
+	ICELocalIP netip.Addr
 
 	// RequireTargetedPeer makes single-peer engines ignore broadcast frames
 	// from unrelated olcrtc clients until a peer sends a frame addressed to
@@ -279,6 +286,7 @@ func (c Config) EngineConfig() enginebuiltin.Config {
 		DNSServer:           c.DNSServer,
 		Resolver:            c.Resolver,
 		DTLSProfile:         c.DTLSProfile,
+		ICELocalIP:          c.ICELocalIP, // ai-generated (net.ice_local_ip)
 		ProxyAddr:           c.ProxyAddr,
 		ProxyPort:           c.ProxyPort,
 		RequireTargetedPeer: c.RequireTargetedPeer,

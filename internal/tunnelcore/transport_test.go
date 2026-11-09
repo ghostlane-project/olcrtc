@@ -2,6 +2,7 @@ package tunnelcore
 
 import (
 	"net"
+	"net/netip"
 	"testing"
 
 	"github.com/openlibrecommunity/olcrtc/internal/transport"
@@ -28,5 +29,13 @@ func TestBuildTransportConfigPreservesRoleFields(t *testing.T) {
 	}
 	if cfg.Provider != "provider" || cfg.RoomURL != "room" || cfg.Traffic.MaxPayloadSize != 4096 {
 		t.Fatalf("shared config = %+v", cfg)
+	}
+}
+
+// ai-generated: net.ice_local_ip crosses the shared link config.
+func TestBuildTransportConfigCarriesTheICELocalIP(t *testing.T) {
+	local := netip.MustParseAddr("192.0.2.10")
+	if got := BuildTransportConfig(LinkConfig{ICELocalIP: local}, LinkRoleConfig{}).ICELocalIP; got != local {
+		t.Fatalf("ICELocalIP = %v, want %v", got, local)
 	}
 }

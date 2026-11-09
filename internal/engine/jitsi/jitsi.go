@@ -62,12 +62,12 @@ type Session struct {
 	engine.Reconnector
 	engine.VideoTrackState
 
-	host        string
-	room        string
-	name        string
-	resolver    protect.Lookup
-	dtlsProfile engine.DTLSProfile
-	httpClient  *http.Client
+	host       string
+	room       string
+	name       string
+	resolver   protect.Lookup
+	pion       engine.PionSession // ai-generated: replaces dtlsProfile (net.ice_local_ip)
+	httpClient *http.Client
 	// configJSLimits times config.js discovery; its zero fields take the
 	// constants. Tests shorten them.
 	//
@@ -188,7 +188,7 @@ func New(_ context.Context, cfg engine.Config) (engine.Session, error) {
 		room:                room,
 		name:                name,
 		resolver:            cfg.Resolver,
-		dtlsProfile:         cfg.DTLSProfile,
+		pion:                cfg.Pion(), // ai-generated (net.ice_local_ip)
 		httpClient:          protect.NewHTTPClient(cfg.Resolver),
 		onData:              cfg.OnData,
 		onPeerData:          cfg.OnPeerData,

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/openlibrecommunity/olcrtc/internal/app/session"
+	"github.com/openlibrecommunity/olcrtc/internal/engine"
 )
 
 var (
@@ -33,6 +35,9 @@ var (
 	// ErrCryptoKeysConflict is returned when a key ring is combined with a single key or with itself.
 	ErrCryptoKeysConflict = errors.New(
 		"crypto.keys or crypto.keys_file cannot be combined with crypto.key, crypto.key_file or each other")
+	// ErrICELocalIP is returned when net.ice_local_ip is not a usable IPv4
+	// address of an interface. ai-generated (net.ice_local_ip).
+	ErrICELocalIP = engine.ErrICELocalIP
 )
 
 // Settings is the overridable part of the schema. The top-level file and every
@@ -146,6 +151,14 @@ type Crypto struct {
 type Net struct {
 	Transport string `yaml:"transport"` // datachannel, videochannel, seichannel, vp8channel
 	DNS       string `yaml:"dns"`
+	// ICELocalIP is, for a server, the address ICE gathers on: host candidates
+	// and the bases of the UDP reflexive and relay ones; TCP and TLS TURN are
+	// dialed by the routing table. What it bounds is the number of TURN
+	// allocations.
+	// Empty, the default, gathers on every address.
+	//
+	// ai-generated: the field (net.ice_local_ip).
+	ICELocalIP string `yaml:"ice_local_ip"`
 }
 
 // SOCKS bundles SOCKS5 listener and outbound-proxy settings.
@@ -276,7 +289,26 @@ func Load(path string) (File, error) {
 		return File{}, err
 	}
 
+	if err := checkNet(file); err != nil {
+		return File{}, fmt.Errorf("parse config %s: %w", path, err)
+	}
+
 	return file, nil
+}
+
+// checkNet refuses a top-level net section the engine could not use before
+// anything starts. A profile's own value is judged with the profile
+// (session.Validate), so one bad profile does not fail a whole reload.
+//
+// ai-generated: the whole function (net.ice_local_ip).
+func checkNet(file File) error {
+	_, err := parseICELocalIP(file.Net.ICELocalIP)
+	return err
+}
+
+// parseICELocalIP is engine.ParseICELocalIP; ai-generated (net.ice_local_ip).
+func parseICELocalIP(value string) (netip.Addr, error) {
+	return engine.ParseICELocalIP(value) //nolint:wrapcheck // the error names the key and the value
 }
 
 func loadExternalSecrets(configPath string, file *File) error {
@@ -486,6 +518,7 @@ func ApplySettings(dst session.Config, s Settings) session.Config {
 	dst.Transport = overlay(dst.Transport, s.Net.Transport)
 	dst.DNSServer = overlay(dst.DNSServer, s.Net.DNS)
 	dst.DTLSProfile = overlay(dst.DTLSProfile, s.DTLS.Profile)
+	dst.ICELocalIP = overlay(dst.ICELocalIP, s.Net.ICELocalIP) // ai-generated (net.ice_local_ip)
 
 	dst.Provider = overlay(dst.Provider, s.Auth.Provider)
 	dst.ProviderToken = overlay(dst.ProviderToken, s.Auth.Token)

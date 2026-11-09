@@ -308,11 +308,12 @@ func New(_ context.Context, cfg engine.Config) (engine.Session, error) {
 		lksdk.WithConnectHTTPClient(httpClient),
 		lksdk.WithWebSocketDialer(&wsDialer),
 	}
-	applySettings, err := engine.NewPionSettings(engine.PionSettingsOptions{
+	// ai-generated (net.ice_local_ip): the options go through the session's
+	// Pion().Options, which adds the DTLS profile and the local IP.
+	applySettings, err := engine.NewPionSettings(cfg.Pion().Options(engine.PionSettingsOptions{
 		Resolver:    cfg.Resolver,
 		ProxyDialer: true,
-		DTLSProfile: cfg.DTLSProfile,
-	})
+	}))
 	if err != nil {
 		return nil, err //nolint:wrapcheck // shared builder already adds protected-net context
 	}

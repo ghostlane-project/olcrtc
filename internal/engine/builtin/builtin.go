@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"slices"
 	"sync"
 
@@ -53,6 +54,7 @@ type Config struct {
 	DNSServer           string
 	Resolver            protect.Lookup
 	DTLSProfile         engine.DTLSProfile
+	ICELocalIP          netip.Addr // ai-generated: the field (net.ice_local_ip)
 	ProxyAddr           string
 	ProxyPort           int
 	RequireTargetedPeer bool
@@ -147,29 +149,40 @@ func register(name string, provider auth.Provider) {
 			return nil, err
 		}
 
-		sess, err := engine.New(ctx, engineName, engine.Config{
-			URL:                 creds.URL,
-			Token:               creds.Token,
-			Extra:               creds.Extra,
-			Name:                cfg.Name,
-			OnData:              cfg.OnData,
-			OnPeerData:          cfg.OnPeerData,
-			OnDatagram:          cfg.OnDatagram,
-			OnPeerDatagram:      cfg.OnPeerDatagram,
-			DNSServer:           cfg.DNSServer,
-			Resolver:            cfg.Resolver,
-			DTLSProfile:         cfg.DTLSProfile,
-			ProxyAddr:           cfg.ProxyAddr,
-			ProxyPort:           cfg.ProxyPort,
-			RequireTargetedPeer: cfg.RequireTargetedPeer,
-			Refresh:             refresh,
-		})
+		sess, err := engine.New(ctx, engineName, engineConfig(cfg, creds, refresh))
 		if err != nil {
 			return nil, fmt.Errorf("engine new: %w", err)
 		}
 
 		return sess, nil
 	})
+}
+
+// engineConfig is the engine's config for a session of cfg with creds.
+//
+// ai-generated: split out of register so a test can see what an engine gets
+// (net.ice_local_ip).
+func engineConfig(
+	cfg Config, creds engine.Credentials, refresh func(context.Context) (engine.Credentials, error),
+) engine.Config {
+	return engine.Config{
+		URL:                 creds.URL,
+		Token:               creds.Token,
+		Extra:               creds.Extra,
+		Name:                cfg.Name,
+		OnData:              cfg.OnData,
+		OnPeerData:          cfg.OnPeerData,
+		OnDatagram:          cfg.OnDatagram,
+		OnPeerDatagram:      cfg.OnPeerDatagram,
+		DNSServer:           cfg.DNSServer,
+		Resolver:            cfg.Resolver,
+		DTLSProfile:         cfg.DTLSProfile,
+		ICELocalIP:          cfg.ICELocalIP,
+		ProxyAddr:           cfg.ProxyAddr,
+		ProxyPort:           cfg.ProxyPort,
+		RequireTargetedPeer: cfg.RequireTargetedPeer,
+		Refresh:             refresh,
+	}
 }
 
 // resolveCredentials returns the engine to build, the credentials to build it

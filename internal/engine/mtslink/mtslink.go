@@ -242,13 +242,14 @@ func (s *Session) newAPI() (*webrtc.API, error) {
 	}
 
 	settings := webrtc.SettingEngine{}
-	apply, err := engine.NewPionSettings(engine.PionSettingsOptions{
+	// ai-generated (net.ice_local_ip): the options go through the session's
+	// Pion().Options, which adds the DTLS profile and the local IP.
+	apply, err := engine.NewPionSettings(s.cfg.Pion().Options(engine.PionSettingsOptions{
 		Resolver:         s.cfg.Resolver,
-		DTLSProfile:      s.cfg.DTLSProfile,
 		LoggerFactory:    logger.NewPionLoggerFactory(),
 		IPv4Only:         true,
 		DisableMulticast: true,
-	})
+	}))
 	if err != nil {
 		return nil, err //nolint:wrapcheck // the shared builder already adds context
 	}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -165,6 +166,7 @@ type Config struct {
 	UnsafeAllowPrivateTargets bool
 	DNSServer                 string
 	DTLSProfile               engine.DTLSProfile
+	ICELocalIP                netip.Addr // ai-generated: the field (net.ice_local_ip)
 	Resolver                  protect.Lookup
 	SOCKSProxyAddr            string
 	SOCKSProxyPort            int
