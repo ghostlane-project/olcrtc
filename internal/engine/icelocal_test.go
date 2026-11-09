@@ -104,10 +104,7 @@ func TestCheckLocalIPJudgesTheInterfaceICEGathersFrom(t *testing.T) {
 // A peer connection built with the key gathers host candidates on that one
 // address and on no other interface of the host.
 func TestLocalIPGathersOnlyThatAddress(t *testing.T) {
-	local, others := hostIPv4s(t)
-	if len(others) == 0 {
-		t.Skip("the host has one non-loopback IPv4 address: nothing to leave out")
-	}
+	local, _ := hostIPv4s(t)
 	got := gatherHostAddrs(t, PionSettingsOptions{IPv4Only: true, DisableMulticast: true, LocalIP: local})
 	if len(got) == 0 {
 		t.Fatal("no host candidate gathered on the local IP")
@@ -123,25 +120,29 @@ func TestLocalIPGathersOnlyThatAddress(t *testing.T) {
 	}
 }
 
+// hostIPv4s picks the IPv4 addresses ICE gathers on here, judged the way
+// CheckLocalIP judges them (up, not loopback, not hidden), so the test does
+// not depend on the order or state of the host's interfaces.
 func hostIPv4s(t *testing.T) (netip.Addr, []netip.Addr) {
 	t.Helper()
-	addrs, err := net.InterfaceAddrs()
+	ifcs, err := hostInterfaces()
 	if err != nil {
-		t.Fatalf("InterfaceAddrs: %v", err)
+		t.Fatalf("hostInterfaces: %v", err)
 	}
+	protected := UsesProtectedNet(nil)
 	var found []netip.Addr
-	for _, a := range addrs {
-		n, ok := a.(*net.IPNet)
-		if !ok {
+	for _, ifc := range ifcs {
+		if gatherRefusal(ifc, protected) != nil {
 			continue
 		}
-		ip, ok := netip.AddrFromSlice(n.IP)
-		if ok && ip.Unmap().Is4() && !ip.IsLoopback() {
-			found = append(found, ip.Unmap())
+		for _, ip := range ifc.addrs {
+			if ip.Is4() && !ip.IsLinkLocalUnicast() {
+				found = append(found, ip)
+			}
 		}
 	}
-	if len(found) == 0 {
-		t.Skip("the host has no non-loopback IPv4 address")
+	if len(found) < 2 {
+		t.Skipf("the host has %d IPv4 address(es) ICE gathers on (up, not loopback, not hidden); two are needed, one to keep and one to leave out", len(found))
 	}
 	return found[0], found[1:]
 }
