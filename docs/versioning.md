@@ -48,6 +48,7 @@ full list.
 
 | Version | Commit | Date | Ships in |
 |---|---|---|---|
+| v0.15.0 | - | - | the servers of the ProofKit network, build `v0.15.0` (`net.ice_local_ip`) |
 | v0.14.0 | `0955ba7f` | 2026-11-04 | the servers of the ProofKit network, build `v0.14.0` |
 | v0.13.0 | `5b1e6172` | 2026-10-29 | the servers of the ProofKit network, build `v0.13.0` |
 | v0.12.1 | `d15b37ec` | 2026-10-23 | the servers of the ProofKit network, build `metering-v12` |

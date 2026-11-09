@@ -60,6 +60,7 @@ Ready-made examples:
 | `crypto.keys` / `crypto.keys_file` | server only: a list of keys, each 64 hex chars, inline or one per line in a file; the key a client's first record authenticates under is pinned for that client |
 | `net.transport` | `datachannel`, `vp8channel`, `seichannel`, `videochannel` |
 | `net.dns` | DNS resolver in `host:port` form |
+| `net.ice_local_ip` | server only: the one local IPv4 address ICE gathers on - host candidates and the bases of the reflexive and relay ones. On a host with tunnels or bridges a server otherwise gathers on every address and makes a TURN allocation per address, server and transport; far from the carrier the checks of all those pairs outlast the room's patience and the join times out. Empty, the default, gathers on every address as before. A value that is not one IPv4 address, or is unspecified or loopback, fails the load; an address no interface of the host has fails the start |
 | `dtls.profile` | fixed DTLS ClientHello profile of the engine handshake: empty or `off` keeps the stock handshake; the one shipped id is `chrome-linux-138-compat-v1` (Chrome 138's cipher list minus what Pion cannot speak); an unknown name is rejected before dialing; a failover profile may override it, and an explicit `off` overrides an inherited profile |
 | `socks.host` / `socks.port` | local SOCKS5 listener in `mode: cnc` |
 | `socks.user` / `socks.pass` | optional auth for incoming SOCKS5 connections |
