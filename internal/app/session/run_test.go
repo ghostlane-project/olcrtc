@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"log"
-	"net/netip"
 	"reflect"
 	"strings"
 	"testing"
@@ -81,8 +80,29 @@ func TestServerKeysFailWhenTheFileCannotBeRead(t *testing.T) {
 // A server whose net.ice_local_ip is no address of the host would gather
 // nothing; it refuses to start and says why. ai-generated (net.ice_local_ip).
 func TestRunRefusesAnICELocalIPTheHostDoesNotHave(t *testing.T) {
-	err := Run(context.Background(), Config{Mode: "srv", ICELocalIP: netip.MustParseAddr("192.0.2.254")})
+	err := Run(context.Background(), Config{Mode: "srv", ICELocalIP: "192.0.2.254"})
 	if !errors.Is(err, engine.ErrICELocalIPNotLocal) {
 		t.Fatalf("Run: err = %v, want ErrICELocalIPNotLocal", err)
+	}
+}
+
+// Validate refuses a net.ice_local_ip no interface gathers on, so a profile
+// holding one is skipped on its own. ai-generated (net.ice_local_ip).
+func TestValidateRefusesABadICELocalIP(t *testing.T) {
+	RegisterDefaults()
+	good := ApplyDefaults(Config{
+		Mode: ModeSrv, Provider: "jitsi", Transport: "datachannel", RoomID: "https://meet.example/room",
+		KeyHex: "0000000000000000000000000000000000000000000000000000000000000001", DNSServer: "8.8.8.8:53",
+	})
+	good.ICELocalIP = "192.0.2.10"
+	if err := Validate(good); err != nil {
+		t.Fatalf("Validate with a good ice_local_ip: %v", err)
+	}
+	for _, bad := range []string{"224.0.0.1", "::ffff:0.0.0.0", "not-an-ip"} {
+		cfg := good
+		cfg.ICELocalIP = bad
+		if err := Validate(cfg); !errors.Is(err, engine.ErrICELocalIP) {
+			t.Errorf("Validate(ice_local_ip %q) = %v, want ErrICELocalIP", bad, err)
+		}
 	}
 }

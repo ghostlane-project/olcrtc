@@ -2,7 +2,6 @@ package config
 
 import (
 	"errors"
-	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -756,7 +755,7 @@ func TestLoadICELocalIP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got := Apply(f).ICELocalIP; got != netip.MustParseAddr("192.0.2.10") {
+	if got := Apply(f).ICELocalIP; got != "192.0.2.10" {
 		t.Fatalf("ICELocalIP = %v, want the key's address", got)
 	}
 
@@ -764,7 +763,7 @@ func TestLoadICELocalIP(t *testing.T) {
 	if f, err = Load(path); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got := Apply(f).ICELocalIP; got.IsValid() {
+	if got := Apply(f).ICELocalIP; got != "" {
 		t.Fatalf("ICELocalIP without the key = %v, want none: the server gathers as before", got)
 	}
 }
@@ -780,9 +779,11 @@ func TestLoadRefusesABadICELocalIP(t *testing.T) {
 		if _, err := Load(path); !errors.Is(err, ErrICELocalIP) {
 			t.Fatalf("ice_local_ip %q: err = %v, want ErrICELocalIP", bad, err)
 		}
+		// A profile's value is judged with the profile (session.Validate),
+		// so one bad profile does not fail a whole reload.
 		writeConfigFile(t, path, "mode: srv\nprofiles:\n  - name: one\n    net:\n      ice_local_ip: \""+bad+"\"\n")
-		if _, err := Load(path); !errors.Is(err, ErrICELocalIP) {
-			t.Fatalf("a profile's ice_local_ip %q: err = %v, want ErrICELocalIP", bad, err)
+		if _, err := Load(path); err != nil {
+			t.Fatalf("a profile's ice_local_ip %q failed the load: %v", bad, err)
 		}
 	}
 }
@@ -790,11 +791,11 @@ func TestLoadRefusesABadICELocalIP(t *testing.T) {
 func TestApplySettingsICELocalIPInherits(t *testing.T) {
 	base := ApplySettings(session.Config{}, Settings{Net: Net{ICELocalIP: "192.0.2.10"}})
 	inherited := ApplyProfile(base, Profile{Settings: Settings{Room: Room{ID: "r2"}}})
-	if inherited.ICELocalIP != netip.MustParseAddr("192.0.2.10") {
+	if inherited.ICELocalIP != "192.0.2.10" {
 		t.Fatalf("a profile without the key lost it: %v", inherited.ICELocalIP)
 	}
 	other := ApplyProfile(base, Profile{Settings: Settings{Net: Net{ICELocalIP: "192.0.2.11"}}})
-	if other.ICELocalIP != netip.MustParseAddr("192.0.2.11") {
+	if other.ICELocalIP != "192.0.2.11" {
 		t.Fatalf("a profile's own key did not override: %v", other.ICELocalIP)
 	}
 }

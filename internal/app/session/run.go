@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"sync/atomic"
 	"time"
 
@@ -24,9 +25,13 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("dtls: %w", err)
 	}
 	// ai-generated: an address the host does not have would gather nothing.
+	localIP, err := engine.ParseICELocalIP(cfg.ICELocalIP)
+	if err != nil {
+		return err //nolint:wrapcheck // the error names the key and the value
+	}
 	protected := engine.UsesProtectedNet(tunnelcore.Resolver(cfg.Resolver, cfg.DNSServer))
-	if err := engine.CheckLocalIP(cfg.ICELocalIP, protected); err != nil {
-		return err //nolint:wrapcheck // the error names the key and the address
+	if hostErr := engine.CheckLocalIP(localIP, protected); hostErr != nil {
+		return hostErr //nolint:wrapcheck // the error names the key and the address
 	}
 	RegisterDefaults()
 	prepared, err := prepareRunConfig(cfg)
@@ -100,7 +105,7 @@ func runServer(
 		AccessLog:   cfg.AccessLog, // ai-generated (access_log)
 		UDPDisabled: cfg.UDPDisabled, UDPMaxFlows: cfg.UDPMaxFlows,
 		DNSServer: cfg.DNSServer, DTLSProfile: engine.DTLSProfile(cfg.DTLSProfile), Resolver: cfg.Resolver,
-		ICELocalIP:     cfg.ICELocalIP, // ai-generated (net.ice_local_ip)
+		ICELocalIP:     iceLocalIP(cfg), // ai-generated (net.ice_local_ip)
 		SOCKSProxyAddr: cfg.SOCKSProxyAddr, SOCKSProxyPort: cfg.SOCKSProxyPort,
 		SOCKSProxyUser: cfg.SOCKSProxyUser, SOCKSProxyPass: cfg.SOCKSProxyPass,
 		TransportOptions: opts, Engine: cfg.Engine, URL: cfg.URL, Token: cfg.Token,
@@ -229,4 +234,11 @@ func waitSessionRestart(ctx context.Context, delay time.Duration) error {
 	case <-time.After(delay):
 		return nil
 	}
+}
+
+// iceLocalIP is the session's net.ice_local_ip as an address; Run has
+// refused a bad value before any mode starts. ai-generated (net.ice_local_ip).
+func iceLocalIP(cfg Config) netip.Addr {
+	addr, _ := engine.ParseICELocalIP(cfg.ICELocalIP) // refused in Run
+	return addr
 }

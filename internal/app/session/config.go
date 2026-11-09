@@ -3,7 +3,6 @@ package session
 
 import (
 	"errors"
-	"net/netip"
 
 	enginebuiltin "github.com/openlibrecommunity/olcrtc/internal/engine/builtin"
 	"github.com/openlibrecommunity/olcrtc/internal/protect"
@@ -146,9 +145,10 @@ type Config struct {
 	SOCKSPass     string
 	DNSServer     string
 	DTLSProfile   string
-	// ICELocalIP is net.ice_local_ip: the one local address a server's ICE
-	// gathers on; the zero value gathers on every address. ai-generated.
-	ICELocalIP            netip.Addr
+	// ICELocalIP is net.ice_local_ip as written: the one local address a
+	// server's ICE gathers on; empty gathers on every address. Validate
+	// judges it with the profile. ai-generated.
+	ICELocalIP            string
 	Resolver              protect.Lookup
 	SOCKSProxyAddr        string
 	SOCKSProxyPort        int

@@ -294,20 +294,14 @@ func Load(path string) (File, error) {
 	return file, nil
 }
 
-// checkNet refuses a net section the engine could not use, in the file and in
-// every profile, before anything starts.
+// checkNet refuses a top-level net section the engine could not use before
+// anything starts. A profile's own value is judged with the profile
+// (session.Validate), so one bad profile does not fail a whole reload.
 //
 // ai-generated: the whole function (net.ice_local_ip).
 func checkNet(file File) error {
-	if _, err := parseICELocalIP(file.Net.ICELocalIP); err != nil {
-		return err
-	}
-	for i, p := range file.Profiles {
-		if _, err := parseICELocalIP(p.Net.ICELocalIP); err != nil {
-			return fmt.Errorf("profiles[%d]: %w", i, err)
-		}
-	}
-	return nil
+	_, err := parseICELocalIP(file.Net.ICELocalIP)
+	return err
 }
 
 // parseICELocalIP is engine.ParseICELocalIP; ai-generated (net.ice_local_ip).
@@ -522,10 +516,7 @@ func ApplySettings(dst session.Config, s Settings) session.Config {
 	dst.Transport = overlay(dst.Transport, s.Net.Transport)
 	dst.DNSServer = overlay(dst.DNSServer, s.Net.DNS)
 	dst.DTLSProfile = overlay(dst.DTLSProfile, s.DTLS.Profile)
-	// ai-generated (net.ice_local_ip): Load has refused a bad value already.
-	if addr, err := parseICELocalIP(s.Net.ICELocalIP); err == nil && addr.IsValid() {
-		dst.ICELocalIP = addr
-	}
+	dst.ICELocalIP = overlay(dst.ICELocalIP, s.Net.ICELocalIP) // ai-generated (net.ice_local_ip)
 
 	dst.Provider = overlay(dst.Provider, s.Auth.Provider)
 	dst.ProviderToken = overlay(dst.ProviderToken, s.Auth.Token)

@@ -10,6 +10,7 @@ import (
 	"golang.org/x/crypto/chacha20poly1305"
 
 	"github.com/openlibrecommunity/olcrtc/internal/control"
+	"github.com/openlibrecommunity/olcrtc/internal/engine"
 	enginebuiltin "github.com/openlibrecommunity/olcrtc/internal/engine/builtin"
 	"github.com/openlibrecommunity/olcrtc/internal/runtime"
 	"github.com/openlibrecommunity/olcrtc/internal/transport"
@@ -99,6 +100,11 @@ func validateCommon(cfg Config) error {
 	}
 	if cfg.DNSServer == "" && cfg.Resolver == nil {
 		return ErrDNSServerRequired
+	}
+	// ai-generated (net.ice_local_ip): judged here, with the profile, so one
+	// bad profile is skipped on reload instead of failing the whole file.
+	if _, err := engine.ParseICELocalIP(cfg.ICELocalIP); err != nil {
+		return err //nolint:wrapcheck // the error names the key and the value
 	}
 	return nil
 }
