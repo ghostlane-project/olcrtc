@@ -58,16 +58,46 @@ func TestPionSessionOptionsFillsTheSessionFields(t *testing.T) {
 	}
 }
 
-func TestCheckLocalIP(t *testing.T) {
-	if err := CheckLocalIP(netip.Addr{}); err != nil {
+func TestCheckLocalIPUnsetPasses(t *testing.T) {
+	if err := CheckLocalIP(netip.Addr{}, true); err != nil {
 		t.Fatalf("no key: %v", err)
 	}
-	if err := CheckLocalIP(netip.MustParseAddr("127.0.0.1")); err != nil {
-		t.Fatalf("loopback is an address of this host: %v", err)
+}
+
+func fakeInterfaces(ifcs ...localInterface) func() ([]localInterface, error) {
+	return func() ([]localInterface, error) { return ifcs, nil }
+}
+
+// CheckLocalIP judges an address the way pion gathers: on an interface that
+// is up, is not loopback and, behind the protected net, is not a tunnel.
+func TestCheckLocalIPJudgesTheInterfaceICEGathersFrom(t *testing.T) {
+	addr := netip.MustParseAddr("192.0.2.10")
+	other := netip.MustParseAddr("192.0.2.11")
+	on := []netip.Addr{addr}
+	cases := []struct {
+		name      string
+		ifcs      []localInterface
+		protected bool
+		want      error
+	}{
+		{"up", []localInterface{{name: "eth0", flags: net.FlagUp, addrs: on}}, true, nil},
+		{"absent", []localInterface{{name: "eth0", flags: net.FlagUp, addrs: []netip.Addr{other}}}, true, ErrICELocalIPNotLocal},
+		{"down", []localInterface{{name: "eth1", addrs: on}}, true, ErrICELocalIPDown},
+		{"loopback", []localInterface{{name: "lo", flags: net.FlagUp | net.FlagLoopback, addrs: on}}, true, ErrICELocalIPLoopback},
+		{"hidden", []localInterface{{name: "tun0", flags: net.FlagUp, addrs: on}}, true, ErrICELocalIPHidden},
+		{"tunnel without the protected net", []localInterface{{name: "tun0", flags: net.FlagUp, addrs: on}}, false, nil},
+		{"down and up", []localInterface{
+			{name: "eth1", addrs: on}, {name: "eth0", flags: net.FlagUp, addrs: on},
+		}, true, nil},
 	}
-	err := CheckLocalIP(netip.MustParseAddr("192.0.2.254"))
-	if !errors.Is(err, ErrICELocalIPNotLocal) || !strings.Contains(err.Error(), "192.0.2.254") {
-		t.Fatalf("an address the host does not have: err = %v", err)
+	for _, c := range cases {
+		err := checkLocalIP(addr, c.protected, fakeInterfaces(c.ifcs...))
+		if c.want == nil && err != nil {
+			t.Fatalf("%s: err = %v, want none", c.name, err)
+		}
+		if c.want != nil && (!errors.Is(err, c.want) || !strings.Contains(err.Error(), addr.String())) {
+			t.Fatalf("%s: err = %v, want %v naming the address", c.name, err, c.want)
+		}
 	}
 }
 

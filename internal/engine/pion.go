@@ -33,14 +33,22 @@ type PionSettingsOptions struct {
 // PionSettings applies shared network settings to a pion SettingEngine.
 type PionSettings func(*webrtc.SettingEngine)
 
+// UsesProtectedNet reports whether pion settings built with resolver gather
+// through the protected net, which hides tunnel interfaces from ICE.
+//
+// ai-generated: split out of NewPionSettings so CheckLocalIP judges with the
+// same view (net.ice_local_ip).
+func UsesProtectedNet(resolver protect.Lookup) bool {
+	return protect.HasProtector() || resolver != nil || runtime.GOOS == "android"
+}
+
 // NewPionSettings prepares protected networking and per-engine pion settings.
 func NewPionSettings(opts PionSettingsOptions) (PionSettings, error) {
 	if err := ValidateDTLSProfile(opts.DTLSProfile); err != nil {
 		return nil, err
 	}
-	useProtectedNet := protect.HasProtector() || opts.Resolver != nil || runtime.GOOS == "android"
 	var protectedNet *protect.ProtectedNet
-	if useProtectedNet {
+	if UsesProtectedNet(opts.Resolver) {
 		var err error
 		protectedNet, err = protect.NewProtectedNet(opts.Resolver)
 		if err != nil {

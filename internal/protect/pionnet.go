@@ -120,6 +120,12 @@ func (n *ProtectedNet) InterfaceByName(name string) (*transport.Interface, error
 	return nil, fmt.Errorf("%w: %s", transport.ErrInterfaceNotFound, name)
 }
 
+// IsTunnelInterface reports whether the protected net hides the interface
+// called name from ICE.
+//
+// ai-generated: the exported name (net.ice_local_ip checks against it).
+func IsTunnelInterface(name string) bool { return isTunInterface(name) }
+
 func isTunInterface(name string) bool {
 	for _, p := range tunInterfacePrefixes {
 		if strings.HasPrefix(name, p) {

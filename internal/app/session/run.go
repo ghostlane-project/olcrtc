@@ -24,7 +24,8 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("dtls: %w", err)
 	}
 	// ai-generated: an address the host does not have would gather nothing.
-	if err := engine.CheckLocalIP(cfg.ICELocalIP); err != nil {
+	protected := engine.UsesProtectedNet(tunnelcore.Resolver(cfg.Resolver, cfg.DNSServer))
+	if err := engine.CheckLocalIP(cfg.ICELocalIP, protected); err != nil {
 		return err //nolint:wrapcheck // the error names the key and the address
 	}
 	RegisterDefaults()
