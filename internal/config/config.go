@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,6 +34,9 @@ var (
 	// ErrCryptoKeysConflict is returned when a key ring is combined with a single key or with itself.
 	ErrCryptoKeysConflict = errors.New(
 		"crypto.keys or crypto.keys_file cannot be combined with crypto.key, crypto.key_file or each other")
+	// ErrICELocalIP is returned when net.ice_local_ip is not a usable IPv4
+	// address of an interface. ai-generated (net.ice_local_ip).
+	ErrICELocalIP = errors.New("net.ice_local_ip must be one IPv4 address, neither unspecified nor loopback")
 )
 
 // Settings is the overridable part of the schema. The top-level file and every
@@ -146,6 +150,12 @@ type Crypto struct {
 type Net struct {
 	Transport string `yaml:"transport"` // datachannel, videochannel, seichannel, vp8channel
 	DNS       string `yaml:"dns"`
+	// ICELocalIP is the one local address a server's ICE gathers on: host
+	// candidates and the bases of the reflexive and relay ones. Empty, the
+	// default, gathers on every address.
+	//
+	// ai-generated: the field (net.ice_local_ip).
+	ICELocalIP string `yaml:"ice_local_ip"`
 }
 
 // SOCKS bundles SOCKS5 listener and outbound-proxy settings.
@@ -276,7 +286,42 @@ func Load(path string) (File, error) {
 		return File{}, err
 	}
 
+	if err := checkNet(file); err != nil {
+		return File{}, fmt.Errorf("parse config %s: %w", path, err)
+	}
+
 	return file, nil
+}
+
+// checkNet refuses a net section the engine could not use, in the file and in
+// every profile, before anything starts.
+//
+// ai-generated: the whole function (net.ice_local_ip).
+func checkNet(file File) error {
+	if _, err := parseICELocalIP(file.Net.ICELocalIP); err != nil {
+		return err
+	}
+	for i, p := range file.Profiles {
+		if _, err := parseICELocalIP(p.Net.ICELocalIP); err != nil {
+			return fmt.Errorf("profiles[%d]: %w", i, err)
+		}
+	}
+	return nil
+}
+
+// parseICELocalIP reads net.ice_local_ip: empty is no address, anything else
+// has to be one IPv4 address an interface can have.
+//
+// ai-generated: the whole function (net.ice_local_ip).
+func parseICELocalIP(value string) (netip.Addr, error) {
+	if value == "" {
+		return netip.Addr{}, nil
+	}
+	addr, err := netip.ParseAddr(value)
+	if err != nil || !addr.Unmap().Is4() || addr.IsUnspecified() || addr.IsLoopback() {
+		return netip.Addr{}, fmt.Errorf("%w: %q", ErrICELocalIP, value)
+	}
+	return addr.Unmap(), nil
 }
 
 func loadExternalSecrets(configPath string, file *File) error {
@@ -486,6 +531,10 @@ func ApplySettings(dst session.Config, s Settings) session.Config {
 	dst.Transport = overlay(dst.Transport, s.Net.Transport)
 	dst.DNSServer = overlay(dst.DNSServer, s.Net.DNS)
 	dst.DTLSProfile = overlay(dst.DTLSProfile, s.DTLS.Profile)
+	// ai-generated (net.ice_local_ip): Load has refused a bad value already.
+	if addr, err := parseICELocalIP(s.Net.ICELocalIP); err == nil && addr.IsValid() {
+		dst.ICELocalIP = addr
+	}
 
 	dst.Provider = overlay(dst.Provider, s.Auth.Provider)
 	dst.ProviderToken = overlay(dst.ProviderToken, s.Auth.Token)

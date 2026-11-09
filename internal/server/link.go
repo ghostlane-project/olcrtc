@@ -19,7 +19,8 @@ func (s *Server) bringUpLink(ctx context.Context, cfg Config, cancel context.Can
 		Provider: cfg.Provider, RoomURL: cfg.RoomURL, Engine: cfg.Engine,
 		URL: cfg.URL, Token: cfg.Token, ProviderToken: cfg.ProviderToken,
 		ChannelID: cfg.ChannelID, DNSServer: s.dnsServer, DTLSProfile: cfg.DTLSProfile,
-		Options: cfg.TransportOptions, Traffic: cfg.Traffic,
+		ICELocalIP: cfg.ICELocalIP, // ai-generated (net.ice_local_ip)
+		Options:    cfg.TransportOptions, Traffic: cfg.Traffic,
 	}, s.linkRole())
 	ln, err := transport.New(ctx, cfg.Transport, linkCfg)
 	if err != nil {

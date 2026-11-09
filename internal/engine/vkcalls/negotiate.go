@@ -467,14 +467,13 @@ func newWebRTCAPI(offer string, cfg engine.Config, resolver protect.Lookup) (*we
 	if roleErr := settings.SetAnsweringDTLSRole(webrtc.DTLSRoleClient); roleErr != nil {
 		return nil, fmt.Errorf("vkcalls: dtls role: %w", roleErr)
 	}
-	apply, err := engine.NewPionSettings(engine.PionSettingsOptions{
+	apply, err := engine.NewPionSettings(cfg.Pion().Options(engine.PionSettingsOptions{
 		Resolver:         resolver,
-		DTLSProfile:      cfg.DTLSProfile,
 		LoggerFactory:    logger.NewPionLoggerFactory(),
 		IPv4Only:         true,
 		ProxyDialer:      true,
 		DisableMulticast: true,
-	})
+	}))
 	if err != nil {
 		return nil, err //nolint:wrapcheck // shared builder already adds protected-net context
 	}

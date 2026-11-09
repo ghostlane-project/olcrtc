@@ -14,6 +14,8 @@ import (
 	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
+
+	"github.com/openlibrecommunity/olcrtc/internal/engine"
 )
 
 // TestConferenceReceiverSendsTransportCCFeedback plays JVB: it offers video
@@ -25,7 +27,7 @@ import (
 // goes dark in one direction while the other side keeps sending (issue #12).
 func TestConferenceReceiverSendsTransportCCFeedback(t *testing.T) {
 	bridge := newTaggingBridge(t)
-	endpointAPI, err := newConferenceAPI(nil, "")
+	endpointAPI, err := newConferenceAPI(nil, engine.PionSession{})
 	if err != nil {
 		t.Fatalf("newConferenceAPI: %v", err)
 	}
@@ -71,7 +73,7 @@ func TestConferenceReceiverSendsTransportCCFeedback(t *testing.T) {
 func TestConferenceReportsTheTracksNobodyReadsAsReceived(t *testing.T) {
 	session := newSilentSession(t)
 	bridge := newTaggingBridge(t)
-	endpointAPI, err := newConferenceAPI(nil, "")
+	endpointAPI, err := newConferenceAPI(nil, engine.PionSession{})
 	if err != nil {
 		t.Fatalf("newConferenceAPI: %v", err)
 	}

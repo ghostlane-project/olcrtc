@@ -2,12 +2,15 @@ package session
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"log"
+	"net/netip"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/openlibrecommunity/olcrtc/internal/engine"
 	"github.com/openlibrecommunity/olcrtc/internal/server"
 )
 
@@ -72,5 +75,14 @@ func TestServerKeysFailWhenTheFileCannotBeRead(t *testing.T) {
 	}
 	if _, err := serverKeys(cfg); !errors.Is(err, errGone) {
 		t.Fatalf("serverKeys() error = %v, want the read's error", err)
+	}
+}
+
+// A server whose net.ice_local_ip is no address of the host would gather
+// nothing; it refuses to start and says why. ai-generated (net.ice_local_ip).
+func TestRunRefusesAnICELocalIPTheHostDoesNotHave(t *testing.T) {
+	err := Run(context.Background(), Config{Mode: "srv", ICELocalIP: netip.MustParseAddr("192.0.2.254")})
+	if !errors.Is(err, engine.ErrICELocalIPNotLocal) {
+		t.Fatalf("Run: err = %v, want ErrICELocalIPNotLocal", err)
 	}
 }

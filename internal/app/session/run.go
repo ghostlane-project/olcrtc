@@ -23,6 +23,10 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := engine.ValidateDTLSProfile(engine.DTLSProfile(cfg.DTLSProfile)); err != nil {
 		return fmt.Errorf("dtls: %w", err)
 	}
+	// ai-generated: an address the host does not have would gather nothing.
+	if err := engine.CheckLocalIP(cfg.ICELocalIP); err != nil {
+		return err //nolint:wrapcheck // the error names the key and the address
+	}
 	RegisterDefaults()
 	prepared, err := prepareRunConfig(cfg)
 	if err != nil {
@@ -95,6 +99,7 @@ func runServer(
 		AccessLog:   cfg.AccessLog, // ai-generated (access_log)
 		UDPDisabled: cfg.UDPDisabled, UDPMaxFlows: cfg.UDPMaxFlows,
 		DNSServer: cfg.DNSServer, DTLSProfile: engine.DTLSProfile(cfg.DTLSProfile), Resolver: cfg.Resolver,
+		ICELocalIP:     cfg.ICELocalIP, // ai-generated (net.ice_local_ip)
 		SOCKSProxyAddr: cfg.SOCKSProxyAddr, SOCKSProxyPort: cfg.SOCKSProxyPort,
 		SOCKSProxyUser: cfg.SOCKSProxyUser, SOCKSProxyPass: cfg.SOCKSProxyPass,
 		TransportOptions: opts, Engine: cfg.Engine, URL: cfg.URL, Token: cfg.Token,

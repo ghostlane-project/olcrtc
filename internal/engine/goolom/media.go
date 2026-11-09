@@ -15,7 +15,7 @@ import (
 )
 
 func (s *Session) setupPeerConnections(config webrtc.Configuration) error {
-	api, err := newWebRTCAPI(s.resolver, s.dtlsProfile)
+	api, err := newWebRTCAPI(s.resolver, s.pion)
 	if err != nil {
 		return err
 	}
@@ -39,16 +39,15 @@ func (s *Session) setupPeerConnections(config webrtc.Configuration) error {
 }
 
 // newWebRTCAPI builds a pion API with IPv4-only ICE and default interceptors.
-func newWebRTCAPI(resolver protect.Lookup, dtlsProfile engine.DTLSProfile) (*webrtc.API, error) {
+func newWebRTCAPI(resolver protect.Lookup, pion engine.PionSession) (*webrtc.API, error) {
 	settingEngine := webrtc.SettingEngine{}
-	apply, err := engine.NewPionSettings(engine.PionSettingsOptions{
+	apply, err := engine.NewPionSettings(pion.Options(engine.PionSettingsOptions{
 		Resolver:         resolver,
-		DTLSProfile:      dtlsProfile,
 		LoggerFactory:    logger.NewPionLoggerFactory(),
 		IPv4Only:         true,
 		ProxyDialer:      true,
 		DisableMulticast: true,
-	})
+	}))
 	if err != nil {
 		return nil, err //nolint:wrapcheck // shared builder already adds protected-net context
 	}

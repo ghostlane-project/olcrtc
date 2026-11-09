@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/pion/webrtc/v4"
+
+	"github.com/openlibrecommunity/olcrtc/internal/engine"
 )
 
 // TestEveryTrickledCandidateCarriesItsUfrag pins what the capture shows: all
@@ -58,7 +60,7 @@ func TestTheUfragIsReadOffTheLocalDescription(t *testing.T) {
 	if got := localICEUfrag(nil); got != "" {
 		t.Fatalf("localICEUfrag(nil) = %q, want empty", got)
 	}
-	api, err := newWebRTCAPI(nil, "")
+	api, err := newWebRTCAPI(nil, engine.PionSession{})
 	if err != nil {
 		t.Fatal(err)
 	}

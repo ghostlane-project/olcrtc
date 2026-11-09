@@ -1,6 +1,8 @@
 package tunnelcore
 
 import (
+	"net/netip"
+
 	"github.com/openlibrecommunity/olcrtc/internal/engine"
 	"github.com/openlibrecommunity/olcrtc/internal/names"
 	"github.com/openlibrecommunity/olcrtc/internal/protect"
@@ -18,6 +20,7 @@ type LinkConfig struct {
 	ChannelID     string
 	DNSServer     string
 	DTLSProfile   engine.DTLSProfile
+	ICELocalIP    netip.Addr // ai-generated: the field (net.ice_local_ip)
 	Options       transport.Options
 	Traffic       transport.TrafficConfig
 }
@@ -56,6 +59,7 @@ func BuildTransportConfig(base LinkConfig, role LinkRoleConfig) transport.Config
 		OnPeerDatagram:      role.OnPeerDatagram,
 		DNSServer:           base.DNSServer,
 		DTLSProfile:         base.DTLSProfile,
+		ICELocalIP:          base.ICELocalIP,
 		Resolver:            Resolver(role.Resolver, base.DNSServer),
 		ProxyAddr:           role.ProxyAddr,
 		ProxyPort:           role.ProxyPort,

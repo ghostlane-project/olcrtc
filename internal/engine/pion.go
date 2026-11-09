@@ -2,7 +2,7 @@ package engine
 
 import (
 	"fmt"
-	"net"
+	"net/netip"
 	"runtime"
 
 	"github.com/pion/ice/v4"
@@ -22,6 +22,12 @@ type PionSettingsOptions struct {
 	// DTLSProfile selects a fixed ClientHello profile for this session; empty or
 	// "off" keeps the stock Pion handshake. Validated before any dialing.
 	DTLSProfile DTLSProfile
+	// LocalIP, when valid, is the one local address ICE gathers on: host
+	// candidates and the bases of the reflexive and relay ones (net.ice_local_ip).
+	// The zero value gathers on every address, as before.
+	//
+	// ai-generated: the field (net.ice_local_ip).
+	LocalIP netip.Addr
 }
 
 // PionSettings applies shared network settings to a pion SettingEngine.
@@ -41,7 +47,7 @@ func NewPionSettings(opts PionSettingsOptions) (PionSettings, error) {
 			return nil, fmt.Errorf("protected net: %w", err)
 		}
 	}
-	if opts.LoggerFactory == nil && !opts.IPv4Only && protectedNet == nil {
+	if opts.LoggerFactory == nil && !opts.IPv4Only && !opts.LocalIP.IsValid() && protectedNet == nil {
 		// A chosen DTLS profile still has to reach SDK-owned settings, so only
 		// the stock profile keeps the nil hook.
 		if opts.DTLSProfile == "" || opts.DTLSProfile == DTLSProfileOff {
@@ -63,7 +69,9 @@ func networkSettings(opts PionSettingsOptions, protectedNet *protect.ProtectedNe
 		}
 		if opts.IPv4Only {
 			settings.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
-			settings.SetIPFilter(func(ip net.IP) bool { return ip.To4() != nil })
+		}
+		if filter := iceIPFilter(opts); filter != nil {
+			settings.SetIPFilter(filter)
 		}
 		applyDTLS(settings, opts.DTLSProfile)
 		if protectedNet == nil {

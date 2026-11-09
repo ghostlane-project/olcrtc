@@ -114,15 +114,14 @@ func (s *Session) shouldRequestVideo() bool {
 }
 
 // newSettingEngine builds the pion settings shared with the other engines.
-func newSettingEngine(resolver protect.Lookup, dtlsProfile engine.DTLSProfile) (webrtc.SettingEngine, error) {
+func newSettingEngine(resolver protect.Lookup, pion engine.PionSession) (webrtc.SettingEngine, error) {
 	settings := webrtc.SettingEngine{}
-	apply, err := engine.NewPionSettings(engine.PionSettingsOptions{
+	apply, err := engine.NewPionSettings(pion.Options(engine.PionSettingsOptions{
 		Resolver:         resolver,
-		DTLSProfile:      dtlsProfile,
 		LoggerFactory:    logger.NewPionLoggerFactory(),
 		IPv4Only:         true,
 		DisableMulticast: true,
-	})
+	}))
 	if err != nil {
 		return settings, err //nolint:wrapcheck // shared builder adds protected-net context
 	}
@@ -135,8 +134,8 @@ func newSettingEngine(resolver protect.Lookup, dtlsProfile engine.DTLSProfile) (
 // newConferenceAPI builds the conference PeerConnection API.
 //
 // ai-generated: the media engine and the interceptor registry.
-func newConferenceAPI(resolver protect.Lookup, dtlsProfile engine.DTLSProfile) (*webrtc.API, error) {
-	settings, err := newSettingEngine(resolver, dtlsProfile)
+func newConferenceAPI(resolver protect.Lookup, pion engine.PionSession) (*webrtc.API, error) {
+	settings, err := newSettingEngine(resolver, pion)
 	if err != nil {
 		return nil, err
 	}
@@ -218,7 +217,7 @@ func (s *Session) negotiatePC(ctx context.Context, jSess *j.Session, sctpBridge 
 }
 
 func (s *Session) newConferencePeerConnection(jSess *j.Session) (*webrtc.PeerConnection, error) {
-	api, err := newConferenceAPI(s.resolver, s.dtlsProfile)
+	api, err := newConferenceAPI(s.resolver, s.pion)
 	if err != nil {
 		return nil, err
 	}

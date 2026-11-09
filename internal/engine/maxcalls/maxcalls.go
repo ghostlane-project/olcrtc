@@ -198,10 +198,10 @@ func newAPI(cfg engine.Config) (*webrtc.API, error) {
 		return nil, fmt.Errorf("max: audio codec: %w", err)
 	}
 	settings := webrtc.SettingEngine{}
-	apply, err := engine.NewPionSettings(engine.PionSettingsOptions{
-		Resolver: cfg.Resolver, DTLSProfile: cfg.DTLSProfile, LoggerFactory: logger.NewPionLoggerFactory(),
+	apply, err := engine.NewPionSettings(cfg.Pion().Options(engine.PionSettingsOptions{
+		Resolver: cfg.Resolver, LoggerFactory: logger.NewPionLoggerFactory(),
 		IPv4Only: true, DisableMulticast: true,
-	})
+	}))
 	if err != nil {
 		return nil, err //nolint:wrapcheck // the shared builder already adds context
 	}

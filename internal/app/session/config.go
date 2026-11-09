@@ -3,6 +3,7 @@ package session
 
 import (
 	"errors"
+	"net/netip"
 
 	enginebuiltin "github.com/openlibrecommunity/olcrtc/internal/engine/builtin"
 	"github.com/openlibrecommunity/olcrtc/internal/protect"
@@ -128,23 +129,26 @@ type SEIConfig struct {
 
 // Config holds runtime session settings.
 type Config struct {
-	Mode                  string
-	Transport             string
-	Provider              string
-	ProviderToken         string
-	Engine                string
-	URL                   string
-	Token                 string
-	RoomID                string
-	ChannelID             string
-	KeyHex                string
-	KeysHex               []string
-	SOCKSHost             string
-	SOCKSPort             int
-	SOCKSUser             string
-	SOCKSPass             string
-	DNSServer             string
-	DTLSProfile           string
+	Mode          string
+	Transport     string
+	Provider      string
+	ProviderToken string
+	Engine        string
+	URL           string
+	Token         string
+	RoomID        string
+	ChannelID     string
+	KeyHex        string
+	KeysHex       []string
+	SOCKSHost     string
+	SOCKSPort     int
+	SOCKSUser     string
+	SOCKSPass     string
+	DNSServer     string
+	DTLSProfile   string
+	// ICELocalIP is net.ice_local_ip: the one local address a server's ICE
+	// gathers on; the zero value gathers on every address. ai-generated.
+	ICELocalIP            netip.Addr
 	Resolver              protect.Lookup
 	SOCKSProxyAddr        string
 	SOCKSProxyPort        int

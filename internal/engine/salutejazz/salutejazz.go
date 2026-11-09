@@ -367,10 +367,10 @@ func (g *generation) applyParticipants(list []participant) {
 type Session struct {
 	engine.Reconnector
 
-	name        string
-	resolver    protect.Lookup
-	dtlsProfile engine.DTLSProfile
-	refresh     func(ctx context.Context) (engine.Credentials, error)
+	name     string
+	resolver protect.Lookup
+	pion     engine.PionSession // ai-generated: replaces dtlsProfile (net.ice_local_ip)
+	refresh  func(ctx context.Context) (engine.Credentials, error)
 
 	onData         func([]byte)
 	onPeerData     func(peerID string, data []byte)
@@ -453,7 +453,7 @@ func New(_ context.Context, cfg engine.Config) (engine.Session, error) {
 	s := &Session{
 		name:           cfg.Name,
 		resolver:       cfg.Resolver,
-		dtlsProfile:    cfg.DTLSProfile,
+		pion:           cfg.Pion(),
 		refresh:        cfg.Refresh,
 		onData:         cfg.OnData,
 		onPeerData:     cfg.OnPeerData,
@@ -483,7 +483,7 @@ func New(_ context.Context, cfg engine.Config) (engine.Session, error) {
 // once the publisher lane is open, which is when the session can carry
 // bytes.
 func (s *Session) Connect(ctx context.Context) error {
-	api, err := newWebRTCAPI(s.resolver, s.dtlsProfile)
+	api, err := newWebRTCAPI(s.resolver, s.pion)
 	if err != nil {
 		return err
 	}

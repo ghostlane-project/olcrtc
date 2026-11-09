@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -741,5 +742,56 @@ func TestLoadRejectsAccessLogInAProfile(t *testing.T) {
 	writeConfigFile(t, path, "mode: srv\nprofiles:\n  - name: one\n    access_log: /run/olcrtc/"+testAccessLogName+"\n")
 	if _, err := Load(path); err == nil {
 		t.Fatal("Load() error = nil, want failure for access_log inside a profile")
+	}
+}
+
+// ai-generated: the tests below (net.ice_local_ip).
+
+func TestLoadICELocalIP(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "olcrtc.yaml")
+
+	writeConfigFile(t, path, "mode: srv\nnet:\n  transport: datachannel\n  ice_local_ip: 192.0.2.10\n")
+	f, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := Apply(f).ICELocalIP; got != netip.MustParseAddr("192.0.2.10") {
+		t.Fatalf("ICELocalIP = %v, want the key's address", got)
+	}
+
+	writeConfigFile(t, path, "mode: srv\nnet:\n  transport: datachannel\n")
+	if f, err = Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := Apply(f).ICELocalIP; got.IsValid() {
+		t.Fatalf("ICELocalIP without the key = %v, want none: the server gathers as before", got)
+	}
+}
+
+func TestLoadRefusesABadICELocalIP(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "olcrtc.yaml")
+	for _, bad := range []string{"not-an-ip", "192.0.2.300", "2001:db8::1", "0.0.0.0", "127.0.0.1", "192.0.2.10/24"} {
+		writeConfigFile(t, path, "mode: srv\nnet:\n  ice_local_ip: \""+bad+"\"\n")
+		if _, err := Load(path); !errors.Is(err, ErrICELocalIP) {
+			t.Fatalf("ice_local_ip %q: err = %v, want ErrICELocalIP", bad, err)
+		}
+		writeConfigFile(t, path, "mode: srv\nprofiles:\n  - name: one\n    net:\n      ice_local_ip: \""+bad+"\"\n")
+		if _, err := Load(path); !errors.Is(err, ErrICELocalIP) {
+			t.Fatalf("a profile's ice_local_ip %q: err = %v, want ErrICELocalIP", bad, err)
+		}
+	}
+}
+
+func TestApplySettingsICELocalIPInherits(t *testing.T) {
+	base := ApplySettings(session.Config{}, Settings{Net: Net{ICELocalIP: "192.0.2.10"}})
+	inherited := ApplyProfile(base, Profile{Settings: Settings{Room: Room{ID: "r2"}}})
+	if inherited.ICELocalIP != netip.MustParseAddr("192.0.2.10") {
+		t.Fatalf("a profile without the key lost it: %v", inherited.ICELocalIP)
+	}
+	other := ApplyProfile(base, Profile{Settings: Settings{Net: Net{ICELocalIP: "192.0.2.11"}}})
+	if other.ICELocalIP != netip.MustParseAddr("192.0.2.11") {
+		t.Fatalf("a profile's own key did not override: %v", other.ICELocalIP)
 	}
 }

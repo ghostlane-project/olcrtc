@@ -95,7 +95,7 @@ type TrafficShape struct {
 
 // Session is the Goolom engine handle.
 type Session struct {
-	dtlsProfile engine.DTLSProfile
+	pion engine.PionSession // ai-generated: replaces dtlsProfile (net.ice_local_ip)
 	engine.Reconnector
 	engine.VideoTrackState
 
@@ -314,7 +314,7 @@ func New(_ context.Context, cfg engine.Config) (engine.Session, error) {
 		telemetryReferer: telemetryReferer,
 		refresh:          cfg.Refresh,
 		resolver:         cfg.Resolver,
-		dtlsProfile:      cfg.DTLSProfile,
+		pion:             cfg.Pion(),
 		onData:           cfg.OnData,
 		closeCh:          make(chan struct{}),
 		keepAliveCh:      make(chan struct{}),
