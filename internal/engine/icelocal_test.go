@@ -185,3 +185,33 @@ func gatherHostAddrs(t *testing.T, opts PionSettingsOptions) []string {
 	}
 	return addrs
 }
+
+func TestParseICELocalIPRefusesWhatNoInterfaceGathersOn(t *testing.T) {
+	for _, bad := range []string{
+		"not-an-ip", "192.0.2.300", "192.0.2.10/24", " 192.0.2.10",
+		"2001:db8::1", "fe80::1",
+		"0.0.0.0", "::ffff:0.0.0.0", // unspecified, plain and mapped
+		"127.0.0.1", "::ffff:127.0.0.1", // loopback
+		"224.0.0.1", "239.1.2.3", "::ffff:224.0.0.1", // multicast
+		"255.255.255.255", "::ffff:255.255.255.255", // limited broadcast
+		"169.254.1.1", "::ffff:169.254.1.1", // link-local
+	} {
+		if _, err := ParseICELocalIP(bad); !errors.Is(err, ErrICELocalIP) {
+			t.Errorf("ParseICELocalIP(%q) = %v, want ErrICELocalIP", bad, err)
+		}
+	}
+}
+
+func TestParseICELocalIPAcceptsAHostAddress(t *testing.T) {
+	for in, want := range map[string]netip.Addr{
+		"":                  {},
+		"192.0.2.10":        netip.MustParseAddr("192.0.2.10"),
+		"::ffff:192.0.2.10": netip.MustParseAddr("192.0.2.10"),
+		"10.0.0.1":          netip.MustParseAddr("10.0.0.1"),
+	} {
+		got, err := ParseICELocalIP(in)
+		if err != nil || got != want {
+			t.Errorf("ParseICELocalIP(%q) = %v, %v; want %v", in, got, err, want)
+		}
+	}
+}

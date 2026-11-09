@@ -772,7 +772,10 @@ func TestLoadICELocalIP(t *testing.T) {
 func TestLoadRefusesABadICELocalIP(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "olcrtc.yaml")
-	for _, bad := range []string{"not-an-ip", "192.0.2.300", "2001:db8::1", "0.0.0.0", "127.0.0.1", "192.0.2.10/24"} {
+	for _, bad := range []string{
+		"not-an-ip", "192.0.2.300", "2001:db8::1", "0.0.0.0", "127.0.0.1", "192.0.2.10/24",
+		"::ffff:0.0.0.0", "::ffff:127.0.0.1", "224.0.0.1", "255.255.255.255", "169.254.1.1",
+	} {
 		writeConfigFile(t, path, "mode: srv\nnet:\n  ice_local_ip: \""+bad+"\"\n")
 		if _, err := Load(path); !errors.Is(err, ErrICELocalIP) {
 			t.Fatalf("ice_local_ip %q: err = %v, want ErrICELocalIP", bad, err)

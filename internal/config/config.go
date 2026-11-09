@@ -20,6 +20,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/openlibrecommunity/olcrtc/internal/app/session"
+	"github.com/openlibrecommunity/olcrtc/internal/engine"
 )
 
 var (
@@ -36,7 +37,7 @@ var (
 		"crypto.keys or crypto.keys_file cannot be combined with crypto.key, crypto.key_file or each other")
 	// ErrICELocalIP is returned when net.ice_local_ip is not a usable IPv4
 	// address of an interface. ai-generated (net.ice_local_ip).
-	ErrICELocalIP = errors.New("net.ice_local_ip must be one IPv4 address, neither unspecified nor loopback")
+	ErrICELocalIP = engine.ErrICELocalIP
 )
 
 // Settings is the overridable part of the schema. The top-level file and every
@@ -309,19 +310,9 @@ func checkNet(file File) error {
 	return nil
 }
 
-// parseICELocalIP reads net.ice_local_ip: empty is no address, anything else
-// has to be one IPv4 address an interface can have.
-//
-// ai-generated: the whole function (net.ice_local_ip).
+// parseICELocalIP is engine.ParseICELocalIP; ai-generated (net.ice_local_ip).
 func parseICELocalIP(value string) (netip.Addr, error) {
-	if value == "" {
-		return netip.Addr{}, nil
-	}
-	addr, err := netip.ParseAddr(value)
-	if err != nil || !addr.Unmap().Is4() || addr.IsUnspecified() || addr.IsLoopback() {
-		return netip.Addr{}, fmt.Errorf("%w: %q", ErrICELocalIP, value)
-	}
-	return addr.Unmap(), nil
+	return engine.ParseICELocalIP(value) //nolint:wrapcheck // the error names the key and the value
 }
 
 func loadExternalSecrets(configPath string, file *File) error {

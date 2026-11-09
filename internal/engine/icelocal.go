@@ -15,6 +15,10 @@ import (
 // The refusals at start of a net.ice_local_ip ICE would gather nothing on: a
 // server that cannot join must say so instead of failing every join in silence.
 var (
+	// ErrICELocalIP: the value is not one IPv4 address a host interface can
+	// carry and ICE gathers on (refused when the config is read).
+	ErrICELocalIP = errors.New("net.ice_local_ip must be one IPv4 unicast address of a host interface: " +
+		"not unspecified, loopback, multicast, broadcast or link-local")
 	// ErrICELocalIPNotLocal: no interface of the host has the address.
 	ErrICELocalIPNotLocal = errors.New("net.ice_local_ip is not an address of this host")
 	// ErrICELocalIPDown: the interface that has it is down.
@@ -46,6 +50,23 @@ func (p PionSession) Options(o PionSettingsOptions) PionSettingsOptions {
 	o.DTLSProfile = p.DTLSProfile
 	o.LocalIP = p.LocalIP
 	return o
+}
+
+// ParseICELocalIP reads net.ice_local_ip: empty is no address; anything else
+// has to be one IPv4 address, IPv4-mapped forms unmapped before they are
+// judged, that is not unspecified, loopback, multicast, the limited broadcast
+// or link-local.
+func ParseICELocalIP(value string) (netip.Addr, error) {
+	if value == "" {
+		return netip.Addr{}, nil
+	}
+	parsed, err := netip.ParseAddr(value)
+	addr := parsed.Unmap()
+	if err != nil || !addr.Is4() || addr.IsUnspecified() || addr.IsLoopback() || addr.IsMulticast() ||
+		addr == netip.AddrFrom4([4]byte{255, 255, 255, 255}) || addr.IsLinkLocalUnicast() {
+		return netip.Addr{}, fmt.Errorf("%w: %q", ErrICELocalIP, value)
+	}
+	return addr, nil
 }
 
 // CheckLocalIP returns nil when addr is unset or ICE can gather on it: an
