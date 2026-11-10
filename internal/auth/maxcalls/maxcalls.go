@@ -61,6 +61,8 @@ var (
 	ErrNoEndpoint       = errors.New("maxcalls: the join answered no endpoint")
 	ErrInvalidEndpoint  = errors.New("maxcalls: the join endpoint is not a wss URL")
 	ErrNoUserID         = errors.New("maxcalls: no user id in the login or the join")
+	// ai-generated: this error.
+	ErrBadUserID = errors.New("maxcalls: a user id is neither a number nor a decimal string")
 )
 
 // APIError is an answer of the calls API that names an error.
@@ -109,7 +111,7 @@ func (p Provider) Issue(ctx context.Context, cfg auth.Config) (auth.Credentials,
 		if err != nil {
 			return auth.Credentials{}, err
 		}
-		sessionKey, uid = session.SessionKey, session.UID
+		sessionKey, uid = session.SessionKey, int64(session.UID) // ai-generated: the int64 conversion.
 	}
 	join, err := p.joinByLink(ctx, client, sessionKey, hash)
 	if err != nil {
@@ -140,9 +142,38 @@ func (p Provider) Issue(ctx context.Context, cfg auth.Config) (auth.Credentials,
 }
 
 // session is what auth.anonymLogin answers.
+//
+// ai-generated: the UID field's type (flexInt64, was int64).
 type session struct {
-	UID        int64  `json:"uid"`
-	SessionKey string `json:"session_key"`
+	UID        flexInt64 `json:"uid"`
+	SessionKey string    `json:"session_key"`
+}
+
+// flexInt64 is an id the calls API sends as a JSON number or, as
+// auth.anonymLogin does, as a decimal number in quotes ("uid":"512...").
+//
+// ai-generated: this type.
+type flexInt64 int64
+
+// UnmarshalJSON takes a number, or else a quoted decimal string.
+//
+// ai-generated: this method.
+func (n *flexInt64) UnmarshalJSON(data []byte) error {
+	var number int64
+	if err := json.Unmarshal(data, &number); err == nil {
+		*n = flexInt64(number)
+		return nil
+	}
+	var text string
+	if err := json.Unmarshal(data, &text); err != nil {
+		return ErrBadUserID
+	}
+	number, err := strconv.ParseInt(text, 10, 64)
+	if err != nil {
+		return ErrBadUserID
+	}
+	*n = flexInt64(number)
+	return nil
 }
 
 // joinAnswer is what vchat.joinConversationByLink answers.
