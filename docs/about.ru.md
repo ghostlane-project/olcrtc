@@ -224,6 +224,7 @@ go install github.com/magefile/mage@latest
 
 mage build
 mage cross
+mage crossFor -platforms=linux/amd64,linux/arm64
 mage test
 mage lint
 mage mobile
