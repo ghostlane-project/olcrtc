@@ -48,6 +48,7 @@ full list.
 
 | Version | Commit | Date | Ships in |
 |---|---|---|---|
+| v0.15.1 | `42dd44d2` | 2026-11-19 | the servers of the ProofKit network, build `v0.15.1` (VK Calls: a signaling socket silent for 30 s is ended and the call rejoined, #80); the Rust client carries the same fix |
 | v0.15.0 | `2d4266af` | 2026-11-09 | the servers of the ProofKit network, build `v0.15.0` (`net.ice_local_ip`: the address ICE gathers on: host candidates and the bases of the UDP reflexive and relay ones; TCP and TLS TURN are dialed by the routing table; the key bounds the number of TURN allocations) |
 | v0.14.0 | `0955ba7f` | 2026-11-04 | the servers of the ProofKit network, build `v0.14.0` |
 | v0.13.0 | `5b1e6172` | 2026-10-29 | the servers of the ProofKit network, build `v0.13.0` |
