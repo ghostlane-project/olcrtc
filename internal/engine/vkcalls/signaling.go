@@ -98,6 +98,8 @@ type signalingClient struct {
 	sequence int64
 	stamp    int64
 	self     string
+	// silence: how long readLoop waits for any frame (signalingSilence).
+	silence time.Duration
 
 	notifications chan notification
 	closed        chan struct{}
@@ -107,6 +109,14 @@ type signalingClient struct {
 // dialSignaling opens the signaling socket. The endpoint comes from the auth
 // provider's join response and already carries the token and userId query.
 func dialSignaling(ctx context.Context, endpoint string, resolver protect.Lookup) (*signalingClient, error) {
+	return dialSignalingWithin(ctx, endpoint, resolver, signalingSilence)
+}
+
+// dialSignalingWithin is dialSignaling with the read silence given (tests
+// shorten it).
+func dialSignalingWithin(
+	ctx context.Context, endpoint string, resolver protect.Lookup, silence time.Duration,
+) (*signalingClient, error) {
 	target, err := signalingURL(endpoint)
 	if err != nil {
 		return nil, err
@@ -135,6 +145,7 @@ func dialSignaling(ctx context.Context, endpoint string, resolver protect.Lookup
 	client := &signalingClient{
 		conn:          conn,
 		self:          selfParticipant(endpoint),
+		silence:       silence,
 		notifications: make(chan notification, 16),
 		closed:        make(chan struct{}),
 	}
@@ -187,7 +198,7 @@ func (c *signalingClient) Closed() <-chan struct{} { return c.closed }
 // whose peer vanished without a FIN reads forever: the media stays up, the
 // server never hears of a newcomer, and the room serves nobody while its
 // link still reads up (both FI exits, 8-9 days, 2026-11-19).
-var signalingSilence = 30 * time.Second
+const signalingSilence = 30 * time.Second
 
 // readLoop is the socket's only reader. A read that sees nothing for
 // signalingSilence ends the socket, so Closed fires and the session's rejoin
@@ -195,7 +206,7 @@ var signalingSilence = 30 * time.Second
 func (c *signalingClient) readLoop() {
 	defer c.shutdown()
 	for {
-		if err := c.conn.SetReadDeadline(time.Now().Add(signalingSilence)); err != nil {
+		if err := c.conn.SetReadDeadline(time.Now().Add(c.silence)); err != nil {
 			return
 		}
 		messageType, data, err := c.conn.ReadMessage()

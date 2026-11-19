@@ -437,10 +437,9 @@ func TestRecruitFlipsFreshRoom(t *testing.T) {
 // nothing (no ping, no frame) is ended after signalingSilence, so Closed
 // fires and the session rejoins instead of staying deaf to newcomers.
 func TestSignalingSilenceClosesTheSocket(t *testing.T) {
-	old := signalingSilence
-	signalingSilence = 300 * time.Millisecond
-	defer func() { signalingSilence = old }()
-
+	if signalingSilence != 30*time.Second {
+		t.Fatalf("signalingSilence = %v, want 30s (six of VK's 5 s pings)", signalingSilence)
+	}
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	hold := make(chan struct{})
 	defer close(hold)
@@ -454,7 +453,7 @@ func TestSignalingSilenceClosesTheSocket(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := dialSignaling(context.Background(), "ws"+server.URL[4:]+"?token=t&userId=42", nil)
+	client, err := dialSignalingWithin(context.Background(), "ws"+server.URL[4:]+"?token=t&userId=42", nil, 300*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -468,10 +467,6 @@ func TestSignalingSilenceClosesTheSocket(t *testing.T) {
 
 // TestSignalingPingsKeepTheSocket: pings inside the deadline keep it open.
 func TestSignalingPingsKeepTheSocket(t *testing.T) {
-	old := signalingSilence
-	signalingSilence = 400 * time.Millisecond
-	defer func() { signalingSilence = old }()
-
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	hold := make(chan struct{})
 	defer close(hold)
@@ -503,7 +498,7 @@ func TestSignalingPingsKeepTheSocket(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := dialSignaling(context.Background(), "ws"+server.URL[4:]+"?token=t&userId=42", nil)
+	client, err := dialSignalingWithin(context.Background(), "ws"+server.URL[4:]+"?token=t&userId=42", nil, 400*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
 	}
