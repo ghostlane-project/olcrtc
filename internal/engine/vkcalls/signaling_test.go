@@ -432,3 +432,80 @@ func TestRecruitFlipsFreshRoom(t *testing.T) {
 		t.Fatalf("connections=%d, want the session plus two recruits", len(conns))
 	}
 }
+
+// TestSignalingSilenceClosesTheSocket: a socket that stays up but says
+// nothing (no ping, no frame) is ended after signalingSilence, so Closed
+// fires and the session rejoins instead of staying deaf to newcomers.
+func TestSignalingSilenceClosesTheSocket(t *testing.T) {
+	if signalingSilence != 30*time.Second {
+		t.Fatalf("signalingSilence = %v, want 30s (six of VK's 5 s pings)", signalingSilence)
+	}
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	hold := make(chan struct{})
+	defer close(hold)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		<-hold // open, silent, never closed by this side
+	}))
+	defer server.Close()
+
+	client, err := dialSignalingWithin(context.Background(), "ws"+server.URL[4:]+"?token=t&userId=42", nil, 300*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.close()
+	select {
+	case <-client.Closed():
+	case <-time.After(5 * time.Second):
+		t.Fatal("a silent signaling socket was not closed")
+	}
+}
+
+// TestSignalingPingsKeepTheSocket: pings inside the deadline keep it open.
+func TestSignalingPingsKeepTheSocket(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	hold := make(chan struct{})
+	defer close(hold)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		go func() {
+			for {
+				if _, _, err := conn.ReadMessage(); err != nil {
+					return
+				}
+			}
+		}()
+		tick := time.NewTicker(100 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			select {
+			case <-hold:
+				return
+			case <-tick.C:
+				if conn.WriteMessage(websocket.TextMessage, []byte("ping")) != nil {
+					return
+				}
+			}
+		}
+	}))
+	defer server.Close()
+
+	client, err := dialSignalingWithin(context.Background(), "ws"+server.URL[4:]+"?token=t&userId=42", nil, 400*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.close()
+	select {
+	case <-client.Closed():
+		t.Fatal("a pinged signaling socket was closed")
+	case <-time.After(1500 * time.Millisecond):
+	}
+}
