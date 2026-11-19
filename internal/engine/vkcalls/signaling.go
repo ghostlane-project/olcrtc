@@ -181,10 +181,23 @@ func (c *signalingClient) Notifications() <-chan notification { return c.notific
 // Closed is closed once the socket is gone.
 func (c *signalingClient) Closed() <-chan struct{} { return c.closed }
 
-// readLoop is the socket's only reader.
+// signalingSilence is how long the socket may stay quiet before it is taken
+// for dead. VK's signaling sends a text "ping" every 5 s (measured live,
+// 2026-11-19), so six missed pings is no lull. Without a deadline a socket
+// whose peer vanished without a FIN reads forever: the media stays up, the
+// server never hears of a newcomer, and the room serves nobody while its
+// link still reads up (both FI exits, 8-9 days, 2026-11-19).
+var signalingSilence = 30 * time.Second
+
+// readLoop is the socket's only reader. A read that sees nothing for
+// signalingSilence ends the socket, so Closed fires and the session's rejoin
+// takes over.
 func (c *signalingClient) readLoop() {
 	defer c.shutdown()
 	for {
+		if err := c.conn.SetReadDeadline(time.Now().Add(signalingSilence)); err != nil {
+			return
+		}
 		messageType, data, err := c.conn.ReadMessage()
 		if err != nil {
 			return
