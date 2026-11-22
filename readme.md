@@ -19,6 +19,13 @@
   <a href="https://opencollective.com/ghostlane"><img src="https://img.shields.io/badge/funding-Open_Collective-b5f23d?labelColor=07080d&logo=opencollective&logoColor=white" alt="Funding: Open Collective"></a>
 </p>
 
+<p align="center">Thanks to these VPN providers, who help test olcRTC.</p>
+
+<p align="center">
+  <a href="https://proofkit.org"><img src="docs/asset/partners/proofkit-testing-partner.svg" width="138" align="middle" alt="Testing partner: proofkit.org"></a>&nbsp;
+  <a href="https://xrayreality.org"><img src="docs/asset/partners/xrayreality-testing-partner.svg" width="159" align="middle" alt="Testing partner: xrayreality.org"></a>
+</p>
+
 <p align="center"><a href="readme.ru.md">RU</a> / <b>EN</b></p>
 
 
